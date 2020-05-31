@@ -10,6 +10,8 @@ class Memory(object):
         self.size = 0
         self.capacity = capacity
 
+        # TODO: al posto di 'buffer' mettere un campo per actions, rewards, states, n_states, terminals
+
     def append(self, observation):
         if len(self.buffer) == self.capacity:
             raise ValueError(f"Maximum capacity ({self.capacity}) reached.")

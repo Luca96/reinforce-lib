@@ -4,7 +4,7 @@ import gym
 import tensorflow_probability as tfp
 
 
-from rl.agents import Agent
+from rl.agents import *
 
 
 def gaussian_policy(action_shape):
@@ -23,26 +23,39 @@ def main():
 
 def gym_test():
     env = gym.make('CartPole-v0')
-    agent = Agent(state_shape=env.observation_space.shape, action_shape=(1,), batch_size=1)
+    agent = CategoricalReinforceAgent(state_shape=(4,), action_shape=(1,), batch_size=16,
+                                      learning_rate=0.001)
+    rewards = []
 
-    for i_episode in range(20):
+    # TODO: take environments as agent's argument (when built) so that efficient training loops can be made
+    # https://www.tensorflow.org/guide/function#python_or_tensor_args
+    # https://keras.io/examples/rl/actor_critic_cartpole/
+    for i_episode in range(200):
         observation = env.reset()
+        episode_reward = 0.0
 
         for t in range(100):
             env.render()
-            print(observation)
-
-            observation = np.expand_dims(observation, axis=0)
-            action = agent.act(observation)[0][0]
-            action = action.numpy().astype(np.int)
-            print(action)
+            action = agent.act(observation)
 
             observation, reward, done, info = env.step(action)
+            episode_reward += reward
+
+            agent.observe(next_state=observation, reward=reward, terminal=done)
+
             if done:
-                print("Episode finished after {} timesteps".format(t + 1))
+                print(f"Episode finished after {(t + 1)} timesteps with reward {round(episode_reward, 2)}")
+                rewards.append(episode_reward)
                 break
 
     env.close()
+
+    import matplotlib.pyplot as plt
+    plt.plot(rewards)
+    plt.plot(agent.statistics['losses'])
+    plt.show()
+
+    agent.close()
 
 
 if __name__ == '__main__':
