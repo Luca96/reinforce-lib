@@ -16,10 +16,8 @@ def tf_normalize(x):
     return (x - tf.math.reduce_mean(x)) / tf.math.reduce_std(x)
 
 
-def generalized_advantage_estimation(rewards, values, gamma: float, lambda_: float):
+def generalized_advantage_estimation(rewards, values, gamma: float, lambda_: float, normalize=True):
     # d_t = r_t + gamma * V_t+1 - V_t
-    # print('rewards', type(rewards[:-1]), rewards[:-1])
-    # print('values', type(values[:-1]), values[:-1])
     deltas = rewards[:-1] + tf.math.multiply(values[1:], gamma) - values[:-1]
 
     # Compute discount factor for each timestep, i.e. (gamma * lambda)^t
@@ -28,7 +26,11 @@ def generalized_advantage_estimation(rewards, values, gamma: float, lambda_: flo
 
     # Compute normalized advantages
     advantages = tf.math.cumsum(discounts * deltas)
-    return tf_normalize(advantages)
+
+    if normalize:
+        return tf_normalize(advantages)
+
+    return advantages
 
 
 def rewards_to_go(rewards, gamma: float):

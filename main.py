@@ -1,4 +1,5 @@
 import rl
+import math
 import numpy as np
 import gym
 import tensorflow_probability as tfp
@@ -59,7 +60,7 @@ def gym_test():
     agent.close()
 
 
-def plot_statistics(stats):
+def plot_statistics(stats: dict):
     plt.subplot(131)
     plt.plot(stats['value_losses'], color='y')
     plt.title('Value Loss')
@@ -75,15 +76,44 @@ def plot_statistics(stats):
     plt.show()
 
 
+def plot_statistics2(stats: dict, colormap='Pastel1'):
+    num_plots = len(stats.keys())
+    cmap = plt.get_cmap(name=colormap)
+
+    if math.sqrt(num_plots) == float(math.isqrt(num_plots)):
+        rows = math.isqrt(num_plots)
+        cols = rows
+    else:
+        rows = 1
+        cols = num_plots
+
+    for k, (key, value) in enumerate(stats.items()):
+        plt.subplot(rows, cols, k + 1)
+        plt.plot(value, color=cmap(k + 1))
+        plt.title(key)
+
+    plt.show()
+
+
 def reinforce_test(gym_env='CartPole-v0'):
     env = gym.make('CartPole-v0')
     agent = ReinforceAgent()
 
-    agent.learn(env, episodes=400, timesteps=100, subsampling_fraction=1.0)
+    agent.learn(env, episodes=400, timesteps=100)
     plot_statistics(agent.stats)
+
+
+def ppo_test(gym_env='CartPole-v0'):
+    env = gym.make('CartPole-v0')
+    agent = PPOAgent(policy_lr=3e-3, value_lr=3e-4, clip_ratio=0.1)
+
+    agent.learn(env, episodes=10, timesteps=100, subsampling_fraction=0.25,
+                render=False, save=False)
+    plot_statistics2(agent.stats)
 
 
 if __name__ == '__main__':
     # main()
     # gym_test()
-    reinforce_test()
+    # reinforce_test()
+    ppo_test()
