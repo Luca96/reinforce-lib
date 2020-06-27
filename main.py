@@ -2,9 +2,11 @@ import rl
 import numpy as np
 import gym
 import tensorflow_probability as tfp
-
+import matplotlib.pyplot as plt
 
 from rl.agents import *
+from rl.agents.reinforce import ReinforceAgent
+from rl.agents.ppo import PPOAgent
 
 
 def gaussian_policy(action_shape):
@@ -23,8 +25,7 @@ def main():
 
 def gym_test():
     env = gym.make('CartPole-v0')
-    agent = CategoricalReinforceAgent(state_shape=(4,), action_shape=(1,), batch_size=16,
-                                      learning_rate=0.001)
+    agent = CategoricalReinforceAgent(state_shape=(4,), action_shape=(1,), batch_size=16)
     rewards = []
 
     # TODO: take environments as agent's argument (when built) so that efficient training loops can be made
@@ -36,7 +37,7 @@ def gym_test():
 
         for t in range(100):
             env.render()
-            action = agent.act(observation)
+            action = agent.act(observation, training=True)
 
             observation, reward, done, info = env.step(action)
             episode_reward += reward
@@ -58,6 +59,31 @@ def gym_test():
     agent.close()
 
 
+def plot_statistics(stats):
+    plt.subplot(131)
+    plt.plot(stats['value_losses'], color='y')
+    plt.title('Value Loss')
+
+    plt.subplot(132)
+    plt.plot(stats['policy_losses'], color='b')
+    plt.title('Policy Loss')
+
+    plt.subplot(133)
+    plt.plot(stats['episode_rewards'], color='g')
+    plt.title('Episode Reward')
+
+    plt.show()
+
+
+def reinforce_test(gym_env='CartPole-v0'):
+    env = gym.make('CartPole-v0')
+    agent = ReinforceAgent()
+
+    agent.learn(env, episodes=400, timesteps=100, subsampling_fraction=1.0)
+    plot_statistics(agent.stats)
+
+
 if __name__ == '__main__':
     # main()
-    gym_test()
+    # gym_test()
+    reinforce_test()

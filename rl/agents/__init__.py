@@ -51,8 +51,8 @@ class Agent(object):
         self.episodes = 0
         self.statistics = dict(histories=[], losses=[])
 
-    def act(self, state):
-        action = self.policy_network(state, training=True)[0]
+    def act(self, state, training=False):
+        action = self.policy_network(state, training=training)[0]
         self.timestep += 1
         self.current['state'] = state
         self.current['action'] = action

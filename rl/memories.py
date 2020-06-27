@@ -3,6 +3,7 @@ import numpy as np
 from functools import partial
 
 
+# TODO: use numpy instead of python's list, it's faster!
 class Memory(object):
     def __init__(self, capacity: int):
         assert capacity > 0
