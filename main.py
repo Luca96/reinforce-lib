@@ -5,6 +5,7 @@ import gym
 import tensorflow_probability as tfp
 import matplotlib.pyplot as plt
 
+from rl.agents import utils
 from rl.agents import *
 from rl.agents.reinforce import ReinforceAgent
 from rl.agents.ppo import PPOAgent
@@ -76,25 +77,6 @@ def plot_statistics(stats: dict):
     plt.show()
 
 
-def plot_statistics2(stats: dict, colormap='Pastel1'):
-    num_plots = len(stats.keys())
-    cmap = plt.get_cmap(name=colormap)
-
-    if math.sqrt(num_plots) == float(math.isqrt(num_plots)):
-        rows = math.isqrt(num_plots)
-        cols = rows
-    else:
-        rows = 1
-        cols = num_plots
-
-    for k, (key, value) in enumerate(stats.items()):
-        plt.subplot(rows, cols, k + 1)
-        plt.plot(value, color=cmap(k + 1))
-        plt.title(key)
-
-    plt.show()
-
-
 def reinforce_test(gym_env='CartPole-v0'):
     env = gym.make('CartPole-v0')
     agent = ReinforceAgent()
@@ -103,17 +85,37 @@ def reinforce_test(gym_env='CartPole-v0'):
     plot_statistics(agent.stats)
 
 
-def ppo_test(gym_env='CartPole-v0'):
+def ppo_cartpole_test():
     env = gym.make('CartPole-v0')
-    agent = PPOAgent(policy_lr=3e-3, value_lr=3e-4, clip_ratio=0.1)
+    utils.print_info(env)
+    agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.20,
+                     lambda_=0.95, entropy_regularization=0.0, name='ppo-cartPole',
+                     optimization_steps=(10, 10), early_stop=False,
+                     use_log=True, use_summary=True)
 
-    agent.learn(env, episodes=10, timesteps=100, subsampling_fraction=0.25,
-                render=False, save=False)
-    plot_statistics2(agent.stats)
+    agent.learn(episodes=200, timesteps=200, batch_size=20,
+                render_every=5, save_every=-1)
+
+    # agent.plot_statistics()
+
+
+def ppo_mountaincar_test():
+    env = gym.make('MountainCarContinuous-v0')
+    utils.print_info(env)
+    agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.20,
+                     lambda_=0.95, entropy_regularization=0.0, name='ppo-mountainCarContinuous',
+                     optimization_steps=(10, 10), early_stop=False,
+                     use_log=True, use_summary=True)
+
+    agent.learn(episodes=200, timesteps=200, batch_size=20,
+                render_every=5, save_every=10)
 
 
 if __name__ == '__main__':
     # main()
     # gym_test()
     # reinforce_test()
-    ppo_test()
+    # ppo_cartpole_test()
+    # env = gym.make('MountainCarContinuous-v0')
+    utils.print_info('MountainCarContinuous-v0')
+    ppo_mountaincar_test()

@@ -1,6 +1,7 @@
 import gym
 import matplotlib.pyplot as plt
-
+import scipy.signal
+import tensorflow_probability as tfp
 
 from rl.agents import CategoricalReinforceAgent
 
@@ -69,6 +70,50 @@ def test_gym_env(num_episodes: int, max_timesteps: int, env='CartPole-v0'):
     plt.show()
 
 
+def discount_cumsum(x, discount: float):
+    return scipy.signal.lfilter([1.0], [1.0, float(-discount)], x[::-1], axis=0)[::-1]
+
+
+def test_distribution():
+    distribution = tfp.distributions.Categorical(probs=[0.7, 0.3])
+    new_dist = tfp.distributions.Categorical(probs=[0.6, 0.4])
+    print(distribution)
+
+    e1 = distribution.sample(5)
+    e2 = distribution.sample(5)
+
+    print(e1, distribution.log_prob(e1), new_dist.log_prob(e1))
+    print(e2, distribution.log_prob(e2))
+    print(distribution.log_prob([0, 1]))
+    print(distribution.log_prob([1, 0]))
+
+
+def test_categorical(probs, action_shape=1):
+    categorical = tfp.distributions.Categorical(probs=probs)
+    # multinomial = tfp.distributions.Multinomial(probs=[0.1, 0.3, 0.6], total_count=action_shape)
+    print('categorical-1:', categorical.sample(1))
+    print(f'categorical-{action_shape}:', categorical.sample(sample_shape=action_shape))
+
+
+def test_independent_categorical(logits: list, action_shape=None):
+    ind = tfp.distributions.Independent(
+        distribution=tfp.distributions.Categorical(logits=logits),
+        reinterpreted_batch_ndims=1)
+
+    print(ind.sample())
+
+
+def test_normal(mean):
+    normal = tfp.distributions.Normal(loc=mean, scale=mean)
+    print(normal.sample(5))
+
+
+def test_beta(alpha, beta):
+    beta = tfp.distributions.Beta(alpha, beta)
+    # samples in the range [0, 1]
+    print(beta.sample(5))
+
+
 if __name__ == '__main__':
     # Memories:
     # test_recent_memory()
@@ -79,5 +124,13 @@ if __name__ == '__main__':
     # test_generalized_advantage_estimation(gamma=0.99, lambda_=1.0)
 
     # Environments:
-    test_gym_env(num_episodes=200 * 5, max_timesteps=100, env='CartPole-v0')
+    # test_gym_env(num_episodes=200 * 5, max_timesteps=100, env='CartPole-v0')
+    # print(discount_cumsum([1, 2, 3, 4], 1))
+
+    # Distributions:
+    # test_distribution()
+    # test_categorical(action_shape=4, probs=[0.1, 0.3, 0.1, 0.5])
+    # test_independent_categorical(logits=[[1, 2], [3, 4]])
+    # test_normal(mean=[1.0, 2.5])
+    # test_beta(alpha=[1, 1], beta=2)
     pass
