@@ -1,4 +1,5 @@
 import os
+import scipy.signal
 import numpy as np
 import tensorflow as tf
 
@@ -13,7 +14,31 @@ def to_tensor(x, expand_axis=0):
 
 def tf_normalize(x):
     """Normalizes some tensor x to 0-mean 1-stddev"""
+    # return (x - tf.math.reduce_mean(x)) / (tf.math.reduce_std(x) + np.finfo(np.float32).eps)
     return (x - tf.math.reduce_mean(x)) / tf.math.reduce_std(x)
+
+
+def np_normalize(x, epsilon=np.finfo(np.float32).eps):
+    return (x - np.mean(x)) / (np.std(x) + epsilon)
+
+
+def discount_cumsum(x, discount: float):
+    """Source: https://github.com/openai/spinningup/blob/master/spinup/algos/tf1/ppo/core.py#L45"""
+    return scipy.signal.lfilter([1.0], [1.0, float(-discount)], x[::-1], axis=0)[::-1]
+
+
+def gae(rewards, values, gamma: float, lambda_: float, normalize=True):
+    deltas = rewards[:-1] + tf.math.multiply(values[1:], gamma) - values[:-1]
+    advantages = discount_cumsum(deltas, discount=gamma * lambda_)
+
+    if normalize:
+        advantages = tf_normalize(advantages)
+
+    return tf.cast(advantages, dtype=tf.float32)
+
+
+def returns(rewards, gamma: float):
+    return discount_cumsum(rewards, discount=gamma)[:-1]
 
 
 def generalized_advantage_estimation(rewards, values, gamma: float, lambda_: float, normalize=True):
@@ -38,7 +63,7 @@ def rewards_to_go(rewards, gamma: float):
     discounts = np.cumprod([1.0] + [gamma] * (len(rewards) - 1))
 
     # Discounted cumulative sum of rewards:
-    return tf.math.cumsum(discounts * np.cumsum(rewards))
+    return tf.math.cumsum(discounts * np.cumsum(rewards))[:-1]
 
 
 def data_to_batches(tensors: Union[List, Tuple], batch_size: int, seed=None):
