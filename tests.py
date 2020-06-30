@@ -133,4 +133,6 @@ if __name__ == '__main__':
     # test_independent_categorical(logits=[[1, 2], [3, 4]])
     # test_normal(mean=[1.0, 2.5])
     # test_beta(alpha=[1, 1], beta=2)
+    cat = tfp.distributions.Categorical(logits=[1, 2, 3, 4])
+    print(cat.log_prob([[1], [2], [3]]))
     pass

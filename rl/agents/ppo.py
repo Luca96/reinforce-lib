@@ -22,7 +22,8 @@ class PPOAgent:
     # TODO: use Beta distribution for bounded continuous actions
     # TODO: 'value_loss' a parameter that selects the loss (either 'mse' or 'huber') for the value network
     # TODO: try 'mixture' of Beta/Gaussian distribution
-    def __init__(self, environment: gym.Env, policy_lr=3e-4, value_lr=1e-4, optimization_steps=(10, 10), clip_ratio=0.2, load=False,
+    def __init__(self, environment: gym.Env, policy_lr=3e-4, value_lr=1e-4, optimization_steps=(10, 10), clip_ratio=0.2,
+                 load=False,
                  gamma=0.99, lambda_=0.95, target_kl=0.01, entropy_regularization=0.0, early_stop=False, seed=None,
                  weights_dir='weights', name='ppo-agent', use_log=False, use_summary=False):
         self.memory = None
@@ -42,10 +43,20 @@ class PPOAgent:
 
         if isinstance(self.env.action_space, gym.spaces.Box):
             self.num_actions = self.env.action_space.shape[0]
-            self.distribution_type = 'beta' if self.env.action_space.is_bounded() else 'gaussian'
+
+            if self.env.action_space.is_bounded():
+                self.distribution_type = 'beta'
+                self.action_range = self.env.action_space.high - self.env.action_space.low
+                self.convert_action = lambda a: a * self.action_range + self.env.action_space.low
+
+                assert self.action_range == abs(self.env.action_space.low - self.env.action_space.high)
+            else:
+                self.distribution_type = 'gaussian'
+                self.convert_action = lambda a: a
         else:
             self.num_actions = 1
             self.distribution_type = 'categorical'
+            self.convert_action = lambda a: a
 
         print('state_shape:', self.state_shape)
         print('action_shape:', self.num_actions)
@@ -72,6 +83,7 @@ class PPOAgent:
                               value=os.path.join(self.base_path, 'value_net'))
         # Networks
         if load:
+            # TODO: when loading the model save: iteration number (for logs), dynamic parameters (e.g. learning rate) ..
             self.load()
         else:
             self.policy_network = self._policy_network()
@@ -105,7 +117,7 @@ class PPOAgent:
                                       normalize=True)
 
         # Log
-        self.log(returns=returns, advantages=advantages, values=self.memory.values)
+        self.log(returns=returns, advantages=advantages, values=tf.squeeze(self.memory.values))
 
         # Prepare data: (states, returns) and (states, advantages)
         value_batches = utils.data_to_batches(tensors=(self.memory.states, returns), batch_size=batch_size)
@@ -148,10 +160,13 @@ class PPOAgent:
         states, advantages, actions, old_log_probabilities = batch
         new_policy: tfp.distributions.Distribution = self.policy_network(states, training=True)
 
-        new_log_prob = new_policy.log_prob(tf.squeeze(actions))
-        # kl_divergence = new_policy.kl_divergence(other=old_policy)
+        new_log_prob = new_policy.log_prob(actions)
 
+        # TODO: find a better way to compute the KL-divergence
+        # kl_divergence = new_policy.kl_divergence(other=old_policy)
         kl_divergence = np.mean(new_log_prob - old_log_probabilities)
+
+        # Entropy
         entropy = new_policy.entropy()
         entropy_term = self.entropy_strength * entropy
 
@@ -162,7 +177,10 @@ class PPOAgent:
         clipped_ratio = tf.where(advantages > 0, x=(1 + self.epsilon), y=(1 - self.epsilon))
 
         # Log stuff
-        self.log(ratio=ratio, prob=np.exp(new_log_prob), entropy=entropy, kl_divergence=kl_divergence)
+        self.log(ratio=ratio,
+                 prob=tf.exp(new_log_prob),
+                 entropy=entropy,
+                 kl_divergence=kl_divergence)
 
         # Loss = min { ratio * A, clipped_ratio * A } + entropy_term
         loss = -tf.reduce_mean(tf.minimum(ratio * advantages, clipped_ratio * advantages) + entropy_term)
@@ -196,9 +214,12 @@ class PPOAgent:
                 action = policy[0][0].numpy()
                 log_prob = policy.log_prob(action)
                 value = self.value_network(state, training=False)
-                self.log(actions=action)
 
-                next_state, reward, done, _ = env.step(action)
+                # Make action in the right range for the environment
+                converted_action = self.convert_action(action)
+                self.log(actions=converted_action)
+
+                next_state, reward, done, _ = env.step(converted_action)
                 episode_reward += reward
 
                 self.memory.append(state, action, reward, value, log_prob)
@@ -237,7 +258,7 @@ class PPOAgent:
                 step = self.steps[key]
 
                 for i, value in enumerate(values):
-                    tf.summary.scalar(name=key, data=value, step=step + i)
+                    tf.summary.scalar(name=key, data=np.squeeze(value), step=step + i)
 
                 self.steps[key] += len(values)
                 self.stats[key].clear()
@@ -265,13 +286,13 @@ class PPOAgent:
             # Beta
             # for activations choice see chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
             alpha = Dense(units=self.num_actions, activation='softplus')(layer)
-            alpha = Add([alpha, tf.ones_like(alpha)])
+            alpha = Add()([alpha, tf.ones_like(alpha)])
 
             beta = Dense(units=self.num_actions, activation='softplus')(layer)
-            beta = Add([beta, tf.ones_like(beta)])
+            beta = Add()([beta, tf.ones_like(beta)])
 
             return tfp.layers.DistributionLambda(
-                make_distribution_fn=lambda t: tfp.distributions.Beta(t[..., 0], t[..., 1]),
+                make_distribution_fn=lambda t: tfp.distributions.Beta(t[0], t[1]),
                 convert_to_tensor_fn=lambda s: s.sample(self.num_actions))([alpha, beta])
 
         # Gaussian (Normal)
@@ -280,7 +301,7 @@ class PPOAgent:
         sigma = Dense(units=self.num_actions, activation='softplus')(layer)
 
         return tfp.layers.DistributionLambda(
-            make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[..., 0], scale=t[..., 1]),
+            make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[0], scale=t[..., 1]),
             convert_to_tensor_fn=lambda s: s.sample(self.num_actions))([mu, sigma])
 
     def _value_network(self, units=32):
@@ -297,9 +318,10 @@ class PPOAgent:
         self.value_network.save(self.save_path['value'])
 
     def load(self):
+        # TODO: loading bugged with distribution objects!
         print('loading...')
-        self.policy_network = tf.keras.models.load_model(self.save_path['policy'])
-        self.value_network = tf.keras.models.load_model(self.save_path['value'])
+        self.policy_network = tf.keras.models.load_model(self.save_path['policy'], compile=False)
+        self.value_network = tf.keras.models.load_model(self.save_path['value'], compile=False)
 
     def plot_statistics(self, colormap='Set3'):  # Pastel1, Set3, tab20b, tab20c
         """Colormaps: https://matplotlib.org/tutorials/colors/colormaps.html"""
@@ -325,7 +347,7 @@ class PPOMemory:
         self.rewards = np.zeros(shape=capacity + 1, dtype=np.float32)
         self.values = np.zeros(shape=capacity + 1, dtype=np.float32)
         self.actions = np.zeros(shape=(capacity, num_actions), dtype=np.float32)
-        self.log_probabilities = np.zeros(shape=capacity, dtype=np.float32)
+        self.log_probabilities = np.zeros(shape=(capacity, 1), dtype=np.float32)
 
     def append(self, state, action, reward, value, log_prob):
         assert self.index < self.size
@@ -334,8 +356,8 @@ class PPOMemory:
         self.states[i] = tf.squeeze(state)
         self.actions[i] = action
         self.rewards[i] = reward
-        self.values[i] = tf.squeeze(value)
-        self.log_probabilities[i] = tf.squeeze(log_prob)
+        self.values[i] = utils.tf_to_scalar_shape(value)
+        self.log_probabilities[i] = utils.tf_to_scalar_shape(log_prob)
         self.index += 1
 
     def end_trajectory(self, last_value):

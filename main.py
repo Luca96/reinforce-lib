@@ -102,12 +102,12 @@ def ppo_cartpole_test():
 def ppo_mountaincar_test():
     env = gym.make('MountainCarContinuous-v0')
     utils.print_info(env)
-    agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.20,
-                     lambda_=0.95, entropy_regularization=0.0, name='ppo-mountainCarContinuous',
+    agent = PPOAgent(env, policy_lr=3e-4, value_lr=1e-4, clip_ratio=0.20,
+                     lambda_=0.95, entropy_regularization=0.1, name='ppo-mountainCarContinuous',
                      optimization_steps=(10, 10), early_stop=False,
-                     use_log=True, use_summary=True)
+                     use_log=True, load=False, use_summary=True)
 
-    agent.learn(episodes=200, timesteps=200, batch_size=20,
+    agent.learn(episodes=200, timesteps=200, batch_size=32,
                 render_every=5, save_every=10)
 
 
@@ -116,6 +116,4 @@ if __name__ == '__main__':
     # gym_test()
     # reinforce_test()
     # ppo_cartpole_test()
-    # env = gym.make('MountainCarContinuous-v0')
-    utils.print_info('MountainCarContinuous-v0')
     ppo_mountaincar_test()

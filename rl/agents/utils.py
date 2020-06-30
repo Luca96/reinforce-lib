@@ -94,6 +94,14 @@ def print_info(gym_env):
     print('Metadata:', gym_env.metadata)
 
 
+def tf_to_scalar_shape(tensor):
+    return tf.reshape(tensor, shape=[])
+
+
+def assert_shapes(a, b):
+    assert tf.shape(a) == tf.shape(b)
+
+
 # -------------------------------------------------------------------------------------------------
 # -- File Utils
 # -------------------------------------------------------------------------------------------------
