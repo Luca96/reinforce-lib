@@ -1,14 +1,10 @@
-import rl
-import math
-import numpy as np
 import gym
-import tensorflow_probability as tfp
 import matplotlib.pyplot as plt
 
-from rl.agents import utils
+from rl import utils
 from rl.agents import *
 from rl.agents.reinforce import ReinforceAgent
-from rl.agents.ppo import PPOAgent
+from rl.agents.ppo import PPOAgent, PPORnDAgent
 
 
 def gaussian_policy(action_shape):
@@ -94,7 +90,7 @@ def ppo_cartpole_test():
                      use_log=True, use_summary=True)
 
     agent.learn(episodes=200, timesteps=200, batch_size=20,
-                render_every=5, save_every=-1)
+                render_every=5, save_every=False)
 
     # agent.plot_statistics()
 
@@ -102,18 +98,19 @@ def ppo_cartpole_test():
 def ppo_mountaincar_test():
     env = gym.make('MountainCarContinuous-v0')
     utils.print_info(env)
-    agent = PPOAgent(env, policy_lr=3e-4, value_lr=1e-4, clip_ratio=0.20,
-                     lambda_=0.95, entropy_regularization=0.1, name='ppo-mountainCarContinuous',
-                     optimization_steps=(10, 10), early_stop=False,
-                     use_log=True, load=False, use_summary=True)
+    agent = PPORnDAgent(env, policy_lr=3e-4, value_lr=1e-4, clip_ratio=0.20,
+                        lambda_=0.95, entropy_regularization=0.001, name='ppo-mountainCarContinuous',
+                        optimization_steps=(10, 10), early_stop=False,
+                        exploration='rnd', advantage_weights=(2.2, 0.4),
+                        use_log=True, load=False, use_summary=True)
 
-    agent.learn(episodes=200, timesteps=200, batch_size=32,
-                render_every=5, save_every=10)
+    agent.learn(episodes=200, timesteps=1000, batch_size=32,
+                render_every=5, save_every=False)
 
 
 if __name__ == '__main__':
     # main()
     # gym_test()
     # reinforce_test()
-    # ppo_cartpole_test()
+    # ppo_cartpole_test()  # TODO: summary broken
     ppo_mountaincar_test()

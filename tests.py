@@ -1,9 +1,14 @@
 import gym
 import matplotlib.pyplot as plt
 import scipy.signal
+import tensorflow as tf
 import tensorflow_probability as tfp
 
 from rl.agents import CategoricalReinforceAgent
+
+from tensorflow.keras.layers import *
+from tensorflow.keras.models import Model
+from tensorflow.keras import optimizers
 
 
 def test_recent_memory():
@@ -114,6 +119,45 @@ def test_beta(alpha, beta):
     print(beta.sample(5))
 
 
+def test_dual_head_value_network(state_shape=1, units=1):
+    # Network
+    inputs = Input(shape=state_shape, dtype=tf.float32)
+    x = Dense(units, activation='tanh')(inputs)
+    x = Dense(units, activation='relu')(x)
+
+    # Dual value head: intrinsic + extrinsic reward
+    extrinsic_value = Dense(units=1, activation=None, name='extrinsic_head')(x)
+    intrinsic_value = Dense(units=1, activation=None, name='intrinsic_head')(x)
+
+    model = Model(inputs, outputs=[extrinsic_value, intrinsic_value])
+    print('output_shape:', model.output_shape)
+    print(model.summary())
+
+    # Training (one gradient step)
+    data = tf.constant([[1.0], [2.0], [3.0]])
+    opt = optimizers.Adam()
+
+    with tf.GradientTape() as tape:
+        ext_values, int_values = model(data, training=True)
+        print('values:')
+        print(ext_values)
+        print(int_values)
+
+        ext_loss = -tf.square(ext_values)
+        int_loss = -tf.square(int_values)
+        losses = tf.reduce_mean(ext_loss * tf.constant(0.5) + int_loss * tf.constant(0.5))
+        print('losses:')
+        print(ext_loss)
+        print(int_loss)
+        print(losses)
+
+    # grads = tape.gradient(tf.reduce_mean(losses), model.trainable_variables)
+    grads = tape.gradient(losses, model.trainable_variables)
+    print('gradients:\n', grads)
+    info = opt.apply_gradients(zip(grads, model.trainable_variables))
+    print('info:\n', info)
+
+
 if __name__ == '__main__':
     # Memories:
     # test_recent_memory()
@@ -133,6 +177,8 @@ if __name__ == '__main__':
     # test_independent_categorical(logits=[[1, 2], [3, 4]])
     # test_normal(mean=[1.0, 2.5])
     # test_beta(alpha=[1, 1], beta=2)
-    cat = tfp.distributions.Categorical(logits=[1, 2, 3, 4])
-    print(cat.log_prob([[1], [2], [3]]))
+    # cat = tfp.distributions.Categorical(logits=[1, 2, 3, 4])
+    # print(cat.log_prob([[1], [2], [3]]))
+
+    test_dual_head_value_network()
     pass
