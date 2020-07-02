@@ -38,8 +38,8 @@ def gae(rewards, values, gamma: float, lambda_: float, normalize=False):
     return tf.cast(advantages, dtype=tf.float32)
 
 
-def rewards_to_go(rewards, gamma: float, normalize=False):
-    returns = discount_cumsum(rewards, discount=gamma)[:-1]
+def rewards_to_go(rewards, discount: float, normalize=False):
+    returns = discount_cumsum(rewards, discount=discount)[:-1]
 
     if normalize:
         returns = np_normalize(returns)
@@ -64,11 +64,15 @@ def generalized_advantage_estimation(rewards, values, gamma: float, lambda_: flo
     return advantages
 
 
-def data_to_batches(tensors: Union[List, Tuple], batch_size: int, seed=None):
+def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle=True, seed=None):
     """Transform some tensors data into a dataset of mini-batches"""
     dataset = tf.data.Dataset.from_tensor_slices(tensors)
-    dataset = dataset.shuffle(buffer_size=batch_size * 4, seed=seed)
-    return dataset.batch(batch_size)
+    dataset = dataset.batch(batch_size)
+
+    if shuffle:
+        return dataset.shuffle(buffer_size=1, seed=seed)
+
+    return dataset
 
 
 def print_info(gym_env):
