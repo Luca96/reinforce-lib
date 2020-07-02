@@ -21,13 +21,14 @@ from tensorflow.keras.models import Model
 
 class PPOAgent:
     # TODO: same 'optimization steps' for both policy and value functions?
-    # TODO: use Beta distribution for bounded continuous actions
     # TODO: 'value_loss' a parameter that selects the loss (either 'mse' or 'huber') for the value network
     # TODO: try 'mixture' of Beta/Gaussian distribution
+    # TODO: fix random seed issue
+    # TODO: use KL-Divergence to stop policy optimization early?
     def __init__(self, environment: gym.Env, policy_lr=3e-4, value_lr=1e-4, optimization_steps=(10, 10), clip_ratio=0.2,
-                 load=False,
-                 gamma=0.99, lambda_=0.95, target_kl=0.01, entropy_regularization=0.0, early_stop=False, seed=None,
-                 weights_dir='weights', name='ppo-agent', use_log=False, use_summary=False):
+                 gamma=0.99, lambda_=0.95, target_kl=0.01, entropy_regularization=0.0, seed=None, early_stop=False,
+                 load=False, weights_dir='weights', name='ppo-agent', use_log=False, use_summary=False,
+                 exploration=None, advantage_weights=(0.5, 0.5)):
         self.memory = None
         self.gamma = gamma
         self.lambda_ = lambda_
@@ -37,15 +38,17 @@ class PPOAgent:
         self.early_stop = early_stop
         self.env = environment
 
-        # State/action space
+        # State space
         if isinstance(self.env.observation_space, gym.spaces.Box):
             self.state_shape = self.env.observation_space.shape
         else:
             self.state_shape = (self.env.observation_space.n,)
 
+        # Action space
         if isinstance(self.env.action_space, gym.spaces.Box):
             self.num_actions = self.env.action_space.shape[0]
 
+            # continuous:
             if self.env.action_space.is_bounded():
                 self.distribution_type = 'beta'
                 self.action_range = self.env.action_space.high - self.env.action_space.low
@@ -56,6 +59,7 @@ class PPOAgent:
                 self.distribution_type = 'gaussian'
                 self.convert_action = lambda a: a
         else:
+            # discrete:
             self.num_actions = 1
             self.distribution_type = 'categorical'
             self.convert_action = lambda a: a
@@ -96,73 +100,107 @@ class PPOAgent:
         self.value_optimizer = optimizers.Adam(learning_rate=value_lr)
         self.optimization_steps = dict(policy=optimization_steps[0], value=optimization_steps[1])
 
-        # Training Statistics
-        self.stats = dict(policy_loss=[], value_loss=[], episode_rewards=[], ratio=[],
-                          returns=[], values=[], advantages=[], prob=[], actions=[],
-                          entropy=[], kl_divergence=[], rewards=[])
+        # Exploration
+        if exploration == 'rnd':
+            self.exploration = RandomNetworkDistillation(state_shape=self.state_shape, reward_shape=1,
+                                                         batch_size=32, optimization_steps=1, num_layers=1)
+            self.adv_weights = (tf.constant(advantage_weights[0]), tf.constant(advantage_weights[1]))
+            self.value_coeff = (tf.constant(0.5), tf.constant(0.5))
+        else:
+            self.exploration = NoExploration()
+            self.adv_weights = (tf.constant(1.0), tf.constant(0.0))
+            self.value_coeff = (tf.constant(1.0), tf.constant(0.0))
 
-        self.steps = dict(policy_loss=0, value_loss=0, episode_rewards=0, ratio=0,
-                          returns=0, values=0, advantages=0, prob=0, actions=0,
-                          entropy=0, kl_divergence=0, rewards=0)
+        # TODO: made a 'statistics class'
+        # Statistics: (value_list, step_num)
+        self.stats = dict(loss_policy=[[], 0], loss_value=[[], 0], episode_rewards=[[], 0], ratio=[[], 0],
+                          advantages=[[], 0], prob=[[], 0], actions=[[], 0],
+                          entropy=[[], 0], kl_divergence=[[], 0], rewards_extrinsic=[[], 0],
+                          rewards_intrinsic=[[], 0], values_intrinsic=[[], 0], values_extrinsic=[[], 0],
+                          returns_extrinsic=[[], 0], returns_intrinsic=[[], 0],
+                          advantages_intrinsic=[[], 0], advantages_extrinsic=[[], 0],
+                          gradients_norm_policy=[[], 0], gradients_norm_value=[[], 0])
 
     def act(self, state):
         action = self.policy_network(state, training=False)
         return action[0].numpy()
 
     def update(self, batch_size: int):
-        # Compute returns and advantages once:
-        advantages = utils.gae(rewards=self.memory.rewards, values=self.memory.values,
-                               gamma=self.gamma, lambda_=self.lambda_,
-                               normalize=True)
-
-        returns = utils.rewards_to_go(rewards=self.memory.rewards, gamma=self.gamma,
-                                      normalize=True)
+        # Compute combined advantages and returns:
+        advantages = self.get_advantages()
+        extrinsic_returns, intrinsic_returns = self.get_returns()
 
         # Log
-        self.log(returns=returns, advantages=advantages, values=tf.squeeze(self.memory.values))
+        self.log(returns_extrinsic=extrinsic_returns, returns_intrinsic=intrinsic_returns,
+                 advantages=advantages,
+                 values_extrinsic=self.memory.extrinsic_values, values_intrinsic=self.memory.intrinsic_values)
 
         # Prepare data: (states, returns) and (states, advantages)
-        value_batches = utils.data_to_batches(tensors=(self.memory.states, returns), batch_size=batch_size)
+        value_batches = utils.data_to_batches(tensors=(self.memory.states, extrinsic_returns, intrinsic_returns),
+                                              batch_size=batch_size)
         policy_batches = utils.data_to_batches(tensors=(self.memory.states, advantages,
                                                         self.memory.actions, self.memory.log_probabilities),
                                                batch_size=batch_size)
 
         # Policy network optimization:
-        for step, batch in enumerate(policy_batches):
+        for step, data_batch in enumerate(policy_batches):
 
             with tf.GradientTape() as tape:
-                policy_loss, kl = self.ppo_clip_objective(batch)
+                policy_loss, kl = self.ppo_clip_objective(data_batch)
 
             policy_grads = tape.gradient(policy_loss, self.policy_network.trainable_variables)
             self.policy_optimizer.apply_gradients(zip(policy_grads, self.policy_network.trainable_variables))
 
-            self.log(policy_loss=policy_loss.numpy())
+            self.log(loss_policy=policy_loss.numpy(),
+                     gradients_norm_policy=[tf.norm(gradient) for gradient in policy_grads])
 
             # Stop early if target_kl is reached:
-            if self.early_stop and (kl > 1.5 * self.target_kl):
-                print(f'early stop at step {step}.')
-                break
+            # if self.early_stop and (kl > 1.5 * self.target_kl):
+            #     print(f'early stop at step {step}.')
+            #     break
 
         # Value network optimization:
-        for step, (states_batch, returns_batch) in enumerate(value_batches):
+        for step, data_batch in enumerate(value_batches):
             with tf.GradientTape() as tape:
-                value_loss = self.value_objective(states=states_batch, returns=returns_batch)
+                value_loss = self.value_objective(batch=data_batch)
 
-            value_grads = tape.gradient(value_loss, self.value_network.trainable_weights)
-            self.value_optimizer.apply_gradients(zip(value_grads, self.value_network.trainable_weights))
+            value_grads = tape.gradient(value_loss, self.value_network.trainable_variables)
+            self.value_optimizer.apply_gradients(zip(value_grads, self.value_network.trainable_variables))
 
-            self.log(value_loss=value_loss.numpy())
+            # print('loss\n', value_loss.numpy())
+            # print('gradients')
+            # print(value_grads)
+            # breakpoint()
+            self.log(loss_value=value_loss.numpy(),
+                     gradients_norm_value=[tf.norm(gradient) for gradient in value_grads])
 
-    def value_objective(self, states, returns):
-        values = self.value_network(states, training=True)
+        # Train exploration method
+        self.exploration.train()
 
-        return tf.reduce_mean(losses.mean_squared_error(y_true=returns, y_pred=values))
+    def value_objective(self, batch):
+        states, extrinsic_returns, intrinsic_returns = batch
+        extrinsic_values, intrinsic_values = self.value_network(states, training=True)
+
+        loss_e = losses.mean_squared_error(y_true=extrinsic_returns, y_pred=extrinsic_values)
+        loss_i = losses.mean_squared_error(y_true=intrinsic_returns, y_pred=intrinsic_values)
+
+        # print('loss_e')
+        # print(loss_e * self.value_coeff[0])
+        # print('loss_i')
+        # print(loss_i * self.value_coeff[1])
+        # print('loss e+i')
+        # print(loss_e * self.value_coeff[0] + loss_i * self.value_coeff[1])
+        return tf.reduce_mean(loss_e * self.value_coeff[0] + loss_i * self.value_coeff[1])
 
     def ppo_clip_objective(self, batch):
         states, advantages, actions, old_log_probabilities = batch
         new_policy: tfp.distributions.Distribution = self.policy_network(states, training=True)
 
         new_log_prob = new_policy.log_prob(actions)
+
+        if new_log_prob.shape != old_log_probabilities.shape:
+            new_log_prob = tf.reduce_mean(new_log_prob, axis=0)
+            new_log_prob = tf.expand_dims(new_log_prob, axis=-1)
 
         # TODO: find a better way to compute the KL-divergence
         # kl_divergence = new_policy.kl_divergence(other=old_policy)
@@ -188,16 +226,33 @@ class PPOAgent:
         loss = -tf.reduce_mean(tf.minimum(ratio * advantages, clipped_ratio * advantages) + entropy_term)
         return loss, kl_divergence
 
-    def learn(self, episodes: int, timesteps: int, batch_size: int, save_every=-1, render_every=0):
-        """
-        :param episodes:
-        :param timesteps:
-        :param batch_size:
-        :param save_every: '-1' means never save, '0' means always. Saves when episode % save_every == 0
-        :param render_every:
-        :return:
-        """
+    def get_advantages(self):
+        adv_e = utils.gae(rewards=self.memory.extrinsic_rewards, values=self.memory.extrinsic_values,
+                          gamma=self.gamma, lambda_=self.lambda_, normalize=True)
+
+        # Don't normalize intrinsic advantages: because if seen states are no more novel,
+        # the advantages will be close to 0, thus, not in the same range of the extrinsic ones.
+        adv_i = utils.gae(rewards=self.memory.intrinsic_rewards, values=self.memory.intrinsic_values,
+                          gamma=self.gamma, lambda_=self.lambda_, normalize=False)
+
+        self.log(advantages_extrinsic=adv_e, advantages_intrinsic=adv_i)
+
+        return adv_e * self.adv_weights[0] + adv_i * self.adv_weights[1]
+
+    def get_returns(self):
+        extrinsic_returns = utils.rewards_to_go(rewards=self.memory.extrinsic_rewards, gamma=self.gamma,
+                                                normalize=True)
+        intrinsic_returns = utils.rewards_to_go(rewards=self.memory.intrinsic_rewards, gamma=self.gamma,
+                                                normalize=True)
+        return extrinsic_returns, intrinsic_returns
+
+    def learn(self, episodes: int, timesteps: int, batch_size: int, save_every: Union[bool, int] = False, render_every=0):
         env = self.env
+
+        if save_every is False:
+            save_every = episodes + 1
+        elif save_every is True:
+            save_every = 1
 
         for episode in range(1, episodes + 1):
             self.memory = PPOMemory(capacity=timesteps, states_shape=self.state_shape, num_actions=self.num_actions)
@@ -213,28 +268,29 @@ class PPOAgent:
 
                 # Compute action, log_prob, and value
                 policy = self.policy_network(state, training=False)
-                action = policy[0][0].numpy()
+                action = policy
                 log_prob = policy.log_prob(action)
                 value = self.value_network(state, training=False)
 
                 # Make action in the right range for the environment
-                converted_action = self.convert_action(action)
+                converted_action = self.convert_action(action[0][0].numpy())
 
                 # Environment step
-                next_state, reward, done, _ = env.step(converted_action)
-                episode_reward += reward
-                reward += self.exploration_bonus(state)
+                next_state, extrinsic_reward, done, _ = env.step(converted_action)
+                episode_reward += extrinsic_reward
+                intrinsic_reward = self.exploration.bonus(state)
 
-                self.log(actions=converted_action, rewards=reward)
+                self.log(actions=converted_action, rewards_extrinsic=extrinsic_reward,
+                         rewards_intrinsic=intrinsic_reward)
 
-                self.memory.append(state, action, reward, value, log_prob)
+                self.memory.append(state, action, extrinsic_reward, intrinsic_reward, value, log_prob)
                 state = utils.to_tensor(next_state)
 
                 # check whether a termination (terminal state or end of a transition) is reached:
                 if done or (t == timesteps):
                     print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 4)}s ' +
                           f'with reward {episode_reward}.')
-                    self.memory.end_trajectory(last_value=0 if done else self.value_network(state)[0])
+                    self.memory.end_trajectory(last_value=(0, 0) if done else self.value_network(state))
                     break
 
             self.update(batch_size)
@@ -246,39 +302,10 @@ class PPOAgent:
             if episode % save_every == 0:
                 self.save()
 
-    def evaluate(self, episodes: int, timesteps: int):
-        pass
-
-    def log(self, **kwargs):
-        if self.use_log:
-            for key, value in kwargs.items():
-                if hasattr(value, '__iter__'):
-                    self.stats[key].extend(value)
-                else:
-                    self.stats[key].append(value)
-
-    def write_summaries(self):
-        with self.tf_summary_writer.as_default():
-            for key, values in self.stats.items():
-                step = self.steps[key]
-
-                for i, value in enumerate(values):
-                    tf.summary.scalar(name=key, data=np.squeeze(value), step=step + i)
-
-                self.steps[key] += len(values)
-                self.stats[key].clear()
-
-    def _policy_network(self, units=32):
-        inputs = Input(shape=self.state_shape, dtype=tf.float32)
-        x = Dense(units, activation='tanh')(inputs)
-        x = Dense(units, activation='relu')(x)
-        x = Dense(units, activation='relu')(x)
-        action = self.get_distribution_layer(layer=x)
-
-        return Model(inputs, outputs=action, name='policy')
+    def evaluate(self):
+        raise NotImplementedError
 
     def get_distribution_layer(self, layer: Layer) -> tfp.layers.DistributionLambda:
-
         if self.distribution_type == 'categorical':
             # Categorical
             logits = Dense(units=self.env.action_space.n, activation=None)(layer)
@@ -309,261 +336,14 @@ class PPOAgent:
             make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[0], scale=t[..., 1]),
             convert_to_tensor_fn=lambda s: s.sample(self.num_actions))([mu, sigma])
 
-    def _value_network(self, units=32):
+    def _policy_network(self, units=32):
         inputs = Input(shape=self.state_shape, dtype=tf.float32)
         x = Dense(units, activation='tanh')(inputs)
         x = Dense(units, activation='relu')(x)
         x = Dense(units, activation='relu')(x)
-        output = Dense(units=1, activation=None)(x)
-        return Model(inputs, output, name='value')
+        action = self.get_distribution_layer(layer=x)
 
-    def save(self):
-        print('saving...')
-        self.policy_network.save(self.save_path['policy'])
-        self.value_network.save(self.save_path['value'])
-
-    def load(self):
-        # TODO: loading bugged with distribution objects!
-        print('loading...')
-        self.policy_network = tf.keras.models.load_model(self.save_path['policy'], compile=False)
-        self.value_network = tf.keras.models.load_model(self.save_path['value'], compile=False)
-
-    def plot_statistics(self, colormap='Set3'):  # Pastel1, Set3, tab20b, tab20c
-        """Colormaps: https://matplotlib.org/tutorials/colors/colormaps.html"""
-        num_plots = len(self.stats.keys())
-        cmap = plt.get_cmap(name=colormap)
-        rows = round(math.sqrt(num_plots))
-        cols = math.ceil(math.sqrt(num_plots))
-
-        for k, (key, value) in enumerate(self.stats.items()):
-            plt.subplot(rows, cols, k + 1)
-            plt.plot(value, color=cmap(k + 1))
-            plt.title(key)
-
-        plt.show()
-
-
-class PPOMemory:
-    def __init__(self, capacity: int, states_shape: tuple, num_actions: int):
-        self.index = 0
-        self.size = capacity
-
-        self.states = np.zeros(shape=(capacity,) + states_shape, dtype=np.float32)
-        self.rewards = np.zeros(shape=capacity + 1, dtype=np.float32)
-        self.values = np.zeros(shape=capacity + 1, dtype=np.float32)
-        self.actions = np.zeros(shape=(capacity, num_actions), dtype=np.float32)
-        self.log_probabilities = np.zeros(shape=(capacity, 1), dtype=np.float32)
-
-    def append(self, state, action, reward, value, log_prob):
-        assert self.index < self.size
-        i = self.index
-
-        self.states[i] = tf.squeeze(state)
-        self.actions[i] = action
-        self.rewards[i] = reward
-        self.values[i] = utils.tf_to_scalar_shape(value)
-        self.log_probabilities[i] = utils.tf_to_scalar_shape(log_prob)
-        self.index += 1
-
-    def end_trajectory(self, last_value):
-        """Terminates the current trajectory by adding the value of the terminal state"""
-        self.rewards[self.index] = last_value
-        self.values[self.index] = last_value
-
-        if self.index < self.size:
-            # cut off the exceeding part
-            self.states = self.states[:self.index]
-            self.actions = self.actions[:self.index]
-            self.rewards = self.rewards[:self.index + 1]
-            self.values = self.values[:self.index + 1]
-            self.log_probabilities = self.log_probabilities[:self.index]
-
-
-# -------------------------------------------------------------------------------------------------
-
-class PPORnDAgent(PPOAgent):
-    def __init__(self, *args, exploration=None, advantage_weights=(0.5, 0.5), **kwargs):
-        super().__init__(*args, **kwargs)
-
-        # Exploration
-        if exploration == 'rnd':
-            self.exploration = RandomNetworkDistillation(state_shape=self.state_shape, reward_shape=1,
-                                                         batch_size=32, optimization_steps=1, num_layers=1)
-            self.adv_weights = (tf.constant(advantage_weights[0]), tf.constant(advantage_weights[1]))
-            self.value_coeff = (tf.constant(0.5), tf.constant(0.5))
-        else:
-            self.exploration = NoExploration()
-            self.adv_weights = (tf.constant(1.0), tf.constant(0.0))
-            self.value_coeff = (tf.constant(1.0), tf.constant(0.0))
-
-        # Statistics: (value_list, step_num)
-        # TODO: made a 'statistics class'
-        self.stats = dict(policy_loss=[[], 0], value_loss=[[], 0], episode_rewards=[[], 0], ratio=[[], 0],
-                          advantages=[[], 0], prob=[[], 0], actions=[[], 0],
-                          entropy=[[], 0], kl_divergence=[[], 0], rewards_extrinsic=[[], 0],
-                          rewards_intrinsic=[[], 0], values_intrinsic=[[], 0], values_extrinsic=[[], 0],
-                          returns_extrinsic=[[], 0], returns_intrinsic=[[], 0],
-                          advantages_intrinsic=[[], 0], advantages_extrinsic=[[], 0])
-
-    def update(self, batch_size: int):
-        # Compute combined advantages and returns:
-        advantages, adv_ext, adv_int = self.get_advantages()
-        extrinsic_returns, intrinsic_returns = self.get_returns()
-
-        # Log
-        self.log(returns_extrinsic=extrinsic_returns, returns_intrinsic=intrinsic_returns,
-                 advantages=advantages, advantages_extrinsic=adv_ext, advantages_intrinsic=adv_int,
-                 values_extrinsic=self.memory.extrinsic_values, values_intrinsic=self.memory.intrinsic_values)
-
-        # Prepare data: (states, returns) and (states, advantages)
-        value_batches = utils.data_to_batches(tensors=(self.memory.states, extrinsic_returns, intrinsic_returns),
-                                              batch_size=batch_size)
-        policy_batches = utils.data_to_batches(tensors=(self.memory.states, advantages,
-                                                        self.memory.actions, self.memory.log_probabilities),
-                                               batch_size=batch_size)
-
-        # Policy network optimization:
-        for step, batch in enumerate(policy_batches):
-
-            with tf.GradientTape() as tape:
-                policy_loss, kl = self.ppo_clip_objective(batch)
-
-            policy_grads = tape.gradient(policy_loss, self.policy_network.trainable_variables)
-            self.policy_optimizer.apply_gradients(zip(policy_grads, self.policy_network.trainable_variables))
-
-            self.log(policy_loss=policy_loss.numpy())
-
-            # Stop early if target_kl is reached:
-            if self.early_stop and (kl > 1.5 * self.target_kl):
-                print(f'early stop at step {step}.')
-                break
-
-        # Value network optimization:
-        for step, data_batch in enumerate(value_batches):
-            with tf.GradientTape() as tape:
-                value_loss = self.value_objective(batch=data_batch)
-
-            value_grads = tape.gradient(value_loss, self.value_network.trainable_variables)
-            self.value_optimizer.apply_gradients(zip(value_grads, self.value_network.trainable_variables))
-
-            self.log(value_loss=value_loss.numpy())
-
-        # Train exploration method
-        self.exploration.train()
-
-    def value_objective(self, batch):
-        states, extrinsic_returns, intrinsic_returns = batch
-        extrinsic_values, intrinsic_values = self.value_network(states, training=True)
-
-        loss_e = losses.mean_squared_error(y_true=extrinsic_returns, y_pred=extrinsic_values)
-        loss_i = losses.mean_squared_error(y_true=intrinsic_returns, y_pred=intrinsic_values)
-
-        return tf.reduce_mean(loss_e * self.value_coeff[0] + loss_i * self.value_coeff[1])
-
-    def ppo_clip_objective(self, batch):
-        states, advantages, actions, old_log_probabilities = batch
-        new_policy: tfp.distributions.Distribution = self.policy_network(states, training=True)
-
-        new_log_prob = new_policy.log_prob(actions)
-
-        # TODO: find a better way to compute the KL-divergence
-        # kl_divergence = new_policy.kl_divergence(other=old_policy)
-        kl_divergence = np.mean(new_log_prob - old_log_probabilities)
-
-        # Entropy
-        entropy = new_policy.entropy()
-        entropy_term = self.entropy_strength * entropy
-
-        # Compute the probability ratio between the current and old policy
-        ratio = tf.math.exp(new_log_prob - old_log_probabilities)
-
-        # Compute the clipped ratio times advantage (NOTE: this is the simplified PPO clip-objective):
-        clipped_ratio = tf.where(advantages > 0, x=(1 + self.epsilon), y=(1 - self.epsilon))
-
-        # Log stuff
-        self.log(ratio=ratio,
-                 prob=tf.exp(new_log_prob),
-                 entropy=entropy,
-                 kl_divergence=kl_divergence)
-
-        # Loss = min { ratio * A, clipped_ratio * A } + entropy_term
-        loss = -tf.reduce_mean(tf.minimum(ratio * advantages, clipped_ratio * advantages) + entropy_term)
-        return loss, kl_divergence
-
-    def get_advantages(self):
-        extrinsic_advantages = utils.gae(rewards=self.memory.extrinsic_rewards, values=self.memory.extrinsic_values,
-                                         gamma=self.gamma, lambda_=self.lambda_, normalize=True)
-
-        # Don't normalize intrinsic advantages: because if seen states are no more novel,
-        # the advantages will be close to 0, thus, not in the same range of the extrinsic ones.
-        intrinsic_advantages = utils.gae(rewards=self.memory.intrinsic_rewards, values=self.memory.intrinsic_values,
-                                         gamma=self.gamma, lambda_=self.lambda_, normalize=False)
-
-        return extrinsic_advantages * self.adv_weights[0] + intrinsic_advantages * self.adv_weights[1], \
-               extrinsic_advantages, intrinsic_advantages
-
-    def get_returns(self):
-        extrinsic_returns = utils.rewards_to_go(rewards=self.memory.extrinsic_rewards, gamma=self.gamma,
-                                                normalize=True)
-        intrinsic_returns = utils.rewards_to_go(rewards=self.memory.intrinsic_rewards, gamma=self.gamma,
-                                                normalize=True)
-        return extrinsic_returns, intrinsic_returns
-
-    def learn(self, episodes: int, timesteps: int, batch_size: int, save_every: Union[bool, int] = False, render_every=0):
-        env = self.env
-
-        if save_every is False:
-            save_every = episodes + 1
-        elif save_every is True:
-            save_every = 1
-
-        for episode in range(1, episodes + 1):
-            self.memory = PPOMemory2(capacity=timesteps, states_shape=self.state_shape, num_actions=self.num_actions)
-            state = env.reset()
-            state = utils.to_tensor(state)
-            episode_reward = 0.0
-            t0 = time.time()
-            render = episode % render_every == 0
-
-            for t in range(1, timesteps + 1):
-                if render:
-                    env.render()
-
-                # Compute action, log_prob, and value
-                policy = self.policy_network(state, training=False)
-                action = policy[0][0].numpy()
-                log_prob = policy.log_prob(action)
-                value = self.value_network(state, training=False)
-
-                # Make action in the right range for the environment
-                converted_action = self.convert_action(action)
-
-                # Environment step
-                next_state, extrinsic_reward, done, _ = env.step(converted_action)
-                episode_reward += extrinsic_reward
-                intrinsic_reward = self.exploration.bonus(state)
-
-                self.log(actions=converted_action, rewards_extrinsic=extrinsic_reward,
-                         rewards_intrinsic=intrinsic_reward)
-
-                self.memory.append(state, action, extrinsic_reward, intrinsic_reward, value, log_prob)
-                state = utils.to_tensor(next_state)
-
-                # check whether a termination (terminal state or end of a transition) is reached:
-                if done or (t == timesteps):
-                    print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 4)}s ' +
-                          f'with reward {episode_reward}.')
-                    self.memory.end_trajectory(last_value=(0, 0) if done else self.value_network(state))
-                    break
-
-            self.update(batch_size)
-            self.log(episode_rewards=episode_reward)
-
-            if self.use_summary:
-                self.write_summaries()
-
-            if episode % save_every == 0:
-                self.save()
+        return Model(inputs, outputs=action, name='policy')
 
     def _value_network(self, units=32):
         """Dual-head Value Network"""
@@ -597,12 +377,40 @@ class PPORnDAgent(PPOAgent):
                 self.stats[key][1] += len(values)
                 self.stats[key][0].clear()
 
+    def save(self):
+        print('saving...')
+        self.policy_network.save(self.save_path['policy'])
+        self.value_network.save(self.save_path['value'])
 
-class PPOMemory2:
+    def load(self):
+        # TODO: loading bugged with distribution objects!
+        print('loading...')
+        self.policy_network = tf.keras.models.load_model(self.save_path['policy'], compile=False)
+        self.value_network = tf.keras.models.load_model(self.save_path['value'], compile=False)
+
+        # when loading substitute the 'action' layer with a tfp.distribution instance!
+
+    def plot_statistics(self, colormap='Set3'):  # Pastel1, Set3, tab20b, tab20c
+        """Colormaps: https://matplotlib.org/tutorials/colors/colormaps.html"""
+        num_plots = len(self.stats.keys())
+        cmap = plt.get_cmap(name=colormap)
+        rows = round(math.sqrt(num_plots))
+        cols = math.ceil(math.sqrt(num_plots))
+
+        for k, (key, value) in enumerate(self.stats.items()):
+            plt.subplot(rows, cols, k + 1)
+            plt.plot(value, color=cmap(k + 1))
+            plt.title(key)
+
+        plt.show()
+
+
+class PPOMemory:
     def __init__(self, capacity: int, states_shape: tuple, num_actions: int):
         self.index = 0
         self.size = capacity
 
+        # TODO: use 'tf' instead of 'np'
         self.states = np.zeros(shape=(capacity,) + states_shape, dtype=np.float32)
         self.extrinsic_rewards = np.zeros(shape=capacity + 1, dtype=np.float32)
         self.intrinsic_rewards = np.zeros(shape=capacity + 1, dtype=np.float32)
@@ -617,12 +425,14 @@ class PPOMemory2:
         value_e, value_i = value
 
         self.states[i] = tf.squeeze(state)
-        self.actions[i] = action
+        self.actions[i] = tf.squeeze(action)
         self.extrinsic_rewards[i] = extrinsic_reward
         self.intrinsic_rewards[i] = intrinsic_reward
         self.extrinsic_values[i] = utils.tf_to_scalar_shape(value_e)
         self.intrinsic_values[i] = utils.tf_to_scalar_shape(value_i)
-        self.log_probabilities[i] = utils.tf_to_scalar_shape(log_prob)
+        # self.log_probabilities[i] = utils.tf_to_scalar_shape(log_prob)
+        # self.log_probabilities[i] = tf.squeeze(log_prob)
+        self.log_probabilities[i] = log_prob
         self.index += 1
 
     def end_trajectory(self, last_value):
