@@ -250,7 +250,7 @@ class PPOAgent:
                     self.save()
 
     def evaluate(self):
-        raise NotImplementedError
+        pass
 
     def get_distribution_layer(self, layer: Layer) -> tfp.layers.DistributionLambda:
         if self.distribution_type == 'categorical':
@@ -283,24 +283,57 @@ class PPOAgent:
             make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[0], scale=t[1]),
             convert_to_tensor_fn=lambda s: s.sample(self.num_actions))([mu, sigma])
 
-    def _policy_network(self, units=32):
-        inputs = Input(shape=self.state_shape, dtype=tf.float32)
-        x = Dense(units, activation='tanh')(inputs)
-        x = Dense(units, activation='relu')(x)
-        x = Dense(units, activation='relu')(x)
+    def policy_layers(self, input_layers: dict, **kwargs) -> Layer:
+        """Main (central) part of the policy network"""
+        units = kwargs.get('units', 32)
+        num_layers = kwargs.get('layers', 2)
+
+        x = Dense(units, activation='tanh')(input_layers['input'])
+
+        for _ in range(num_layers):
+            x = Dense(units, activation='relu')(x)
+            x = Dense(units, activation='relu')(x)
+
+        return x
+
+    def value_layers(self, input_layers: dict, **kwargs) -> Layer:
+        """Main (central) part of the value network"""
+        # Default: use same layers as policy
+        return self.policy_layers(input_layers)
+
+    # def _policy_network(self, units=32):
+    #     inputs = Input(shape=self.state_shape, dtype=tf.float32)
+    #     x = Dense(units, activation='tanh')(inputs)
+    #     x = Dense(units, activation='relu')(x)
+    #     x = Dense(units, activation='relu')(x)
+    #     action = self.get_distribution_layer(layer=x)
+    #
+    #     return Model(inputs, outputs=action, name='policy')
+
+    def _policy_network(self) -> Model:
+        input_layers = utils.get_input_layers(self.state_shape)
+        x = self.policy_layers(input_layers)
         action = self.get_distribution_layer(layer=x)
 
-        return Model(inputs, outputs=action, name='policy')
+        return Model(inputs=input_layers, outputs=action, name='policy')
 
-    def _value_network(self, units=32):
+    # def _value_network(self, units=32):
+    #     """Single-head Value Network"""
+    #     inputs = Input(shape=self.state_shape, dtype=tf.float32)
+    #     x = Dense(units, activation='tanh')(inputs)
+    #     x = Dense(units, activation='relu')(x)
+    #     x = Dense(units, activation='relu')(x)
+    #     value = Dense(units=1, activation=None, name='value_head')(x)
+    #
+    #     return Model(inputs, outputs=value, name='value_network')
+
+    def _value_network(self) -> Model:
         """Single-head Value Network"""
-        inputs = Input(shape=self.state_shape, dtype=tf.float32)
-        x = Dense(units, activation='tanh')(inputs)
-        x = Dense(units, activation='relu')(x)
-        x = Dense(units, activation='relu')(x)
+        input_layers = utils.get_input_layers(self.state_shape)
+        x = self.value_layers(input_layers)
         value = Dense(units=1, activation=None, name='value_head')(x)
 
-        return Model(inputs, outputs=value, name='value_network')
+        return Model(inputs=input_layers, outputs=value, name='value_network')
 
     def log(self, **kwargs):
         if self.use_log:
@@ -448,7 +481,7 @@ class PPO2Agent(PPOAgent):
         # Log
         self.log(returns_extrinsic=extrinsic_returns, returns_intrinsic=intrinsic_returns,
                  advantages=advantages,
-                 values_extrinsic=self.memory.extrinsic_values, values_intrinsic=self.memory.values)
+                 values_extrinsic=self.memory.extrinsic_values, values_intrinsic=self.memory.intrinsic_values)
 
         # Prepare data: (states, returns) and (states, advantages)
         value_batches = utils.data_to_batches(tensors=(self.memory.states, extrinsic_returns, intrinsic_returns),
@@ -458,8 +491,8 @@ class PPO2Agent(PPOAgent):
                                                batch_size=batch_size)
 
         # Policy network optimization:
+        # TODO: here we ignore 'optimization_stes' parameter...
         for step, data_batch in enumerate(policy_batches):
-
             with tf.GradientTape() as tape:
                 policy_loss, kl = self.ppo_clip_objective(data_batch)
 
@@ -498,7 +531,7 @@ class PPO2Agent(PPOAgent):
 
         # Don't normalize intrinsic advantages: because if seen states are no more novel,
         # the advantages will be close to 0, thus, not in the same range of the extrinsic ones.
-        adv_i = utils.gae(rewards=self.memory.rewards, values=self.memory.values,
+        adv_i = utils.gae(rewards=self.memory.intrinsic_rewards, values=self.memory.intrinsic_values,
                           gamma=self.gamma, lambda_=self.lambda_, normalize=False)
 
         self.log(advantages_extrinsic=adv_e, advantages_intrinsic=adv_i)
@@ -508,65 +541,67 @@ class PPO2Agent(PPOAgent):
     def get_returns(self):
         extrinsic_returns = utils.rewards_to_go(rewards=self.memory.extrinsic_rewards, discount=self.gamma,
                                                 normalize=True)
-        intrinsic_returns = utils.rewards_to_go(rewards=self.memory.rewards, discount=self.gamma,
+        intrinsic_returns = utils.rewards_to_go(rewards=self.memory.intrinsic_rewards, discount=self.gamma,
                                                 normalize=True)
         return extrinsic_returns, intrinsic_returns
 
-    def learn(self, episodes: int, timesteps: int, batch_size: int, save_every: Union[bool, int] = False, render_every=0):
-        env = self.env
-
+    def learn(self, episodes: int, timesteps: int, batch_size: int, save_every: Union[bool, str, int] = False,
+              render_every=0):
         if save_every is False:
             save_every = episodes + 1
         elif save_every is True:
             save_every = 1
+        elif save_every == 'end':
+            save_every = episodes
 
-        for episode in range(1, episodes + 1):
-            self.memory = PPOMemory(capacity=timesteps, states_shape=self.state_shape, num_actions=self.num_actions)
-            state = env.reset()
-            state = utils.to_tensor(state)
-            episode_reward = 0.0
-            t0 = time.time()
-            render = episode % render_every == 0
+        with self.env as env:
+            for episode in range(1, episodes + 1):
+                self.memory = PPO2Memory(capacity=timesteps, states_shape=self.state_shape, num_actions=self.num_actions)
+                state = env.reset()
+                state = utils.to_tensor(state)
+                episode_reward = 0.0
+                t0 = time.time()
+                render = episode % render_every == 0
 
-            for t in range(1, timesteps + 1):
-                if render:
-                    env.render()
+                for t in range(1, timesteps + 1):
+                    if render:
+                        env.render()
 
-                # Compute action, log_prob, and value
-                policy = self.policy_network(state, training=False)
-                action = policy
-                log_prob = policy.log_prob(action)
-                value = self.value_network(state, training=False)
+                    # Compute action, log_prob, and value
+                    policy = self.policy_network(state, training=False)
+                    action = policy
+                    log_prob = policy.log_prob(action)
+                    value = self.value_network(state, training=False)
 
-                # Make action in the right range for the environment
-                converted_action = self.convert_action(action[0][0].numpy())
+                    # Make action in the right range for the environment
+                    converted_action = self.convert_action(action[0][0].numpy())
 
-                # Environment step
-                next_state, extrinsic_reward, done, _ = env.step(converted_action)
-                episode_reward += extrinsic_reward
-                intrinsic_reward = self.exploration.bonus(state)
+                    # Environment step
+                    next_state, extrinsic_reward, done, _ = env.step(converted_action)
+                    episode_reward += extrinsic_reward
+                    intrinsic_reward = self.exploration.bonus(state)
 
-                self.log(actions=converted_action, rewards_extrinsic=extrinsic_reward,
-                         rewards_intrinsic=intrinsic_reward)
+                    self.log(actions=converted_action, rewards_extrinsic=extrinsic_reward,
+                             rewards_intrinsic=intrinsic_reward)
 
-                self.memory.append(state, action, extrinsic_reward, value, log_prob)
-                state = utils.to_tensor(next_state)
+                    self.memory.append(state, action, extrinsic_reward, intrinsic_reward, value, log_prob)
+                    state = utils.to_tensor(next_state)
 
-                # check whether a termination (terminal state or end of a transition) is reached:
-                if done or (t == timesteps):
-                    print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 4)}s ' +
-                          f'with reward {episode_reward}.')
-                    self.memory.end_trajectory(last_value=(0, 0) if done else self.value_network(state))
-                    break
+                    # check whether a termination (terminal state or end of a transition) is reached:
+                    if done or (t == timesteps):
+                        print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 4)}s ' +
+                              f'with reward {episode_reward}.')
+                        self.memory.end_trajectory(last_value=(0, 0) if done else self.value_network(state))
+                        break
 
-            self.update(batch_size)
-            self.log(episode_rewards=episode_reward)
+                self.update(batch_size)
+                self.log(episode_rewards=episode_reward)
 
-            if self.use_summary:
-                self.write_summaries()
+                if self.use_summary:
+                    self.write_summaries()
 
-            if episode % save_every == 0:
-                self.save()
+                if episode % save_every == 0:
+                    self.save()
 
     def _value_network(self, units=32):
         """Dual-head Value Network"""

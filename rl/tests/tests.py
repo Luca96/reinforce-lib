@@ -126,6 +126,15 @@ def test_dual_head_value_network(state_shape=1, units=1):
     print('info:\n', info)
 
 
+def test_tf_data_api(data_size=10, batch_size=4):
+    data = [[i] for i in range(data_size)]
+    print('data:', data)
+    dataset = tf.data.Dataset.from_tensor_slices(data)
+    dataset = dataset.batch(batch_size)
+    print('batched:', list(dataset.as_numpy_iterator()))
+    print('batch-shuffled:', list(dataset.shuffle(buffer_size=batch_size).as_numpy_iterator()))
+
+
 if __name__ == '__main__':
     # Memories:
     # test_recent_memory()
@@ -149,8 +158,10 @@ if __name__ == '__main__':
     # test_beta(alpha=1, beta=2, num_samples=1)
     # cat = tfp.distributions.Categorical(logits=[1, 2, 3, 4])
     # print(cat.log_prob([[1], [2], [3]]))
-    test_categorical_vs_beta_prob(action_shape=1)
+    # test_categorical_vs_beta_prob(action_shape=1)
 
     # Networks:
     # test_dual_head_value_network()
+
+    test_tf_data_api()
     pass

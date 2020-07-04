@@ -4,7 +4,7 @@ import scipy.signal
 import numpy as np
 import tensorflow as tf
 
-from typing import Union, List, Tuple
+from typing import Union, List, Dict, Tuple
 
 
 def to_tensor(x, expand_axis=0):
@@ -64,13 +64,13 @@ def generalized_advantage_estimation(rewards, values, gamma: float, lambda_: flo
     return advantages
 
 
-def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle=True, seed=None):
+def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle=False, seed=None):
     """Transform some tensors data into a dataset of mini-batches"""
     dataset = tf.data.Dataset.from_tensor_slices(tensors)
     dataset = dataset.batch(batch_size)
 
     if shuffle:
-        return dataset.shuffle(buffer_size=1, seed=seed)
+        return dataset.shuffle(buffer_size=batch_size, seed=seed)
 
     return dataset
 
@@ -104,6 +104,23 @@ def tf_to_scalar_shape(tensor):
 
 def assert_shapes(a, b):
     assert tf.shape(a) == tf.shape(b)
+
+
+def get_input_layers(state_space: Union[Dict[str, Tuple], Tuple, int], layer_name='input') \
+        -> Dict[str, tf.keras.layers.Input]:
+    layers = dict()
+
+    if isinstance(state_space, tuple) or isinstance(state_space, int):
+        layers[layer_name] = tf.keras.layers.Input(shape=state_space, dtype=tf.float32, name=layer_name)
+
+    elif isinstance(state_space, dict):
+        for name, shape in state_space.items():
+            assert isinstance(shape, tuple) or isinstance(shape, int)
+            layers[name] = tf.keras.layers.Input(shape=shape, dtype=tf.float32, name=name)
+    else:
+        raise ValueError('state_space must be one of: Dict[Tuple or int], Tuple, or int!')
+
+    return layers
 
 
 # -------------------------------------------------------------------------------------------------

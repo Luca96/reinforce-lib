@@ -4,4 +4,5 @@ tensorflow-probability
 gym
 pygame
 opencv-python
--e e:\dati\documenti\downloads\carla_0.9.8\windowsnoeditor\pythonapi\carla\dist\carla-0.9.8-py3.7-win-amd64
+networkx
+matplotlib

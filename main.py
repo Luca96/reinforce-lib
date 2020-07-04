@@ -1,7 +1,7 @@
 import gym
 
 from rl import utils
-from rl.agents import PPOAgent, PPO2Agent, PPOTestAgent
+from rl.agents import PPOAgent, PPO2Agent
 
 
 def ppo_cartpole_test():
@@ -17,7 +17,8 @@ def ppo_cartpole_test():
     # agent.learn(episodes=600, timesteps=200, batch_size=20,
     #             render_every=10, save_every='end')
 
-    # reaches 200 as reward (also cartPole3 with batch shuffling)
+    # reaches 200 as reward (also cartPole3)
+    # (batch shuffling works but learning is worse)
     agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.20,
                      lambda_=0.95, entropy_regularization=0.0, name='ppo-cartPole3',
                      optimization_steps=(1, 1),
@@ -30,19 +31,24 @@ def ppo_cartpole_test():
 def ppo_mountaincar_test():
     env = gym.make('MountainCarContinuous-v0')
     utils.print_info(env)
-    agent = PPO2Agent(env, policy_lr=3e-4, value_lr=1e-4, clip_ratio=0.20,
-                      lambda_=0.95, entropy_regularization=0.001, name='ppo-mountainCarContinuous',
-                      optimization_steps=(10, 10),
-                      exploration='rnd', advantage_weights=(2.2, 0.4),
-                      use_log=True, load=False, use_summary=True)
+    # agent = PPO2Agent(env, policy_lr=1e-3, value_lr=3e-4, clip_ratio=0.20,
+    #                   lambda_=0.95, entropy_regularization=0.001, name='ppo-mountainCarContinuous',
+    #                   optimization_steps=(1, 1),
+    #                   advantage_weights=(2.2, 0.4),
+    #                   use_log=True, load=False, use_summary=True)
 
-    agent.learn(episodes=200, timesteps=1000, batch_size=32,
-                render_every=5, save_every=False)
+    agent = PPOAgent(env, policy_lr=1e-3, value_lr=3e-4, clip_ratio=0.20,
+                     lambda_=0.95, entropy_regularization=0.001, name='ppo-mountainCarContinuous',
+                     optimization_steps=(1, 1),
+                     use_log=True, load=False, use_summary=True)
+
+    agent.learn(episodes=200, timesteps=1000, batch_size=50,
+                render_every=5, save_every='end')
 
 
 if __name__ == '__main__':
     # main()
     # gym_test()
     # reinforce_test()
-    ppo_cartpole_test()
-    # ppo_mountaincar_test()
+    # ppo_cartpole_test()
+    ppo_mountaincar_test()

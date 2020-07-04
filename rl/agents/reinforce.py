@@ -1,10 +1,9 @@
 import os
-import math
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-from rl.agents import utils
+from rl import utils
 
 from tensorflow.keras import losses
 from tensorflow.keras import optimizers
@@ -60,7 +59,7 @@ class ReinforceAgent:
         advantages = utils.generalized_advantage_estimation(rewards=self.memory.rewards, values=self.memory.values,
                                                             gamma=self.gamma, lambda_=self.lambda_)
 
-        returns = utils.rewards_to_go(rewards=self.memory.rewards, gamma=self.gamma)
+        returns = utils.rewards_to_go(rewards=self.memory.rewards, discount=self.gamma)
 
         # Prepare data: (states, returns) and (states, advantages)
         value_batches = utils.data_to_batches(tensors=(self.memory.states, returns[:-1]), batch_size=batch_size)
