@@ -4,6 +4,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 from rl import utils
+from rl.agents.agents import Agent
 
 from tensorflow.keras import losses
 from tensorflow.keras import optimizers
@@ -11,8 +12,8 @@ from tensorflow.keras.layers import *
 from tensorflow.keras.models import Model
 
 
-class ReinforceAgent:
-    # TODO: Poliyak averaging
+class ReinforceAgent(Agent):
+    # TODO: check and benchmark implementation
     def __init__(self, learning_rates=(3e-4, 3e-4), optimization_steps=(1, 2), name='reinforce-agent',
                  gamma=0.99, lambda_=0.95, target_kl=0.01, seed=None, weights_dir='weights', load=False):
         self.memory = None
@@ -56,8 +57,8 @@ class ReinforceAgent:
 
     def update(self, batch_size: int):
         # Compute returns and advantages once:
-        advantages = utils.generalized_advantage_estimation(rewards=self.memory.rewards, values=self.memory.values,
-                                                            gamma=self.gamma, lambda_=self.lambda_)
+        advantages = utils.gae(rewards=self.memory.rewards, values=self.memory.values,
+                               gamma=self.gamma, lambda_=self.lambda_)
 
         returns = utils.rewards_to_go(rewards=self.memory.rewards, discount=self.gamma)
 

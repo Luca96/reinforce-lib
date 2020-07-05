@@ -56,6 +56,10 @@ def display_image(display, image, window_size=(800, 600), blend=False):
     if (image.shape[1], image.shape[0]) != window_size:
         image = resize(image, size=window_size)
 
+    if len(image.shape) == 2:
+        # duplicate image three times along depth if grayscale
+        image = np.stack((image,) * 3, axis=-1)
+
     image_surface = pygame.surfarray.make_surface(image.swapaxes(0, 1))
 
     if blend:
@@ -264,10 +268,11 @@ def clamp(value, min_value, max_value):
     return max(min_value, min(value, max_value))
 
 
-def cv2_grayscale(image: np.ndarray, is_bgr=True, depth=1):
+def cv2_grayscale(image: np.ndarray, is_bgr=True, reshape=True, depth=1):
     """Convert a RGB or BGR image to grayscale using OpenCV (cv2).
         :param image: input image, a numpy.ndarray.
         :param is_bgr: tells whether the image is in BGR format. If False, RGB format is assumed.
+        :param reshape: uses numpy to reshape the image to (h, w, 1)
         :param depth: replicates the gray depth channel multiple times. E.g. useful to display grayscale images as rgb.
     """
     assert depth >= 1
@@ -281,9 +286,13 @@ def cv2_grayscale(image: np.ndarray, is_bgr=True, depth=1):
     else:
         grayscale = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
+    if reshape:
+        grayscale = np.reshape(grayscale, newshape=grayscale.shape + (1,))
+
     if depth > 1:
         return np.stack((grayscale,) * depth, axis=-1)
 
+    assert len(grayscale.shape) == 3
     return grayscale
 
 

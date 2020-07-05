@@ -4,6 +4,7 @@ import scipy.signal
 import numpy as np
 import tensorflow as tf
 
+from gym import spaces
 from typing import Union, List, Dict, Tuple
 
 
@@ -45,23 +46,6 @@ def rewards_to_go(rewards, discount: float, normalize=False):
         returns = np_normalize(returns)
 
     return returns
-
-
-def generalized_advantage_estimation(rewards, values, gamma: float, lambda_: float, normalize=True):
-    # d_t = r_t + gamma * V_t+1 - V_t
-    deltas = rewards[:-1] + tf.math.multiply(values[1:], gamma) - values[:-1]
-
-    # Compute discount factor for each timestep, i.e. (gamma * lambda)^t
-    discounts = [1.0] + [gamma * lambda_] * (len(deltas) - 1)
-    discounts = tf.math.cumprod(discounts)
-
-    # Compute normalized advantages
-    advantages = tf.math.cumsum(discounts * deltas)
-
-    if normalize:
-        return tf_normalize(advantages)
-
-    return advantages
 
 
 def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle=False, seed=None):
@@ -106,7 +90,7 @@ def assert_shapes(a, b):
     assert tf.shape(a) == tf.shape(b)
 
 
-def get_input_layers(state_space: Union[Dict[str, Tuple], Tuple, int], layer_name='input') \
+def get_input_layers(state_space: Union[Dict[str, tuple], tuple, int], layer_name='input') \
         -> Dict[str, tf.keras.layers.Input]:
     layers = dict()
 
@@ -121,6 +105,27 @@ def get_input_layers(state_space: Union[Dict[str, Tuple], Tuple, int], layer_nam
         raise ValueError('state_space must be one of: Dict[Tuple or int], Tuple, or int!')
 
     return layers
+
+
+def space_to_spec(space: gym.Space) -> Union[tuple, Dict[str, tuple]]:
+    """From a gym.Space object returns its shape-specification, i.e.
+         - tuple: if space is Box or Discrete
+         - dict[str, tuple]: if space is Dict
+    """
+    if isinstance(space, spaces.Box):
+        return space.shape
+
+    if isinstance(space, spaces.Discrete):
+        return space.n,   # -> tuple (space.n,)
+
+    assert isinstance(space, spaces.Dict)
+
+    spec = dict()
+    for name, space in space.spaces.items():
+        # use recursion to handle arbitrary nested Dicts
+        spec[name] = space_to_spec(space)
+
+    return spec
 
 
 # -------------------------------------------------------------------------------------------------

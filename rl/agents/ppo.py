@@ -1,16 +1,14 @@
 import os
 import gym
 import time
-import math
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
-import matplotlib.pyplot as plt
 
-from datetime import datetime
 from typing import Union
 
 from rl import utils
+from rl.agents.agents import Agent
 from rl.exploration import RandomNetworkDistillation, NoExploration
 
 from tensorflow.keras import losses
@@ -19,15 +17,15 @@ from tensorflow.keras.layers import *
 from tensorflow.keras.models import Model
 
 
-class PPOAgent:
+class PPOAgent(Agent):
     # TODO: same 'optimization steps' for both policy and value functions?
     # TODO: 'value_loss' a parameter that selects the loss (either 'mse' or 'huber') for the value network
     # TODO: try 'mixture' of Beta/Gaussian distribution
-    # TODO: fix random seed issue
     # TODO: use KL-Divergence to stop policy optimization early?
-    def __init__(self, environment: gym.Env, policy_lr=3e-4, value_lr=1e-4, optimization_steps=(10, 10), clip_ratio=0.2,
-                 gamma=0.99, lambda_=0.95, target_kl=0.01, entropy_regularization=0.0, seed=None, early_stop=False,
-                 load=False, weights_dir='weights', name='ppo-agent', use_log=False, use_summary=False):
+    def __init__(self, *args, policy_lr=3e-4, value_lr=1e-4, optimization_steps=(10, 10), clip_ratio=0.2,
+                 gamma=0.99, lambda_=0.95, target_kl=0.01, entropy_regularization=0.0, early_stop=False,
+                 load=False, name='ppo-agent', **kwargs):
+        super().__init__(*args, name=name, **kwargs)
         self.memory = None
         self.gamma = gamma
         self.lambda_ = lambda_
@@ -35,7 +33,6 @@ class PPOAgent:
         self.entropy_strength = tf.constant(entropy_regularization)
         self.epsilon = clip_ratio
         self.early_stop = early_stop
-        self.env = environment
 
         # State space
         if isinstance(self.env.observation_space, gym.spaces.Box):
@@ -67,25 +64,6 @@ class PPOAgent:
         print('action_shape:', self.num_actions)
         print('distribution:', self.distribution_type)
 
-        # Logging
-        self.use_log = use_log
-        self.use_summary = use_summary
-
-        if self.use_summary:
-            self.summary_dir = os.path.join('logs', name, datetime.now().strftime("%Y%m%d-%H%M%S"))
-            self.tf_summary_writer = tf.summary.create_file_writer(self.summary_dir, max_queue=5)
-
-        # # Set random seed:
-        # if seed is not None:
-        #     tf.random.set_seed(seed)
-        #     np.random.seed(seed)
-        #     random.seed(seed)
-        #     print(f'Random seed {seed}.')
-
-        # Saving stuff:
-        self.base_path = os.path.join(weights_dir, name)
-        self.save_path = dict(policy=os.path.join(self.base_path, 'policy_net'),
-                              value=os.path.join(self.base_path, 'value_net'))
         # Networks
         if load:
             self.load()
@@ -98,8 +76,7 @@ class PPOAgent:
         self.value_optimizer = optimizers.Adam(learning_rate=value_lr)
         self.optimization_steps = dict(policy=optimization_steps[0], value=optimization_steps[1])
 
-        # TODO: made a 'statistics class'
-        # Statistics: (value_list, step_num)
+        # Statistics:
         self.stats = dict(loss_policy=[[], 0], loss_value=[[], 0], episode_rewards=[[], 0], ratio=[[], 0],
                           advantages=[[], 0], prob=[[], 0], actions=[[], 0],
                           entropy=[[], 0], kl_divergence=[[], 0], rewards=[[], 0], returns=[[], 0],
@@ -249,9 +226,6 @@ class PPOAgent:
                 if episode % save_every == 0:
                     self.save()
 
-    def evaluate(self):
-        pass
-
     def get_distribution_layer(self, layer: Layer) -> tfp.layers.DistributionLambda:
         if self.distribution_type == 'categorical':
             # Categorical
@@ -301,31 +275,12 @@ class PPOAgent:
         # Default: use same layers as policy
         return self.policy_layers(input_layers)
 
-    # def _policy_network(self, units=32):
-    #     inputs = Input(shape=self.state_shape, dtype=tf.float32)
-    #     x = Dense(units, activation='tanh')(inputs)
-    #     x = Dense(units, activation='relu')(x)
-    #     x = Dense(units, activation='relu')(x)
-    #     action = self.get_distribution_layer(layer=x)
-    #
-    #     return Model(inputs, outputs=action, name='policy')
-
     def _policy_network(self) -> Model:
         input_layers = utils.get_input_layers(self.state_shape)
         x = self.policy_layers(input_layers)
         action = self.get_distribution_layer(layer=x)
 
         return Model(inputs=input_layers, outputs=action, name='policy')
-
-    # def _value_network(self, units=32):
-    #     """Single-head Value Network"""
-    #     inputs = Input(shape=self.state_shape, dtype=tf.float32)
-    #     x = Dense(units, activation='tanh')(inputs)
-    #     x = Dense(units, activation='relu')(x)
-    #     x = Dense(units, activation='relu')(x)
-    #     value = Dense(units=1, activation=None, name='value_head')(x)
-    #
-    #     return Model(inputs, outputs=value, name='value_network')
 
     def _value_network(self) -> Model:
         """Single-head Value Network"""
@@ -334,25 +289,6 @@ class PPOAgent:
         value = Dense(units=1, activation=None, name='value_head')(x)
 
         return Model(inputs=input_layers, outputs=value, name='value_network')
-
-    def log(self, **kwargs):
-        if self.use_log:
-            for key, value in kwargs.items():
-                if hasattr(value, '__iter__'):
-                    self.stats[key][0].extend(value)
-                else:
-                    self.stats[key][0].append(value)
-
-    def write_summaries(self):
-        with self.tf_summary_writer.as_default():
-            for key, (values, step) in self.stats.items():
-
-                for i, value in enumerate(values):
-                    tf.summary.scalar(name=key, data=np.squeeze(value), step=step + i)
-
-                # clear value_list, update step
-                self.stats[key][1] += len(values)
-                self.stats[key][0].clear()
 
     def save(self):
         print('saving...')
@@ -397,20 +333,6 @@ class PPOAgent:
 
         return Model(inputs=model.input, outputs=action, name='policy')
 
-    def plot_statistics(self, colormap='Set3'):  # Pastel1, Set3, tab20b, tab20c
-        """Colormaps: https://matplotlib.org/tutorials/colors/colormaps.html"""
-        num_plots = len(self.stats.keys())
-        cmap = plt.get_cmap(name=colormap)
-        rows = round(math.sqrt(num_plots))
-        cols = math.ceil(math.sqrt(num_plots))
-
-        for k, (key, value) in enumerate(self.stats.items()):
-            plt.subplot(rows, cols, k + 1)
-            plt.plot(value, color=cmap(k + 1))
-            plt.title(key)
-
-        plt.show()
-
 
 class PPOMemory:
     def __init__(self, capacity: int, states_shape: tuple, num_actions: int):
@@ -440,8 +362,8 @@ class PPOMemory:
         self.rewards[self.index] = last_value
         self.values[self.index] = last_value
 
+        # cut off the exceeding part
         if self.index < self.size:
-            # cut off the exceeding part
             self.states = self.states[:self.index]
             self.actions = self.actions[:self.index]
             self.rewards = self.rewards[:self.index + 1]

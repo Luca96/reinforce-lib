@@ -9,30 +9,6 @@ from tensorflow.keras.models import Model
 from tensorflow.keras import optimizers
 
 
-def test_recent_memory():
-    from rl.to_delete.memories import Recent
-    recent = Recent(capacity=10)
-
-    for i in range(recent.capacity):
-        recent.append(i)
-
-    print('recent memory:')
-    print(recent.buffer)
-    print(recent.retrieve(5))
-
-
-def test_replay_memory():
-    from rl.to_delete.memories import Replay
-    replay = Replay(capacity=10)
-
-    for i in range(replay.capacity):
-        replay.append(i)
-
-    print('replay memory:')
-    print(replay.buffer)
-    print(replay.retrieve(5))
-
-
 def discount_cumsum(x, discount: float):
     return scipy.signal.lfilter([1.0], [1.0, float(-discount)], x[::-1], axis=0)[::-1]
 

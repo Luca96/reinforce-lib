@@ -1,22 +1,26 @@
+import os
 import gym
+import time
 import enum
 import random
 import carla
 import pygame
 import numpy as np
 
-from pygame.constants import K_q, K_UP, K_w, K_LEFT, K_a, K_RIGHT, K_d, K_DOWN, K_s, K_SPACE, K_ESCAPE, KMOD_CTRL
-from typing import Callable, Dict, Union
 from gym import spaces
+from typing import Callable, Dict, Union
+from pygame.constants import K_q, K_UP, K_w, K_LEFT, K_a, K_RIGHT, K_d, K_DOWN, K_s, K_SPACE, K_ESCAPE, KMOD_CTRL
 
-from rl.environments.carla_driving import env_utils
-from rl.environments.carla_driving.sensors import Sensor, SensorSpecs
+from rl import utils as rl_utils
+from rl.environments.carla import env_utils
+from rl.environments.carla.sensors import Sensor, SensorSpecs
 
-from rl.environments.carla_driving.navigation import Route, RoutePlanner, RoadOption
+from rl.environments.carla.navigation.behavior_agent import BehaviorAgent
+from rl.environments.carla.navigation import Route, RoutePlanner, RoadOption
 
-from rl.environments.carla_driving.tools import misc, utils
-from rl.environments.carla_driving.tools.utils import WAYPOINT_DICT
-from rl.environments.carla_driving.tools.synchronous_mode import CARLASyncContext
+from rl.environments.carla.tools import misc, utils
+from rl.environments.carla.tools.utils import WAYPOINT_DICT
+from rl.environments.carla.tools.synchronous_mode import CARLASyncContext
 
 
 # TODO: add more events
@@ -30,11 +34,13 @@ class CARLAEvent(enum.Enum):
 # -------------------------------------------------------------------------------------------------
 
 # TODO: remove sensor argument
+# TODO: implement 'observation skip'
+# TODO: implement 'action repetition'?
 class CARLABaseEnvironment(gym.Env):
     """Base extendable environment for the CARLA driving simulator"""
 
     def __init__(self, address='localhost', port=2000, timeout=5.0, image_shape=(150, 200, 3),
-                 window_size=(800, 600), vehicle_filter='vehicle.*', fps=30.0, render=True, debug=True,
+                 window_size=(800, 600), vehicle_filter='vehicle.tesla.model3', fps=30.0, render=True, debug=True,
                  path: dict = None):
         super().__init__()
         env_utils.init_pygame()
@@ -260,7 +266,6 @@ class CARLABaseEnvironment(gym.Env):
 
     def skip(self, num_frames=10):
         """Skips the given amount of frames"""
-        # TODO: do frame skipping when 'ON_EPISODE' event triggers?
         for _ in range(num_frames):
             self.synchronous_context.tick(timeout=self.timeout)
 
@@ -293,6 +298,7 @@ class CARLABaseEnvironment(gym.Env):
                  # code...
         """
         self.synchronous_context.__enter__()
+        return self
 
     def __exit__(self, *args):
         # Disables synchronous mode
@@ -493,6 +499,133 @@ class CARLAPlayWrapper:
             # env.route.draw_next_waypoint(env.world.debug, env.vehicle.get_location(), life_time=1.0 / env.fps)
 
 
+class CARLACollectWrapper:
+    """Wraps a CARLA Environment, collects input observations and output actions that can be later
+       used for pre-training or imitation learning purposes.
+    """
+
+    def __init__(self, env: CARLABaseEnvironment, ignore_traffic_light: bool, traces_dir='traces', name='carla',
+                 behaviour='normal'):
+        self.env = env
+        self.agent = None
+        self.agent_behaviour = behaviour  # 'normal', 'cautious', or 'aggressive'
+        self.ignore_traffic_light = ignore_traffic_light
+
+        # Saving & Buffers
+        self.save_dir = rl_utils.makedir(traces_dir, name)
+        print('save_dir:', self.save_dir)
+        self.buffer = None
+        self.timestep = 0
+
+    def reset(self) -> dict:
+        self.timestep = 0
+        observation = self.env.reset()
+
+        self.agent = BehaviorAgent(vehicle=self.env.vehicle, behavior=self.agent_behaviour,
+                                   ignore_traffic_light=self.ignore_traffic_light)
+        self.agent.set_destination(start_location=self.env.vehicle.get_location(), end_location=self.env.destination,
+                                   clean=True)
+        return observation
+
+    def collect(self, episodes: int, timesteps: int, agent_debug=False, episode_reward_threshold=0.0, skip_frames=30):
+        self.init_buffer(num_timesteps=timesteps)
+
+        for episode in range(episodes):
+            state = self.reset()
+            episode_reward = 0.0
+
+            with self.env as env:
+                env.skip(num_frames=skip_frames)
+
+                for t in range(timesteps):
+                    # act
+                    self.agent.update_information()
+                    control = self.agent.run_step(debug=agent_debug)
+                    action = env.control_to_actions(control)
+
+                    # step
+                    next_state, reward, done, _ = env.step(action)
+                    episode_reward += reward
+
+                    # record
+                    self.store_transition(state=state, action=action, reward=reward, done=done)
+                    state = next_state
+
+                    if done or (t == timesteps - 1):
+                        buffer = self.end_trajectory()
+                        break
+
+                if episode_reward > episode_reward_threshold:
+                    self.serialize( buffer, episode)
+                else:
+                    print(f'Trace-{episode} discarded because reward={round(episode_reward, 2)} below threshold!')
+
+    def init_buffer(self, num_timesteps: int):
+        # partial buffer: misses 'state' and 'action'
+        self.buffer = dict(reward=np.zeros(shape=num_timesteps),
+                           done=np.zeros(shape=num_timesteps))
+
+        obs_spec = rl_utils.space_to_spec(space=self.env.observation_space)
+        act_spec = rl_utils.space_to_spec(space=self.env.action_space)
+
+        print('obs_spec\n', obs_spec)
+        print('action_spec\n', act_spec)
+
+        # include in buffer 'state' and 'action'
+        self._apply_space_spec(spec=obs_spec, size=num_timesteps, name='state')
+        self._apply_space_spec(spec=act_spec, size=num_timesteps, name='action')
+        self.timestep = 0
+
+    def store_transition(self, **kwargs):
+        """Collects one transition (s, a, r, d)"""
+        for name, value in kwargs.items():
+            self._store_item(item=value, index=self.timestep, name=name)
+
+        self.timestep += 1
+
+    def end_trajectory(self) -> dict:
+        """Ends a sequence of transitions {(s, a, r, d)_t}"""
+        # Add the reward for the terminal/final state:
+        self.buffer['reward'] = np.concatenate([self.buffer['reward'], np.array([0.0])])
+
+        # Duplicate the buffer and cut off the exceeding part (if any)
+        buffer = dict()
+
+        for key, value in self.buffer.items():
+            buffer[key] = value[:self.timestep]
+
+        buffer['reward'] = self.buffer['reward'][:self.timestep + 1]
+        return buffer
+
+    def serialize(self, buffer: dict, episode: int):
+        """Writes to file (npz - numpy compressed format) all the transitions collected so far"""
+        # Trace's file path:
+        filename = f'trace-{episode}-{time.strftime("%Y%m%d-%H%M%S")}.npz'
+        trace_path = os.path.join(self.save_dir, filename)
+
+        # Save buffer
+        np.savez_compressed(file=trace_path, **buffer)
+
+    def _apply_space_spec(self, spec: Union[tuple, dict], size: int, name: str):
+        if not isinstance(spec, dict):
+            shape = (size,) + spec
+            self.buffer[name] = np.zeros(shape=shape, dtype=np.float32)
+            return
+
+        # use recursion + names to handle arbitrary nested dicts and recognize them
+        for spec_name, sub_spec in spec.items():
+            self._apply_space_spec(spec=sub_spec, size=size, name=f'{name}_{spec_name}')
+
+    def _store_item(self, item, index: int, name: str):
+        if not isinstance(item, dict):
+            self.buffer[name][index] = item
+            return
+
+        # recursion
+        for key, value in item.items():
+            self._store_item(item=value, index=index, name=f'{name}_{key}')
+
+
 class CARLARecordWrapper:
     """Wraps a CARLA Environment in order to record input observations"""
     pass
@@ -505,7 +638,8 @@ class CARLARecordWrapper:
 class OneCameraCARLAEnvironment(CARLABaseEnvironment):
     """One camera (front) CARLA Environment"""
     # Control: throttle or brake, steer, reverse
-    CONTROL = dict(space=spaces.Box(low=-1, high=1, shape=(3,)), default=np.zeros(shape=3, dtype=np.float32))
+    ACTION = dict(space=spaces.Box(low=-1, high=1, shape=(3,)), default=np.zeros(shape=3, dtype=np.float32))
+    CONTROL = dict(space=spaces.Box(low=-1, high=1, shape=(4,)), default=np.zeros(shape=4, dtype=np.float32))
 
     # Vehicle: speed, acceleration, angular velocity, similarity, distance to waypoint
     VEHICLE_FEATURES = dict(space=spaces.Box(low=np.array([0.0, -np.inf, 0.0, -1.0, -np.inf]),
@@ -532,9 +666,9 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         self.forward_vector = None
 
         # TODO: use 'next_command' to compute "action penalty"?
-        self.next_command = RoadOption.UNKNOWN
+        self.next_command = RoadOption.VOID
 
-        self.last_actions = self.CONTROL['default']
+        self.last_actions = self.ACTION['default']
         self.last_location = None
         self.last_travelled_distance = 0.0
         self.total_travelled_distance = 0.0
@@ -544,7 +678,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
 
     @property
     def action_space(self) -> spaces.Space:
-        return self.CONTROL['space']
+        return self.ACTION['space']
 
     @property
     def observation_space(self) -> spaces.Space:
@@ -585,11 +719,11 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         return state, reward, done, info
 
     def reset(self) -> dict:
-        self.last_actions = self.CONTROL['default']
+        self.last_actions = self.ACTION['default']
         self.should_terminate = False
         self.total_travelled_distance = 0.0
         self.last_travelled_distance = 0.0
-        self.next_command = RoadOption.UNKNOWN
+        self.next_command = RoadOption.VOID
 
         # reset observations:
         observation = super().reset()
@@ -633,7 +767,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
 
     def render(self, mode='human'):
         assert self.render_data is not None
-        image = np.stack((self.render_data['gray_image'],) * 3, axis=-1)
+        image = self.render_data['camera']
         env_utils.display_image(self.display, image, window_size=self.window_size)
 
     def debug_text(self, actions):
@@ -666,7 +800,12 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
                 'Collision penalty: %.2f' % self.collision_penalty]
 
     def control_to_actions(self, control: carla.VehicleControl):
-        pass
+        reverse = bool(control.reverse)
+
+        if control.throttle > 0.0:
+            return [control.throttle, control.steer, reverse]
+
+        return [-control.brake, control.steer, reverse]
 
     def on_sensors_data(self, data: dict) -> dict:
         data['camera'] = self.sensors['camera'].convert_image(data['camera'])
@@ -674,14 +813,18 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
 
         # include depth information in one image:
         data['camera_plus_depth'] = np.multiply(1 - data['depth'] / 255.0, data['camera'])
-        data['gray_image'] = env_utils.cv2_grayscale(data['camera_plus_depth'])
+
+        if self.image_shape[2] == 1:
+            data['camera'] = env_utils.cv2_grayscale(data['camera_plus_depth'])
+        else:
+            data['camera'] = data['camera_plus_depth']
+
         return data
 
     def after_world_step(self, sensors_data: dict):
         self._update_env_state()
 
     def actions_to_control(self, actions):
-        actions = actions['control']
         self.control.throttle = float(actions[0]) if actions[0] > 0 else 0.0
         self.control.brake = float(-actions[0]) if actions[0] < 0 else 0.0
         self.control.steer = float(actions[1])
@@ -696,15 +839,15 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
             # sensor_data is empty so, return a default observation
             return dict(image=self.default_image, vehicle=self.VEHICLE_FEATURES['default'],
                         road=self.ROAD_FEATURES['default'], past_control=self.CONTROL['default'],
-                        command=RoadOption.UNKNOWN.to_one_hot())
+                        command=RoadOption.VOID.to_one_hot())
 
         # resize image if necessary
-        image = sensors_data['gray_image']
+        image = sensors_data['camera']
 
         if image.shape != self.image_shape:
             image = env_utils.resize(image, size=self.image_size)
 
-        # grayscale image, plus -1, +1 scaling
+        # -1, +1 scaling
         image = (2 * image - 255.0) / 255.0
 
         # observations
@@ -800,6 +943,7 @@ class ThreeCameraCARLAEnvironment(OneCameraCARLAEnvironment):
         image_shape = (image_shape[0], image_shape[1] * 3, image_shape[2])
 
         super().__init__(*args, image_shape=image_shape, window_size=window_size, **kwargs)
+        self.image_size = (image_shape[1] // 3, image_shape[0])
 
     def define_sensors(self) -> dict:
         return dict(collision=SensorSpecs.collision_detector(callback=self.on_collision),
@@ -829,29 +973,8 @@ class ThreeCameraCARLAEnvironment(OneCameraCARLAEnvironment):
 
         # Concat images
         data['camera'] = np.concatenate((left_image, front_image, right_image), axis=1)
+
+        if self.image_shape[2] == 1:
+            data['camera'] = env_utils.cv2_grayscale(data['camera'])
+
         return data
-
-    def get_observation(self, sensors_data: dict) -> dict:
-        if len(sensors_data.keys()) == 0:
-            # sensor_data is empty so, return a default observation
-            return dict(image=self.default_image, vehicle=self.VEHICLE_FEATURES['default'],
-                        road=self.ROAD_FEATURES['default'], past_control=self.CONTROL['default'],
-                        command=RoadOption.UNKNOWN.to_one_hot())
-
-        # resize image if necessary
-        image = sensors_data['camera']
-
-        if image.shape != self.image_shape:
-            image = env_utils.resize(image, size=self.image_size)
-
-        # image, plus -1, +1 scaling
-        image = (2 * image - 255.0) / 255.0
-
-        # observations
-        vehicle_obs = self._get_vehicle_features()
-        control_obs = self._control_as_vector()
-        road_obs = self._get_road_features()
-
-        return dict(image=image, vehicle=vehicle_obs, road=road_obs, past_control=control_obs,
-                    command=self.next_command.to_one_hot())
-
