@@ -33,7 +33,6 @@ class CARLAEvent(enum.Enum):
 # -- Base Class and Wrappers
 # -------------------------------------------------------------------------------------------------
 
-# TODO: remove sensor argument
 # TODO: implement 'observation skip'
 # TODO: implement 'action repetition'?
 class CARLABaseEnvironment(gym.Env):
@@ -41,7 +40,7 @@ class CARLABaseEnvironment(gym.Env):
 
     def __init__(self, address='localhost', port=2000, timeout=5.0, image_shape=(150, 200, 3),
                  window_size=(800, 600), vehicle_filter='vehicle.tesla.model3', fps=30.0, render=True, debug=True,
-                 path: dict = None):
+                 path: dict = None, skip_frames=30):
         super().__init__()
         env_utils.init_pygame()
 
@@ -49,6 +48,8 @@ class CARLABaseEnvironment(gym.Env):
         self.client = env_utils.get_client(address, port, self.timeout)
         self.world: carla.World = self.client.get_world()
         self.synchronous_context = None
+        self.sync_mode_enabled = False
+        self.num_frames_to_skip = skip_frames
 
         # TODO: loading map support
         # Map
@@ -185,7 +186,11 @@ class CARLABaseEnvironment(gym.Env):
         self.reset_world()
         self.trigger_event(event=CARLAEvent.RESET)
 
+        if not self.sync_mode_enabled:
+            self.__enter__()
+
         self.control = carla.VehicleControl()
+        self.skip(num_frames=self.num_frames_to_skip)
 
         observation = env_utils.replace_nans(self.get_observation(sensors_data={}))
         return observation
@@ -227,6 +232,9 @@ class CARLABaseEnvironment(gym.Env):
 
         if self.vehicle:
             self.vehicle.destroy()
+
+        if self.sync_mode_enabled:
+            self.__exit__()
 
         for sensor in self.sensors.values():
             sensor.destroy()
@@ -298,11 +306,13 @@ class CARLABaseEnvironment(gym.Env):
                  # code...
         """
         self.synchronous_context.__enter__()
+        self.sync_mode_enabled = True
         return self
 
     def __exit__(self, *args):
-        # Disables synchronous mode
+        """Disables synchronous mode"""
         self.synchronous_context.__exit__()
+        self.sync_mode_enabled = False
 
         # propagate exception
         return False
@@ -527,38 +537,38 @@ class CARLACollectWrapper:
                                    clean=True)
         return observation
 
-    def collect(self, episodes: int, timesteps: int, agent_debug=False, episode_reward_threshold=0.0, skip_frames=30):
+    def collect(self, episodes: int, timesteps: int, agent_debug=False, episode_reward_threshold=0.0):
         self.init_buffer(num_timesteps=timesteps)
+        env = self.env
 
         for episode in range(episodes):
             state = self.reset()
             episode_reward = 0.0
 
-            with self.env as env:
-                env.skip(num_frames=skip_frames)
+            for t in range(timesteps):
+                # act
+                self.agent.update_information()
+                control = self.agent.run_step(debug=agent_debug)
+                action = env.control_to_actions(control)
 
-                for t in range(timesteps):
-                    # act
-                    self.agent.update_information()
-                    control = self.agent.run_step(debug=agent_debug)
-                    action = env.control_to_actions(control)
+                # step
+                next_state, reward, done, _ = env.step(action)
+                episode_reward += reward
 
-                    # step
-                    next_state, reward, done, _ = env.step(action)
-                    episode_reward += reward
+                # record
+                self.store_transition(state=state, action=action, reward=reward, done=done)
+                state = next_state
 
-                    # record
-                    self.store_transition(state=state, action=action, reward=reward, done=done)
-                    state = next_state
+                if done or (t == timesteps - 1):
+                    buffer = self.end_trajectory()
+                    break
 
-                    if done or (t == timesteps - 1):
-                        buffer = self.end_trajectory()
-                        break
+            if episode_reward > episode_reward_threshold:
+                self.serialize(buffer, episode)
+            else:
+                print(f'Trace-{episode} discarded because reward={round(episode_reward, 2)} below threshold!')
 
-                if episode_reward > episode_reward_threshold:
-                    self.serialize( buffer, episode)
-                else:
-                    print(f'Trace-{episode} discarded because reward={round(episode_reward, 2)} below threshold!')
+        env.close()
 
     def init_buffer(self, num_timesteps: int):
         # partial buffer: misses 'state' and 'action'
@@ -635,6 +645,7 @@ class CARLARecordWrapper:
 # -- Implemented CARLA Environments
 # -------------------------------------------------------------------------------------------------
 
+# TODO: add RADAR observations
 class OneCameraCARLAEnvironment(CARLABaseEnvironment):
     """One camera (front) CARLA Environment"""
     # Control: throttle or brake, steer, reverse

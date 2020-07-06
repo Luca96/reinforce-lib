@@ -34,12 +34,7 @@ class PPOAgent(Agent):
         self.epsilon = clip_ratio
         self.early_stop = early_stop
 
-        # State space
-        if isinstance(self.env.observation_space, gym.spaces.Box):
-            self.state_shape = self.env.observation_space.shape
-        else:
-            self.state_shape = (self.env.observation_space.n,)
-
+        # TODO: handle complex action spaces
         # Action space
         if isinstance(self.env.action_space, gym.spaces.Box):
             self.num_actions = self.env.action_space.shape[0]
@@ -49,8 +44,6 @@ class PPOAgent(Agent):
                 self.distribution_type = 'beta'
                 self.action_range = self.env.action_space.high - self.env.action_space.low
                 self.convert_action = lambda a: a * self.action_range + self.env.action_space.low
-
-                assert self.action_range == abs(self.env.action_space.low - self.env.action_space.high)
             else:
                 self.distribution_type = 'gaussian'
                 self.convert_action = lambda a: a
@@ -60,7 +53,8 @@ class PPOAgent(Agent):
             self.distribution_type = 'categorical'
             self.convert_action = lambda a: a
 
-        print('state_shape:', self.state_shape)
+        # print('state_shape:', self.state_shape)
+        print('state_spec:', self.state_spec)
         print('action_shape:', self.num_actions)
         print('distribution:', self.distribution_type)
 
@@ -72,19 +66,21 @@ class PPOAgent(Agent):
             self.value_network = self._value_network()
 
         # Optimization
+        # TODO: use learning rate schedules:
+        #  https://keras.io/guides/training_with_built_in_methods/#using-learning-rate-schedules
         self.policy_optimizer = optimizers.Adam(learning_rate=policy_lr)
         self.value_optimizer = optimizers.Adam(learning_rate=value_lr)
         self.optimization_steps = dict(policy=optimization_steps[0], value=optimization_steps[1])
 
         # Statistics:
-        self.stats = dict(loss_policy=[[], 0], loss_value=[[], 0], episode_rewards=[[], 0], ratio=[[], 0],
-                          advantages=[[], 0], prob=[[], 0], actions=[[], 0],
-                          entropy=[[], 0], kl_divergence=[[], 0], rewards=[[], 0], returns=[[], 0],
-                          values=[[], 0], gradients_norm_policy=[[], 0], gradients_norm_value=[[], 0])
+        # self.statistics = dict(loss_policy=[[], 0], loss_value=[[], 0], episode_rewards=[[], 0], ratio=[[], 0],
+        #                        advantages=[[], 0], prob=[[], 0], actions=[[], 0],
+        #                        entropy=[[], 0], kl_divergence=[[], 0], rewards=[[], 0], returns=[[], 0],
+        #                        values=[[], 0], gradients_norm_policy=[[], 0], gradients_norm_value=[[], 0])
 
     def act(self, state):
-        action = self.policy_network(state, training=False)
-        return action[0].numpy()
+        action = self.policy_network(utils.to_tensor(state), training=False)
+        return self.convert_action(action[0][0].numpy())
 
     def update(self, batch_size: int):
         # Compute combined advantages and returns:
@@ -100,7 +96,8 @@ class PPOAgent(Agent):
                                                         self.memory.actions, self.memory.log_probabilities),
                                                batch_size=batch_size)
 
-        # Policy network optimization:
+        # Policy network optimization:ù
+        # TODO: remove 'step' and 'enumerate'?
         for _ in range(self.optimization_steps['policy']):
             for step, data_batch in enumerate(policy_batches):
                 with tf.GradientTape() as tape:
@@ -171,7 +168,8 @@ class PPOAgent(Agent):
         return utils.gae(rewards=self.memory.rewards, values=self.memory.values,
                          gamma=self.gamma, lambda_=self.lambda_, normalize=True)
 
-    def learn(self, episodes: int, timesteps: int, batch_size: int, save_every: Union[bool, str, int] = False, render_every=0):
+    def learn(self, episodes: int, timesteps: int, batch_size: int, save_every: Union[bool, str, int] = False,
+              render_every=0):
         if save_every is False:
             save_every = episodes + 1
         elif save_every is True:
@@ -179,52 +177,51 @@ class PPOAgent(Agent):
         elif save_every == 'end':
             save_every = episodes
 
-        with self.env as env:
-            for episode in range(1, episodes + 1):
-                self.memory = PPOMemory(capacity=timesteps, states_shape=self.state_shape, num_actions=self.num_actions)
-                state = env.reset()
-                state = utils.to_tensor(state)
-                episode_reward = 0.0
-                t0 = time.time()
-                render = episode % render_every == 0
+        for episode in range(1, episodes + 1):
+            self.memory = PPOMemory(capacity=timesteps, state_spec=self.state_spec, num_actions=self.num_actions)
+            state = self.env.reset()
+            state = utils.to_tensor(state)
+            episode_reward = 0.0
+            t0 = time.time()
+            render = episode % render_every == 0
 
-                for t in range(1, timesteps + 1):
-                    if render:
-                        env.render()
+            for t in range(1, timesteps + 1):
+                if render:
+                    self.env.render()
 
-                    # Compute action, log_prob, and value
-                    policy = self.policy_network(state, training=False)
-                    action = policy
-                    log_prob = policy.log_prob(action)
-                    value = self.value_network(state, training=False)
+                # Compute action, log_prob, and value
+                policy = self.policy_network(state, training=False)
+                action = policy
+                log_prob = policy.log_prob(action)
+                value = self.value_network(state, training=False)
 
-                    # Make action in the right range for the environment
-                    converted_action = self.convert_action(action[0][0].numpy())
+                # Make action in the right range for the environment
+                converted_action = self.convert_action(action[0][0].numpy())
 
-                    # Environment step
-                    next_state, reward, done, _ = env.step(converted_action)
-                    episode_reward += reward
+                # Environment step
+                next_state, reward, done, _ = self.env.step(converted_action)
+                episode_reward += reward
 
-                    self.log(actions=converted_action, rewards=reward)
+                self.log(actions=converted_action, rewards=reward)
 
-                    self.memory.append(state, action, reward, value, log_prob)
-                    state = utils.to_tensor(next_state)
+                self.memory.append(state, action, reward, value, log_prob)
+                state = utils.to_tensor(next_state)
 
-                    # check whether a termination (terminal state or end of a transition) is reached:
-                    if done or (t == timesteps):
-                        print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 4)}s ' +
-                              f'with reward {episode_reward}.')
-                        self.memory.end_trajectory(last_value=0 if done else self.value_network(state)[0])
-                        break
+                # check whether a termination (terminal state or end of a transition) is reached:
+                if done or (t == timesteps):
+                    print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 4)}s ' +
+                          f'with reward {episode_reward}.')
+                    self.memory.end_trajectory(last_value=0 if done else self.value_network(state)[0])
+                    break
 
-                self.update(batch_size)
-                self.log(episode_rewards=episode_reward)
+            self.update(batch_size)
+            self.log(episode_rewards=episode_reward)
+            self.write_summaries()
 
-                if self.use_summary:
-                    self.write_summaries()
+            if episode % save_every == 0:
+                self.save()
 
-                if episode % save_every == 0:
-                    self.save()
+        self.env.close()
 
     def get_distribution_layer(self, layer: Layer) -> tfp.layers.DistributionLambda:
         if self.distribution_type == 'categorical':
@@ -257,12 +254,12 @@ class PPOAgent(Agent):
             make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[0], scale=t[1]),
             convert_to_tensor_fn=lambda s: s.sample(self.num_actions))([mu, sigma])
 
-    def policy_layers(self, input_layers: dict, **kwargs) -> Layer:
+    def policy_layers(self, inputs: dict, **kwargs) -> Layer:
         """Main (central) part of the policy network"""
         units = kwargs.get('units', 32)
         num_layers = kwargs.get('layers', 2)
 
-        x = Dense(units, activation='tanh')(input_layers['input'])
+        x = Dense(units, activation='tanh')(inputs['state'])
 
         for _ in range(num_layers):
             x = Dense(units, activation='relu')(x)
@@ -270,25 +267,29 @@ class PPOAgent(Agent):
 
         return x
 
-    def value_layers(self, input_layers: dict, **kwargs) -> Layer:
+    def value_layers(self, inputs: dict, **kwargs) -> Layer:
         """Main (central) part of the value network"""
         # Default: use same layers as policy
-        return self.policy_layers(input_layers)
+        return self.policy_layers(inputs)
 
     def _policy_network(self) -> Model:
-        input_layers = utils.get_input_layers(self.state_shape)
-        x = self.policy_layers(input_layers)
+        inputs = self._get_input_layers()
+        x = self.policy_layers(inputs)
         action = self.get_distribution_layer(layer=x)
 
-        return Model(inputs=input_layers, outputs=action, name='policy')
+        return Model(inputs=list(inputs.values()), outputs=action, name='policy')
 
     def _value_network(self) -> Model:
         """Single-head Value Network"""
-        input_layers = utils.get_input_layers(self.state_shape)
-        x = self.value_layers(input_layers)
+        inputs = self._get_input_layers()
+        x = self.value_layers(inputs)
         value = Dense(units=1, activation=None, name='value_head')(x)
 
-        return Model(inputs=input_layers, outputs=value, name='value_network')
+        return Model(inputs=list(inputs.values()), outputs=value, name='value_network')
+
+    def summary(self):
+        self.policy_network.summary()
+        self.value_network.summary()
 
     def save(self):
         print('saving...')
@@ -334,13 +335,61 @@ class PPOAgent(Agent):
         return Model(inputs=model.input, outputs=action, name='policy')
 
 
+# class PPOMemory:
+#     def __init__(self, capacity: int, states_shape: tuple, num_actions: int):
+#         self.index = 0
+#         self.size = capacity
+#
+#         # TODO: use 'tf' instead of 'np'
+#         self.states = np.zeros(shape=(capacity,) + states_shape, dtype=np.float32)
+#         self.rewards = np.zeros(shape=capacity + 1, dtype=np.float32)
+#         self.values = np.zeros(shape=capacity + 1, dtype=np.float32)
+#         self.actions = np.zeros(shape=(capacity, num_actions), dtype=np.float32)
+#         self.log_probabilities = np.zeros(shape=(capacity, 1), dtype=np.float32)
+#
+#     def append(self, state, action, reward, value, log_prob):
+#         assert self.index < self.size
+#         i = self.index
+#
+#         self.states[i] = tf.squeeze(state)
+#         self.actions[i] = tf.squeeze(action)
+#         self.rewards[i] = reward
+#         self.values[i] = utils.tf_to_scalar_shape(value)
+#         self.log_probabilities[i] = log_prob
+#         self.index += 1
+#
+#     def end_trajectory(self, last_value):
+#         """Terminates the current trajectory by adding the value of the terminal state"""
+#         self.rewards[self.index] = last_value
+#         self.values[self.index] = last_value
+#
+#         # cut off the exceeding part
+#         if self.index < self.size:
+#             self.states = self.states[:self.index]
+#             self.actions = self.actions[:self.index]
+#             self.rewards = self.rewards[:self.index + 1]
+#             self.values = self.values[:self.index + 1]
+#             self.log_probabilities = self.log_probabilities[:self.index]
+
+
+# TODO: use 'tf' instead of 'np'
 class PPOMemory:
-    def __init__(self, capacity: int, states_shape: tuple, num_actions: int):
+    def __init__(self, capacity: int, state_spec: dict, num_actions: int):
         self.index = 0
         self.size = capacity
 
-        # TODO: use 'tf' instead of 'np'
-        self.states = np.zeros(shape=(capacity,) + states_shape, dtype=np.float32)
+        if list(state_spec.keys()) == ['state']:
+            # Simple state-space
+            self.states = np.zeros(shape=(capacity,) + state_spec.get('state'), dtype=np.float32)
+            self.simple_state = True
+        else:
+            # Complex state-space
+            self.states = dict()
+            self.simple_state = False
+
+            for name, shape in state_spec.items():
+                self.states[name] = np.zeros(shape=(capacity,) + shape, dtype=np.float32)
+
         self.rewards = np.zeros(shape=capacity + 1, dtype=np.float32)
         self.values = np.zeros(shape=capacity + 1, dtype=np.float32)
         self.actions = np.zeros(shape=(capacity, num_actions), dtype=np.float32)
@@ -350,7 +399,14 @@ class PPOMemory:
         assert self.index < self.size
         i = self.index
 
-        self.states[i] = tf.squeeze(state)
+        if self.simple_state:
+            self.states[i] = tf.squeeze(state)
+        else:
+            assert isinstance(state, dict)
+
+            for k, v in state.items():
+                self.states[f'{state}_{k}'][i] = tf.squeeze(v)
+
         self.actions[i] = tf.squeeze(action)
         self.rewards[i] = reward
         self.values[i] = utils.tf_to_scalar_shape(value)
@@ -364,11 +420,16 @@ class PPOMemory:
 
         # cut off the exceeding part
         if self.index < self.size:
-            self.states = self.states[:self.index]
             self.actions = self.actions[:self.index]
             self.rewards = self.rewards[:self.index + 1]
             self.values = self.values[:self.index + 1]
             self.log_probabilities = self.log_probabilities[:self.index]
+
+            if self.simple_state:
+                self.states = self.states[:self.index]
+            else:
+                for k, v in self.states.items():
+                    self.states[k] = v[:self.index]
 
 
 # -------------------------------------------------------------------------------------------------
@@ -387,13 +448,13 @@ class PPO2Agent(PPOAgent):
         self.value_coeff = (tf.constant(0.5), tf.constant(0.5))
 
         # Statistics
-        self.stats = dict(loss_policy=[[], 0], loss_value=[[], 0], episode_rewards=[[], 0], ratio=[[], 0],
-                          advantages=[[], 0], prob=[[], 0], actions=[[], 0],
-                          entropy=[[], 0], kl_divergence=[[], 0], rewards_extrinsic=[[], 0],
-                          rewards_intrinsic=[[], 0], values_intrinsic=[[], 0], values_extrinsic=[[], 0],
-                          returns_extrinsic=[[], 0], returns_intrinsic=[[], 0],
-                          advantages_intrinsic=[[], 0], advantages_extrinsic=[[], 0],
-                          gradients_norm_policy=[[], 0], gradients_norm_value=[[], 0])
+        # self.stats = dict(loss_policy=[[], 0], loss_value=[[], 0], episode_rewards=[[], 0], ratio=[[], 0],
+        #                   advantages=[[], 0], prob=[[], 0], actions=[[], 0],
+        #                   entropy=[[], 0], kl_divergence=[[], 0], rewards_extrinsic=[[], 0],
+        #                   rewards_intrinsic=[[], 0], values_intrinsic=[[], 0], values_extrinsic=[[], 0],
+        #                   returns_extrinsic=[[], 0], returns_intrinsic=[[], 0],
+        #                   advantages_intrinsic=[[], 0], advantages_extrinsic=[[], 0],
+        #                   gradients_norm_policy=[[], 0], gradients_norm_value=[[], 0])
 
     def update(self, batch_size: int):
         # Compute combined advantages and returns:
@@ -518,9 +579,7 @@ class PPO2Agent(PPOAgent):
 
                 self.update(batch_size)
                 self.log(episode_rewards=episode_reward)
-
-                if self.use_summary:
-                    self.write_summaries()
+                self.write_summaries()
 
                 if episode % save_every == 0:
                     self.save()

@@ -1,4 +1,5 @@
 import gym
+import numpy as np
 import matplotlib.pyplot as plt
 import scipy.signal
 import tensorflow as tf
@@ -7,6 +8,8 @@ import tensorflow_probability as tfp
 from tensorflow.keras.layers import *
 from tensorflow.keras.models import Model
 from tensorflow.keras import optimizers
+
+from rl import utils
 
 
 def discount_cumsum(x, discount: float):
@@ -111,6 +114,28 @@ def test_tf_data_api(data_size=10, batch_size=4):
     print('batch-shuffled:', list(dataset.shuffle(buffer_size=batch_size).as_numpy_iterator()))
 
 
+def test_dict_inputs():
+    # Build model
+    a = Input(shape=1, name='a')
+    b = Input(shape=1, name='b')
+    x = concatenate([a, b])
+    x = Dense(16, activation='relu')(x)
+    x = Dense(4, activation='softmax')(x)
+    model = Model(inputs=[a, b], outputs=x)
+    model.summary()
+
+    # Feed input
+    result = model(dict(a=np.random.random((2, 1)),
+                        b=np.random.random((2, 1))))
+    print(result)
+
+
+def test_space_to_flat_spec():
+    space = gym.spaces.Dict(a=gym.spaces.Dict(b=gym.spaces.Discrete(2)),
+                            c=gym.spaces.Box(low=0, high=1, shape=(2, 2)))
+    print(utils.space_to_flat_spec(space, name='space'))
+
+
 if __name__ == '__main__':
     # Memories:
     # test_recent_memory()
@@ -138,6 +163,9 @@ if __name__ == '__main__':
 
     # Networks:
     # test_dual_head_value_network()
+    # test_dict_inputs()
 
-    test_tf_data_api()
+    # Data:
+    # test_tf_data_api()
+    test_space_to_flat_spec()
     pass
