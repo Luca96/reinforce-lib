@@ -407,7 +407,11 @@ class CARLABaseEnvironment(gym.Env):
             self.sensors[name] = sensor
 
 
-class CARLAPlayWrapper:
+class CARLAWrapper:
+    pass
+
+
+class CARLAPlayWrapper(CARLAWrapper):
     """Makes an already instantiated CARLAEnvironment be playable with a keyboard"""
     CONTROL = dict(type='float', shape=(5,), min_value=-1.0, max_value=1.0,
                    default=[0.0, 0.0, 0.0, 0.0, 0.0])
@@ -509,13 +513,13 @@ class CARLAPlayWrapper:
             # env.route.draw_next_waypoint(env.world.debug, env.vehicle.get_location(), life_time=1.0 / env.fps)
 
 
-class CARLACollectWrapper:
+class CARLACollectWrapper(CARLAWrapper):
     """Wraps a CARLA Environment, collects input observations and output actions that can be later
        used for pre-training or imitation learning purposes.
     """
 
     def __init__(self, env: CARLABaseEnvironment, ignore_traffic_light: bool, traces_dir='traces', name='carla',
-                 behaviour='normal'):
+                 behaviour='normal', unnormalize=True,):
         self.env = env
         self.agent = None
         self.agent_behaviour = behaviour  # 'normal', 'cautious', or 'aggressive'
@@ -636,6 +640,53 @@ class CARLACollectWrapper:
             self._store_item(item=value, index=index, name=f'{name}_{key}')
 
 
+# TODO: 'CARLAObservationWrapper' takes (obs, r, d, info) in env.step() and wraps obs as a temporal
+#  sequence with N frames skipping.
+#  - change state space according to 'temporal horizon
+class CARLAObservationWrapper(gym.ObservationWrapper):
+
+    def __init__(self, env: CARLABaseEnvironment, temporal_horizon=1, consider_obs_every=1):
+        super().__init__(env)
+
+        self.temporal_horizon = temporal_horizon
+        self.consider_obs_every = consider_obs_every
+
+        # Expand observation space according to temporal horizon (i.e. add a temporal dimension):
+        self._expand_space_shape(self.observation_space)
+
+    def observation(self, observation):
+        if isinstance(observation, dict):
+            # Complex observation
+            for name, obs in observation.items():
+                new_obs = self.observation(obs)
+                observation[name] = new_obs
+
+            return observation
+        else:
+            if rl_utils.is_image(observation):
+                arrays = (observation,) * self.temporal_horizon
+                return rl_utils.depth_concat(*arrays)
+
+            elif rl_utils.is_vector(observation):
+                pass
+
+    def _expand_space_shape(self, space: gym.Space):
+        if isinstance(space, spaces.Box):
+            if rl_utils.is_image(space):
+                space.shape = space.shape[:2] + (space.shape[2] * self.temporal_horizon,)
+
+            elif rl_utils.is_vector(space):
+                space.shape = (self.temporal_horizon,) + space.shape
+            else:
+                raise ValueError(f'Unsupported space type: {type(space)}!')
+
+        elif isinstance(space, spaces.Dict):
+            for _, sub_space in space.spaces.items():
+                self._expand_space_shape(space=sub_space)
+        else:
+            raise ValueError(f'Unsupported space type: {type(space)}!')
+
+
 class CARLARecordWrapper:
     """Wraps a CARLA Environment in order to record input observations"""
     pass
@@ -645,7 +696,6 @@ class CARLARecordWrapper:
 # -- Implemented CARLA Environments
 # -------------------------------------------------------------------------------------------------
 
-# TODO: add RADAR observations
 class OneCameraCARLAEnvironment(CARLABaseEnvironment):
     """One camera (front) CARLA Environment"""
     # Control: throttle or brake, steer, reverse
@@ -664,6 +714,9 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
 
     # High-level routing command (aka RoadOption)
     COMMAND_SPACE = spaces.Box(low=0.0, high=1.0, shape=(len(RoadOption),))
+
+    # Radar: velocity, altitude, azimuth, depth
+    # RADAR_SPACE = dict(space=spaces.Box(low=-np.inf, high=np.inf, shape=(50, 4)), default=None)
 
     def __init__(self, *args, disable_reverse=False, **kwargs):
         super().__init__(*args, **kwargs)
@@ -759,7 +812,10 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
                     depth=SensorSpecs.depth_camera(position='on-top2', attachment_type='Rigid',
                                                    image_size_x=self.image_size[0],
                                                    image_size_y=self.image_size[1],
-                                                   sensor_tick=self.tick_time))
+                                                   sensor_tick=self.tick_time),
+                    # radar=SensorSpecs.radar(position='radar', points_per_second=1000,
+                    #                         sensor_tick=self.tick_time)
+                    )
 
     def on_collision(self, event: carla.CollisionEvent, penalty=1000.0):
         actor_type = event.other_actor.type_id
@@ -780,6 +836,10 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         assert self.render_data is not None
         image = self.render_data['camera']
         env_utils.display_image(self.display, image, window_size=self.window_size)
+
+        # radar_data = self.render_data['radar']
+        # print('radar count:', radar_data.get_detection_count())
+        # env_utils.draw_radar_measurement(debug_helper=self.world.debug, data=radar_data)
 
     def debug_text(self, actions):
         speed_limit = self.vehicle.get_speed_limit()
@@ -830,6 +890,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         else:
             data['camera'] = data['camera_plus_depth']
 
+        # data['radar_converted'] = self.sensors['radar'].convert(data['radar'])
         return data
 
     def after_world_step(self, sensors_data: dict):
@@ -948,29 +1009,33 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
 class ThreeCameraCARLAEnvironment(OneCameraCARLAEnvironment):
     """Three Camera (front, lateral left and right) CARLA Environment"""
 
-    def __init__(self, *args, window_size=(600, 300), **kwargs):
+    def __init__(self, *args, image_shape=(120, 160, 1), window_size=(600, 300), **kwargs):
         # Make the shape of the final image three times larger to account for the three cameras
-        image_shape = kwargs.pop('image_shape', (150, 200, 3))
         image_shape = (image_shape[0], image_shape[1] * 3, image_shape[2])
 
         super().__init__(*args, image_shape=image_shape, window_size=window_size, **kwargs)
         self.image_size = (image_shape[1] // 3, image_shape[0])
 
+    # TODO: add 'depth camera' only to frontal camera, add 'radar' sensor
     def define_sensors(self) -> dict:
         return dict(collision=SensorSpecs.collision_detector(callback=self.on_collision),
                     imu=SensorSpecs.imu(),
-                    front_camera=SensorSpecs.rgb_camera(position='on-top2', attachment_type='Rigid',
-                                                        image_size_x=self.image_size[0],
-                                                        image_size_y=self.image_size[1],
-                                                        sensor_tick=self.tick_time),
-                    left_camera=SensorSpecs.rgb_camera(position='lateral-left', attachment_type='Rigid',
-                                                       image_size_x=self.image_size[0],
-                                                       image_size_y=self.image_size[1],
-                                                       sensor_tick=self.tick_time),
-                    right_camera=SensorSpecs.rgb_camera(position='lateral-right', attachment_type='Rigid',
-                                                        image_size_x=self.image_size[0],
-                                                        image_size_y=self.image_size[1],
-                                                        sensor_tick=self.tick_time))
+                    front_camera=SensorSpecs.segmentation_camera(position='on-top2', attachment_type='Rigid',
+                                                                 image_size_x=self.image_size[0],
+                                                                 image_size_y=self.image_size[1],
+                                                                 sensor_tick=self.tick_time),
+                    depth=SensorSpecs.depth_camera(position='on-top2', attachment_type='Rigid',
+                                                   image_size_x=self.image_size[0],
+                                                   image_size_y=self.image_size[1],
+                                                   sensor_tick=self.tick_time),
+                    left_camera=SensorSpecs.segmentation_camera(position='lateral-left', attachment_type='Rigid',
+                                                                image_size_x=self.image_size[0],
+                                                                image_size_y=self.image_size[1],
+                                                                sensor_tick=self.tick_time),
+                    right_camera=SensorSpecs.segmentation_camera(position='lateral-right', attachment_type='Rigid',
+                                                                 image_size_x=self.image_size[0],
+                                                                 image_size_y=self.image_size[1],
+                                                                 sensor_tick=self.tick_time))
 
     def render(self, mode='human'):
         assert self.render_data is not None
@@ -981,6 +1046,10 @@ class ThreeCameraCARLAEnvironment(OneCameraCARLAEnvironment):
         front_image = self.sensors['front_camera'].convert_image(data['front_camera'])
         left_image = self.sensors['left_camera'].convert_image(data['left_camera'])
         right_image = self.sensors['right_camera'].convert_image(data['right_camera'])
+
+        # include depth information in one image:
+        data['depth'] = self.sensors['depth'].convert_image(data['depth'])
+        front_image = np.multiply(1 - data['depth'] / 255.0, front_image)
 
         # Concat images
         data['camera'] = np.concatenate((left_image, front_image, right_image), axis=1)

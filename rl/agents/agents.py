@@ -10,14 +10,14 @@ from tensorflow.keras import layers
 
 
 # TODO: implement RandomAgent
-# TODO: actor-critic agent interface (to include policy/value network as well loading/saving)?
-# TODO: imitation learning agents, e.g. CIL agent (conditional imitation learning)
+# TODO: actor-critic agent interface (to include policy/value network as well as loading/saving)?
 
 class Agent:
     """Agent abstract class"""
     # TODO: check random seed issue
-    def __init__(self, env: gym.Env, seed=None, weights_dir='weights', name='agent', log_mode='summary'):
+    def __init__(self, env: gym.Env, batch_size: int, seed=None, weights_dir='weights', name='agent', log_mode='summary'):
         self.env = env
+        self.batch_size = batch_size
         self.state_spec = utils.space_to_flat_spec(space=self.env.observation_space, name='state')
         self.action_spec = utils.space_to_flat_spec(space=self.env.action_space, name='action')
 
@@ -39,7 +39,7 @@ class Agent:
     def act(self, state):
         pass
 
-    def update(self, batch_size: int):
+    def update(self):
         pass
 
     def learn(self, *args, **kwargs):

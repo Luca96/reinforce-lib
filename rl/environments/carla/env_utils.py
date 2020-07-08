@@ -268,11 +268,10 @@ def clamp(value, min_value, max_value):
     return max(min_value, min(value, max_value))
 
 
-def cv2_grayscale(image: np.ndarray, is_bgr=True, reshape=True, depth=1):
+def cv2_grayscale(image: np.ndarray, is_bgr=True, depth=1):
     """Convert a RGB or BGR image to grayscale using OpenCV (cv2).
         :param image: input image, a numpy.ndarray.
         :param is_bgr: tells whether the image is in BGR format. If False, RGB format is assumed.
-        :param reshape: uses numpy to reshape the image to (h, w, 1)
         :param depth: replicates the gray depth channel multiple times. E.g. useful to display grayscale images as rgb.
     """
     assert depth >= 1
@@ -286,14 +285,12 @@ def cv2_grayscale(image: np.ndarray, is_bgr=True, reshape=True, depth=1):
     else:
         grayscale = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-    if reshape:
-        grayscale = np.reshape(grayscale, newshape=grayscale.shape + (1,))
-
     if depth > 1:
+        # depth concatenation (stack creates a new axis)
         return np.stack((grayscale,) * depth, axis=-1)
-
-    assert len(grayscale.shape) == 3
-    return grayscale
+    else:
+        # cv2 drops the channel axis in grayscale images
+        return np.reshape(grayscale, newshape=grayscale.shape + (1,))
 
 
 def replace_nans(data: dict, nan=0.0, pos_inf=0.0, neg_inf=0.0):

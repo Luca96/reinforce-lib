@@ -19,13 +19,12 @@ def ppo_cartpole_test():
 
     # reaches 200 as reward (also cartPole3)
     # (batch shuffling works but learning is worse)
-    agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.20,
+    agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.05,
                      lambda_=0.95, entropy_regularization=0.0, name='ppo-cartPole',
-                     optimization_steps=(1, 1),
+                     optimization_steps=(1, 2), batch_size=20,
                      log_mode='summary', load=False)
 
-    agent.learn(episodes=200, timesteps=200, batch_size=20,
-                render_every=10, save_every='end')
+    agent.learn(episodes=200, timesteps=200, render_every=10, save_every=False)
 
 
 def ppo_mountaincar_test():
@@ -39,11 +38,10 @@ def ppo_mountaincar_test():
 
     agent = PPOAgent(env, policy_lr=1e-3, value_lr=3e-4, clip_ratio=0.20,
                      lambda_=0.95, entropy_regularization=0.001, name='ppo-mountainCarContinuous',
-                     optimization_steps=(1, 1),
+                     optimization_steps=(1, 1), batch_size=50,
                      load=False, log_mode='summary')
 
-    agent.learn(episodes=200, timesteps=1000, batch_size=50,
-                render_every=5, save_every='end')
+    agent.learn(episodes=200, timesteps=1000, render_every=5, save_every='end')
 
 
 if __name__ == '__main__':

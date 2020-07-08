@@ -24,7 +24,7 @@ class PPOAgent(Agent):
     # TODO: use KL-Divergence to stop policy optimization early?
     def __init__(self, *args, policy_lr=3e-4, value_lr=1e-4, optimization_steps=(10, 10), clip_ratio=0.2,
                  gamma=0.99, lambda_=0.95, target_kl=0.01, entropy_regularization=0.0, early_stop=False,
-                 load=False, name='ppo-agent', **kwargs):
+                 load=False, name='ppo-agent', drop_batch_reminder=False, **kwargs):
         super().__init__(*args, name=name, **kwargs)
         self.memory = None
         self.gamma = gamma
@@ -33,6 +33,7 @@ class PPOAgent(Agent):
         self.entropy_strength = tf.constant(entropy_regularization)
         self.epsilon = clip_ratio
         self.early_stop = early_stop
+        self.drop_batch_reminder = drop_batch_reminder
 
         # TODO: handle complex action spaces
         # Action space
@@ -82,7 +83,7 @@ class PPOAgent(Agent):
         action = self.policy_network(utils.to_tensor(state), training=False)
         return self.convert_action(action[0][0].numpy())
 
-    def update(self, batch_size: int):
+    def update(self):
         # Compute combined advantages and returns:
         advantages = self.get_advantages()
         returns = utils.rewards_to_go(rewards=self.memory.rewards, discount=self.gamma, normalize=True)
@@ -91,12 +92,13 @@ class PPOAgent(Agent):
         self.log(returns=returns, advantages=advantages, values=self.memory.values)
 
         # Prepare data: (states, returns) and (states, advantages, actions, log_prob)
-        value_batches = utils.data_to_batches(tensors=(self.memory.states, returns), batch_size=batch_size)
+        value_batches = utils.data_to_batches(tensors=(self.memory.states, returns), batch_size=self.batch_size,
+                                              drop_remainder=self.drop_batch_reminder)
         policy_batches = utils.data_to_batches(tensors=(self.memory.states, advantages,
                                                         self.memory.actions, self.memory.log_probabilities),
-                                               batch_size=batch_size)
+                                               batch_size=self.batch_size, drop_remainder=self.drop_batch_reminder)
 
-        # Policy network optimization:ù
+        # Policy network optimization:
         # TODO: remove 'step' and 'enumerate'?
         for _ in range(self.optimization_steps['policy']):
             for step, data_batch in enumerate(policy_batches):
@@ -126,6 +128,7 @@ class PPOAgent(Agent):
                 self.log(loss_value=value_loss.numpy(),
                          gradients_norm_value=[tf.norm(gradient) for gradient in value_grads])
 
+    @tf.function
     def value_objective(self, batch):
         states, returns = batch
         values = self.value_network(states, training=True)
@@ -143,9 +146,7 @@ class PPOAgent(Agent):
             new_log_prob = tf.reduce_mean(new_log_prob, axis=0)
             new_log_prob = tf.expand_dims(new_log_prob, axis=-1)
 
-        # TODO: find a better way to compute the KL-divergence
-        # kl_divergence = new_policy.kl_divergence(other=old_policy)
-        kl_divergence = np.mean(new_log_prob - old_log_probabilities)
+        kl_divergence = self.kullback_leibler_divergence(old_log_probabilities, new_log_prob)
 
         # Entropy
         entropy = new_policy.entropy()
@@ -164,11 +165,16 @@ class PPOAgent(Agent):
         loss = -tf.reduce_mean(tf.minimum(ratio * advantages, clipped_ratio * advantages) + entropy_term)
         return loss, kl_divergence
 
+    @staticmethod
+    def kullback_leibler_divergence(log_a, log_b):
+        """Source: https://www.tensorflow.org/api_docs/python/tf/keras/losses/KLD"""
+        return log_a * (log_a - log_b)
+
     def get_advantages(self):
         return utils.gae(rewards=self.memory.rewards, values=self.memory.values,
                          gamma=self.gamma, lambda_=self.lambda_, normalize=True)
 
-    def learn(self, episodes: int, timesteps: int, batch_size: int, save_every: Union[bool, str, int] = False,
+    def learn(self, episodes: int, timesteps: int, save_every: Union[bool, str, int] = False,
               render_every=0):
         if save_every is False:
             save_every = episodes + 1
@@ -214,7 +220,7 @@ class PPOAgent(Agent):
                     self.memory.end_trajectory(last_value=0 if done else self.value_network(state)[0])
                     break
 
-            self.update(batch_size)
+            self.update()
             self.log(episode_rewards=episode_reward)
             self.write_summaries()
 
@@ -335,43 +341,6 @@ class PPOAgent(Agent):
         return Model(inputs=model.input, outputs=action, name='policy')
 
 
-# class PPOMemory:
-#     def __init__(self, capacity: int, states_shape: tuple, num_actions: int):
-#         self.index = 0
-#         self.size = capacity
-#
-#         # TODO: use 'tf' instead of 'np'
-#         self.states = np.zeros(shape=(capacity,) + states_shape, dtype=np.float32)
-#         self.rewards = np.zeros(shape=capacity + 1, dtype=np.float32)
-#         self.values = np.zeros(shape=capacity + 1, dtype=np.float32)
-#         self.actions = np.zeros(shape=(capacity, num_actions), dtype=np.float32)
-#         self.log_probabilities = np.zeros(shape=(capacity, 1), dtype=np.float32)
-#
-#     def append(self, state, action, reward, value, log_prob):
-#         assert self.index < self.size
-#         i = self.index
-#
-#         self.states[i] = tf.squeeze(state)
-#         self.actions[i] = tf.squeeze(action)
-#         self.rewards[i] = reward
-#         self.values[i] = utils.tf_to_scalar_shape(value)
-#         self.log_probabilities[i] = log_prob
-#         self.index += 1
-#
-#     def end_trajectory(self, last_value):
-#         """Terminates the current trajectory by adding the value of the terminal state"""
-#         self.rewards[self.index] = last_value
-#         self.values[self.index] = last_value
-#
-#         # cut off the exceeding part
-#         if self.index < self.size:
-#             self.states = self.states[:self.index]
-#             self.actions = self.actions[:self.index]
-#             self.rewards = self.rewards[:self.index + 1]
-#             self.values = self.values[:self.index + 1]
-#             self.log_probabilities = self.log_probabilities[:self.index]
-
-
 # TODO: use 'tf' instead of 'np'
 class PPOMemory:
     def __init__(self, capacity: int, state_spec: dict, num_actions: int):
@@ -436,6 +405,7 @@ class PPOMemory:
 # -- PPO2: PPO Agent with RND exploration method
 # -------------------------------------------------------------------------------------------------
 
+# TODO: must update
 class PPO2Agent(PPOAgent):
     """Proximal Policy Optimization (PPO) agent with Random Network Distillation (RND) exploration method """
     def __init__(self, *args, advantage_weights=(0.5, 0.5), **kwargs):
@@ -598,6 +568,7 @@ class PPO2Agent(PPOAgent):
         return Model(inputs, outputs=[extrinsic_value, intrinsic_value], name='value_network')
 
 
+# TODO: must update
 class PPO2Memory:
     def __init__(self, capacity: int, states_shape: tuple, num_actions: int):
         self.index = 0

@@ -4,6 +4,7 @@ import os
 import random
 import numpy as np
 import tensorflow as tf
+import matplotlib.pyplot as plt
 
 from tensorflow.keras import losses
 
@@ -21,6 +22,7 @@ class ImitationWrapper:
     def __init__(self, agent: Agent, policy_lr=3e-4, value_lr=3e-4, traces_dir='traces',
                  weights_dir='weights_imitation', log_mode='summary', name='imitation'):
         self.agent = agent
+        self.batch_size = agent.batch_size
         self.save_path = dict(policy=os.path.join(weights_dir, name, 'policy_net'),
                               value=os.path.join(weights_dir, name, 'value_net'))
         # Traces
@@ -39,9 +41,9 @@ class ImitationWrapper:
         self.statistics = utils.Statistics(mode=log_mode, name=name)
 
     # TODO: include 'seed' parameter
-    def imitate(self, batch_size: int, discount=0.99, shuffle_traces=False, shuffle_batches=False,
+    def imitate(self, discount=0.99, shuffle_traces=False, shuffle_batches=False,
                 repetitions=1, save_every=1):
-        for r in range(repetitions):
+        for r in range(1, repetitions + 1):
             print('repetition:', r)
 
             for i, trace in enumerate(self.load_traces(shuffle=shuffle_traces)):
@@ -50,22 +52,29 @@ class ImitationWrapper:
                 returns = utils.rewards_to_go(rewards, discount, normalize=True)
 
                 # Train policy and value networks:
-                self.train_policy(states, actions, batch_size, shuffle=shuffle_batches)
-                self.train_value(states, returns, batch_size, shuffle=shuffle_batches)
+                self.train_policy(states, actions, shuffle=shuffle_batches)
+                self.train_value(states, returns, shuffle=shuffle_batches)
 
                 self.log(actions=actions, done=done, rewards=rewards, returns=returns)
+                self.write_summaries()
 
                 # TODO: better saving..
                 if (i + 1) % save_every == 0:
                     self.save()
 
-                self.write_summaries()
+    def augment(self):
+        @tf.function
+        def augment_fn(element):
+            return element
 
-        self.agent.env.close()
+        return augment_fn
 
-    def train_policy(self, states, actions, batch_size: int, shuffle: bool):
+    def train_policy(self, states, actions, shuffle: bool):
         """One training step for policy network"""
-        for batch in utils.data_to_batches((states, actions), batch_size, shuffle):
+        dataset = utils.data_to_batches((states, actions),  batch_size=self.batch_size,
+                                        shuffle=shuffle, map_fn=self.augment(),
+                                        drop_remainder=self.agent.drop_batch_reminder)
+        for batch in dataset:
             states_batch, true_actions = batch
 
             with tf.GradientTape() as tape:
@@ -81,9 +90,12 @@ class ImitationWrapper:
                      actions_pred=pred_actions,
                      gradients_norm_action=[tf.norm(gradient) for gradient in grads])
 
-    def train_value(self, states, returns, batch_size: int, shuffle: bool):
+    def train_value(self, states, returns, shuffle: bool):
         """One training step for value network"""
-        for batch in utils.data_to_batches((states, returns), batch_size, shuffle):
+        dataset = utils.data_to_batches((states, returns), batch_size=self.batch_size,
+                                        shuffle=shuffle, map_fn=self.augment(),
+                                        drop_remainder=self.agent.drop_batch_reminder)
+        for batch in dataset:
             states_batch, true_values = batch
 
             with tf.GradientTape() as tape:
@@ -113,7 +125,7 @@ class ImitationWrapper:
     @staticmethod
     def interpret(trace: dict) -> tuple:
         trace_keys = trace.keys()
-        trace = {k: trace[k] for k in trace_keys}
+        trace = {k: trace[k] for k in trace_keys}  # copy
 
         for name in ['state', 'action']:
             # check if state/action space is simple (array, i.e sum == 1) or complex (dict of arrays)
@@ -136,6 +148,3 @@ class ImitationWrapper:
 
     def write_summaries(self):
         self.statistics.write_summaries()
-
-
-# ConditionalImitationLearning - CILAgent

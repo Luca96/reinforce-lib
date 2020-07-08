@@ -5,6 +5,8 @@ import numpy as np
 import scipy.signal
 import tensorflow as tf
 import matplotlib.pyplot as plt
+import imgaug.augmenters as iaa
+import imgaug as ia
 
 from typing import Union, List, Dict, Tuple
 from datetime import datetime
@@ -24,7 +26,6 @@ def to_tensor(x, expand_axis=0):
 
 def tf_normalize(x):
     """Normalizes some tensor x to 0-mean 1-stddev"""
-    # return (x - tf.math.reduce_mean(x)) / (tf.math.reduce_std(x) + np.finfo(np.float32).eps)
     return (x - tf.math.reduce_mean(x)) / tf.math.reduce_std(x)
 
 
@@ -56,10 +57,15 @@ def rewards_to_go(rewards, discount: float, normalize=False):
     return returns
 
 
-def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle=False, seed=None):
+def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle=False, seed=None,
+                    drop_remainder=False, map_fn=None):
     """Transform some tensors data into a dataset of mini-batches"""
     dataset = tf.data.Dataset.from_tensor_slices(tensors)
-    dataset = dataset.batch(batch_size)
+
+    if map_fn is not None:
+        dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE,
+                              deterministic=True)
+    dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
 
     if shuffle:
         return dataset.shuffle(buffer_size=batch_size, seed=seed)
@@ -96,24 +102,6 @@ def tf_to_scalar_shape(tensor):
 
 def assert_shapes(a, b):
     assert tf.shape(a) == tf.shape(b)
-
-
-# TODO: remove
-def get_input_layers(state_space: Union[Dict[str, tuple], tuple, int], layer_name='input') \
-        -> Dict[str, tf.keras.layers.Input]:
-    layers = dict()
-
-    if isinstance(state_space, tuple) or isinstance(state_space, int):
-        layers[layer_name] = tf.keras.layers.Input(shape=state_space, dtype=tf.float32, name=layer_name)
-
-    elif isinstance(state_space, dict):
-        for name, shape in state_space.items():
-            assert isinstance(shape, tuple) or isinstance(shape, int)
-            layers[name] = tf.keras.layers.Input(shape=shape, dtype=tf.float32, name=name)
-    else:
-        raise ValueError('state_space must be one of: Dict[Tuple or int], Tuple, or int!')
-
-    return layers
 
 
 def space_to_flat_spec(space: gym.Space, name: str) -> Dict[str, tuple]:
@@ -158,7 +146,7 @@ def space_to_spec(space: gym.Space) -> Union[tuple, Dict[str, Union[tuple, dict]
         return space.shape
 
     if isinstance(space, spaces.Discrete):
-        return space.n,   # -> tuple (space.n,)
+        return space.n,  # -> tuple (space.n,)
 
     assert isinstance(space, spaces.Dict)
 
@@ -168,6 +156,41 @@ def space_to_spec(space: gym.Space) -> Union[tuple, Dict[str, Union[tuple, dict]
         spec[name] = space_to_spec(space)
 
     return spec
+
+
+def is_image(x) -> bool:
+    """Checks whether some input [x] has a shape of the form (H, W, C)"""
+    return len(x.shape) == 3
+
+
+def is_vector(x) -> bool:
+    """Checks whether some input [x] has a shape of the form (N, D) or (D,)"""
+    return 1 <= len(x.shape) <= 2
+
+
+def depth_concat(*arrays):
+    return np.concatenate(*arrays, axis=-1)
+
+
+def tf_01_scaling(x):
+    x -= tf.reduce_min(x)
+    x /= tf.reduce_max(x)
+    return x
+
+
+def plot_images(images: list):
+    """Plots a list of images, arranging them in a rectangular fashion"""
+    num_plots = len(images)
+    rows = round(math.sqrt(num_plots))
+    cols = math.ceil(math.sqrt(num_plots))
+
+    for k, img in enumerate(images):
+        plt.subplot(rows, cols, k + 1)
+        plt.axis('off')
+        plt.imshow(img)
+
+    plt.subplots_adjust(wspace=0, hspace=0)
+    plt.show()
 
 
 # -------------------------------------------------------------------------------------------------
@@ -256,3 +279,64 @@ class Statistics:
             plt.title(key)
 
         plt.show()
+
+
+# -------------------------------------------------------------------------------------------------
+# -- Data Augmentation
+# -------------------------------------------------------------------------------------------------
+
+class AugmentationPipeline:
+    def __init__(self, strength=1.0, random_order=True, seed=None):
+        assert 0.0 < strength <= 1.0
+        self.alpha = strength
+
+        if seed is not None:
+            ia.seed(seed)
+
+        self.augmentations = iaa.Sequential([
+            iaa.ChannelShuffle(p=0.35 * strength),
+
+            # Contrast
+            iaa.LinearContrast(alpha=self._weaken(0.4, 1.6)),
+
+            # Brightness
+            iaa.MultiplyBrightness(mul=self._weaken(0.7, 1.3)),
+
+            # Tone
+            iaa.MultiplyHueAndSaturation(self._weaken(0.5, 1.5)),
+
+            # Blur
+            iaa.SomeOf((0, 2), [
+                iaa.GaussianBlur(sigma=(0.0, 2.0 * strength)),
+                iaa.MotionBlur(k=(3, round(7 * strength)), angle=self._balance(-45, 45)),
+            ]),
+
+            # Noise
+            iaa.SomeOf((0, 2), [
+                iaa.AdditiveGaussianNoise(loc=0.0, scale=self._balance(0.01, 0.2 * 255)),
+                iaa.SaltAndPepper(p=self._balance(0.01, 0.15)),
+            ]),
+
+            # Masking
+            iaa.SomeOf((0, 2), [
+                iaa.Cutout(nb_iterations=(0, 2), cval=0),
+                iaa.CoarseDropout(p=self._balance(0.001, 0.05), size_percent=self._balance(0.02, 0.25)),
+            ])
+        ], random_order=random_order)
+
+    def augment(self, images):
+        return self.augmentations(images=images)
+
+    def _weaken(self, a: float, b: float, value=1.0) -> tuple:
+        a += abs(value - a) * (1.0 - self.alpha)
+        b -= abs(value - b) * (1.0 - self.alpha)
+        return a, b
+
+    def _balance(self, a: float, b: float, cast=None) -> tuple:
+        a = a * self.alpha
+        b = b * self.alpha
+
+        if cast == 'int':
+            return round(a), round(b)
+
+        return a, b

@@ -136,6 +136,40 @@ def test_space_to_flat_spec():
     print(utils.space_to_flat_spec(space, name='space'))
 
 
+def test_gym_spaces_change_shape(t=4):
+    space = gym.spaces.Box(low=0, high=1, shape=(2,))
+    print(space)
+
+    # change shape
+    space.shape = (t,) + space.shape
+    print(space)
+
+
+def test_gym_spaces_expand(t=4):
+    def expand_space_shape(space: gym.Space):
+        if isinstance(space, gym.spaces.Box):
+            if utils.is_image(space):
+                space.shape = space.shape[:2] + (space.shape[2] * t,)
+
+            elif utils.is_vector(space):
+                space.shape = (t,) + space.shape
+            else:
+                raise ValueError(f'Unsupported space type: {type(space)}!')
+
+        elif isinstance(space, gym.spaces.Dict):
+            for _, sub_space in space.spaces.items():
+                expand_space_shape(space=sub_space)
+        else:
+            raise ValueError(f'Unsupported space type: {type(space)}!')
+
+    example_space = gym.spaces.Dict(a=gym.spaces.Box(low=0, high=1, shape=(2, 3)),
+                                    b=gym.spaces.Dict(c=gym.spaces.Box(low=0, high=1, shape=(5,)),
+                                                      d=gym.spaces.Box(low=0, high=1, shape=(6, 7, 2))))
+    print('before:', example_space)
+    expand_space_shape(example_space)
+    print('after:', example_space)
+
+
 if __name__ == '__main__':
     # Memories:
     # test_recent_memory()
@@ -167,5 +201,7 @@ if __name__ == '__main__':
 
     # Data:
     # test_tf_data_api()
-    test_space_to_flat_spec()
+    # test_space_to_flat_spec()
+    # test_gym_spaces_change_shape()
+    test_gym_spaces_expand()
     pass

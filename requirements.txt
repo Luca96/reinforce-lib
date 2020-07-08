@@ -6,3 +6,4 @@ pygame
 opencv-python
 networkx
 matplotlib
+imgaug

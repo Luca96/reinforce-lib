@@ -1,8 +1,13 @@
 
+import tensorflow as tf
 from tensorflow.keras.layers import *
 
 from rl.environments import OneCameraCARLAEnvironment, ThreeCameraCARLAEnvironment, CARLAPlayWrapper, \
                             CARLACollectWrapper
+from rl.environments.carla import env_utils as carla_utils
+
+from rl import utils
+from rl import augmentations as aug
 from rl.agents import PPOAgent, PPO2Agent
 from rl.agents.imitation import ImitationWrapper
 
@@ -57,13 +62,10 @@ def dense_network(input_layer: Layer, units=32, layers=2, activation='relu', dro
     return x
 
 
-# TODO: make "swish" activation (layer)
-
-
 class CarlaPPOAgent(PPOAgent):
 
     def __init__(self, *args, name='carla-agent', **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, name=name, **kwargs)
 
     def policy_layers(self, inputs: dict, **kwargs) -> Layer:
         print(inputs.keys())
@@ -87,27 +89,80 @@ class CarlaPPOAgent(PPOAgent):
     #     pass
 
 
+class CARLAImitationLearning(ImitationWrapper):
+
+    def __init__(self, *args, target_size=None, grayscale=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.target_size = target_size
+        self.to_grayscale = grayscale
+
+    def augment(self):
+        @tf.function
+        def augment_fn(state):
+            image = state['state_image']
+            image = aug.tf_resize(image, size=self.target_size)
+
+            # contrast, tone, saturation, brightness
+            if aug.tf_chance() > 0.5:
+                image = aug.tf_saturation(image)
+
+            if aug.tf_chance() > 0.5:
+                image = aug.tf_contrast(image, lower=0.5, upper=1.5)
+
+            if aug.tf_chance() > 0.5:
+                image = aug.tf_hue(image)
+
+            if aug.tf_chance() > 0.5:
+                image = aug.tf_brightness(image, delta=0.5)
+
+            # blur
+            if aug.tf_chance() < 0.33:
+                image = aug.tf_gaussian_blur(image, size=5)
+
+            # noise
+            if aug.tf_chance() < 0.2:
+                image = aug.tf_salt_and_pepper(image, amount=0.1)
+
+            if aug.tf_chance() < 0.33:
+                image = aug.tf_gaussian_noise(image, amount=0.15, std=0.15)
+
+            image = aug.tf_normalize(image)
+
+            # cutout & dropout
+            if aug.tf_chance() < 0.15:
+                image = aug.tf_cutout(image, size=6)
+
+            if aug.tf_chance() < 0.10:
+                image = aug.tf_coarse_dropout(image, size=49, amount=0.1)
+
+            if self.to_grayscale:
+                image = aug.tf_grayscale(image)
+
+            state['state_image'] = 2.0 * image - 1.0  # -1, +1
+            return state
+
+        return augment_fn
+
+
 if __name__ == '__main__':
     # 1 camera
     # CARLAPlayWrapper(OneCameraCARLAEnvironment(debug=True, window_size=(600, 450))).play()
 
     # 3 cameras
-    # CARLAPlayWrapper(OneCameraCARLAEnvironment(debug=False, vehicle_filter='vehicle.tesla.model3',
-    #                                              window_size=(600, 200))).play()
+    # CARLAPlayWrapper(ThreeCameraCARLAEnvironment(debug=True, window_size=(720, 320))).play()
 
     # Collect Wrapper
-    # CARLACollectWrapper(OneCameraCARLAEnvironment(debug=True, window_size=(600, 450), render=True,
-    #                                               image_shape=(150, 200, 1)),
-    #                     ignore_traffic_light=True, name='test') \
-    #     .collect(episodes=64, timesteps=256, episode_reward_threshold=15.0 * 200)
+    # CARLACollectWrapper(OneCameraCARLAEnvironment(debug=False, window_size=(600, 450), render=False,
+    #                                               image_shape=(150, 200, 3)),
+    #                     ignore_traffic_light=True, name='test-preprocess') \
+    #     .collect(episodes=16, timesteps=256, episode_reward_threshold=15.0 * 200)
 
     # Imitation Learning
     env = OneCameraCARLAEnvironment(debug=True, window_size=(600, 450), render=False,
-                                    image_shape=(150, 200, 1))
-    agent = CarlaPPOAgent(env)
+                                    image_shape=(150-15, 200-20, 1))
+    agent = CarlaPPOAgent(env, batch_size=32)
     agent.summary()
 
-    ImitationWrapper(agent, policy_lr=1e-3, value_lr=1e-4, name='test')\
-        .imitate(batch_size=64, shuffle_batches=True, repetitions=2, save_every=16)
-
+    CARLAImitationLearning(agent, target_size=(135, 180), policy_lr=1e-3, value_lr=1e-4, name='test-preprocess')\
+        .imitate(shuffle_batches=True, repetitions=2, save_every=16)
     pass
