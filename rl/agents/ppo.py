@@ -21,19 +21,30 @@ class PPOAgent(Agent):
     # TODO: same 'optimization steps' for both policy and value functions?
     # TODO: 'value_loss' a parameter that selects the loss (either 'mse' or 'huber') for the value network
     # TODO: try 'mixture' of Beta/Gaussian distribution
-    # TODO: use KL-Divergence to stop policy optimization early?
     def __init__(self, *args, policy_lr=3e-4, value_lr=1e-4, optimization_steps=(10, 10), clip_ratio=0.2,
-                 gamma=0.99, lambda_=0.95, target_kl=0.01, entropy_regularization=0.0, early_stop=False,
-                 load=False, name='ppo-agent', drop_batch_reminder=False, **kwargs):
+                 gamma=0.99, lambda_=0.95, target_kl=0.01, entropy_regularization=0.0, load=False, name='ppo-agent',
+                 drop_batch_reminder=False, skip_data=0, consider_obs_every=1, shuffle_batches=False, **kwargs):
         super().__init__(*args, name=name, **kwargs)
         self.memory = None
         self.gamma = gamma
         self.lambda_ = lambda_
-        self.target_kl = target_kl
         self.entropy_strength = tf.constant(entropy_regularization)
-        self.epsilon = clip_ratio
-        self.early_stop = early_stop
+
+        # Ratio clipping
+        self.min_ratio = tf.constant(1.0 - clip_ratio)
+        self.max_ratio = tf.constant(1.0 + clip_ratio)
+
+        if isinstance(target_kl, float):
+            self.early_stop = True
+            self.target_kl = tf.constant(target_kl * 1.5)
+        else:
+            self.early_stop = False
+
+        # Data options
         self.drop_batch_reminder = drop_batch_reminder
+        self.skip_count = skip_data
+        self.obs_skipping = consider_obs_every
+        self.shuffle_batches = shuffle_batches
 
         # TODO: handle complex action spaces
         # Action space
@@ -73,12 +84,6 @@ class PPOAgent(Agent):
         self.value_optimizer = optimizers.Adam(learning_rate=value_lr)
         self.optimization_steps = dict(policy=optimization_steps[0], value=optimization_steps[1])
 
-        # Statistics:
-        # self.statistics = dict(loss_policy=[[], 0], loss_value=[[], 0], episode_rewards=[[], 0], ratio=[[], 0],
-        #                        advantages=[[], 0], prob=[[], 0], actions=[[], 0],
-        #                        entropy=[[], 0], kl_divergence=[[], 0], rewards=[[], 0], returns=[[], 0],
-        #                        values=[[], 0], gradients_norm_policy=[[], 0], gradients_norm_value=[[], 0])
-
     def act(self, state):
         action = self.policy_network(utils.to_tensor(state), training=False)
         return self.convert_action(action[0][0].numpy())
@@ -93,15 +98,17 @@ class PPOAgent(Agent):
 
         # Prepare data: (states, returns) and (states, advantages, actions, log_prob)
         value_batches = utils.data_to_batches(tensors=(self.memory.states, returns), batch_size=self.batch_size,
-                                              drop_remainder=self.drop_batch_reminder)
+                                              drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
+                                              num_shards=self.obs_skipping, shuffle_batches=self.shuffle_batches)
+
         policy_batches = utils.data_to_batches(tensors=(self.memory.states, advantages,
                                                         self.memory.actions, self.memory.log_probabilities),
-                                               batch_size=self.batch_size, drop_remainder=self.drop_batch_reminder)
-
+                                               batch_size=self.batch_size, drop_remainder=self.drop_batch_reminder,
+                                               skip=self.skip_count, num_shards=self.obs_skipping,
+                                               shuffle_batches=self.shuffle_batches)
         # Policy network optimization:
-        # TODO: remove 'step' and 'enumerate'?
-        for _ in range(self.optimization_steps['policy']):
-            for step, data_batch in enumerate(policy_batches):
+        for opt_step in range(self.optimization_steps['policy']):
+            for data_batch in policy_batches:
                 with tf.GradientTape() as tape:
                     policy_loss, kl = self.ppo_clip_objective(data_batch)
 
@@ -111,14 +118,15 @@ class PPOAgent(Agent):
                 self.log(loss_policy=policy_loss.numpy(),
                          gradients_norm_policy=[tf.norm(gradient) for gradient in policy_grads])
 
-                # Stop early if target_kl is reached:
-                # if self.early_stop and (kl > 1.5 * self.target_kl):
-                #     print(f'early stop at step {step}.')
-                #     break
+            # Stop early if target_kl is reached:
+            if self.early_stop and (kl > self.target_kl):
+                self.log(early_stop=opt_step)
+                print(f'early stop at step {opt_step}.')
+                break
 
         # Value network optimization:
         for _ in range(self.optimization_steps['value']):
-            for step, data_batch in enumerate(value_batches):
+            for data_batch in value_batches:
                 with tf.GradientTape() as tape:
                     value_loss = self.value_objective(batch=data_batch)
 
@@ -128,7 +136,6 @@ class PPOAgent(Agent):
                 self.log(loss_value=value_loss.numpy(),
                          gradients_norm_value=[tf.norm(gradient) for gradient in value_grads])
 
-    @tf.function
     def value_objective(self, batch):
         states, returns = batch
         values = self.value_network(states, training=True)
@@ -156,14 +163,14 @@ class PPOAgent(Agent):
         ratio = tf.math.exp(new_log_prob - old_log_probabilities)
 
         # Compute the clipped ratio times advantage (NOTE: this is the simplified PPO clip-objective):
-        clipped_ratio = tf.where(advantages > 0, x=(1 + self.epsilon), y=(1 - self.epsilon))
+        clipped_ratio = tf.where(advantages > 0, x=self.max_ratio, y=self.min_ratio)
 
         # Log stuff
         self.log(ratio=ratio, prob=tf.exp(new_log_prob), entropy=entropy, kl_divergence=kl_divergence)
 
         # Loss = min { ratio * A, clipped_ratio * A } + entropy_term
         loss = -tf.reduce_mean(tf.minimum(ratio * advantages, clipped_ratio * advantages) + entropy_term)
-        return loss, kl_divergence
+        return loss, tf.reduce_mean(kl_divergence)
 
     @staticmethod
     def kullback_leibler_divergence(log_a, log_b):

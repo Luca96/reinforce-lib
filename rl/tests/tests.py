@@ -170,6 +170,29 @@ def test_gym_spaces_expand(t=4):
     print('after:', example_space)
 
 
+def test_tf_dataset_shard(size=20, num_shards=4, batch_size=5):
+    dataset = tf.data.Dataset.range(size)
+
+    if num_shards > 1:
+        ds = dataset.shard(num_shards, index=0)
+
+        for shard_index in range(1, num_shards):
+            shard = dataset.shard(num_shards, index=shard_index)
+            ds = ds.concatenate(shard)
+
+        dataset = ds
+
+    for batch in dataset.batch(batch_size):
+        print(batch)
+
+
+def test_data_to_batches(size=20, batch_size=5):
+    data = tf.data.Dataset.range(size).as_numpy_iterator()
+
+    for batch in utils.data_to_batches(list(data), batch_size):
+        print(batch)
+
+
 if __name__ == '__main__':
     # Memories:
     # test_recent_memory()
@@ -203,5 +226,7 @@ if __name__ == '__main__':
     # test_tf_data_api()
     # test_space_to_flat_spec()
     # test_gym_spaces_change_shape()
-    test_gym_spaces_expand()
+    # test_gym_spaces_expand()
+    # test_tf_dataset_shard()
+    test_data_to_batches()
     pass

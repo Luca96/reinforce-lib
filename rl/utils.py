@@ -5,8 +5,6 @@ import numpy as np
 import scipy.signal
 import tensorflow as tf
 import matplotlib.pyplot as plt
-import imgaug.augmenters as iaa
-import imgaug as ia
 
 from typing import Union, List, Dict, Tuple
 from datetime import datetime
@@ -57,20 +55,32 @@ def rewards_to_go(rewards, discount: float, normalize=False):
     return returns
 
 
-def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle=False, seed=None,
-                    drop_remainder=False, map_fn=None):
+def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batches=False, seed=None,
+                    drop_remainder=False, map_fn=None, prefetch=2, num_shards=1, skip=0):
     """Transform some tensors data into a dataset of mini-batches"""
-    dataset = tf.data.Dataset.from_tensor_slices(tensors)
+    dataset = tf.data.Dataset.from_tensor_slices(tensors).skip(count=skip)
+
+    if num_shards > 1:
+        # "observation skip trick" with tf.data.Dataset.shard()
+        ds = dataset.shard(num_shards, index=0)
+
+        for shard_index in range(1, num_shards):
+            shard = dataset.shard(num_shards, index=shard_index)
+            ds = ds.concatenate(shard)
+
+        dataset = ds
 
     if map_fn is not None:
+        # 'map_fn' is mainly used for 'data augmentation'
         dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE,
                               deterministic=True)
+
     dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
 
-    if shuffle:
-        return dataset.shuffle(buffer_size=batch_size, seed=seed)
+    if shuffle_batches:
+        dataset = dataset.shuffle(buffer_size=batch_size, seed=seed)
 
-    return dataset
+    return dataset.prefetch(buffer_size=prefetch)
 
 
 def print_info(gym_env):
@@ -285,58 +295,3 @@ class Statistics:
 # -- Data Augmentation
 # -------------------------------------------------------------------------------------------------
 
-class AugmentationPipeline:
-    def __init__(self, strength=1.0, random_order=True, seed=None):
-        assert 0.0 < strength <= 1.0
-        self.alpha = strength
-
-        if seed is not None:
-            ia.seed(seed)
-
-        self.augmentations = iaa.Sequential([
-            iaa.ChannelShuffle(p=0.35 * strength),
-
-            # Contrast
-            iaa.LinearContrast(alpha=self._weaken(0.4, 1.6)),
-
-            # Brightness
-            iaa.MultiplyBrightness(mul=self._weaken(0.7, 1.3)),
-
-            # Tone
-            iaa.MultiplyHueAndSaturation(self._weaken(0.5, 1.5)),
-
-            # Blur
-            iaa.SomeOf((0, 2), [
-                iaa.GaussianBlur(sigma=(0.0, 2.0 * strength)),
-                iaa.MotionBlur(k=(3, round(7 * strength)), angle=self._balance(-45, 45)),
-            ]),
-
-            # Noise
-            iaa.SomeOf((0, 2), [
-                iaa.AdditiveGaussianNoise(loc=0.0, scale=self._balance(0.01, 0.2 * 255)),
-                iaa.SaltAndPepper(p=self._balance(0.01, 0.15)),
-            ]),
-
-            # Masking
-            iaa.SomeOf((0, 2), [
-                iaa.Cutout(nb_iterations=(0, 2), cval=0),
-                iaa.CoarseDropout(p=self._balance(0.001, 0.05), size_percent=self._balance(0.02, 0.25)),
-            ])
-        ], random_order=random_order)
-
-    def augment(self, images):
-        return self.augmentations(images=images)
-
-    def _weaken(self, a: float, b: float, value=1.0) -> tuple:
-        a += abs(value - a) * (1.0 - self.alpha)
-        b -= abs(value - b) * (1.0 - self.alpha)
-        return a, b
-
-    def _balance(self, a: float, b: float, cast=None) -> tuple:
-        a = a * self.alpha
-        b = b * self.alpha
-
-        if cast == 'int':
-            return round(a), round(b)
-
-        return a, b

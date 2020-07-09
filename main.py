@@ -19,9 +19,9 @@ def ppo_cartpole_test():
 
     # reaches 200 as reward (also cartPole3)
     # (batch shuffling works but learning is worse)
-    agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.05,
+    agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.20,
                      lambda_=0.95, entropy_regularization=0.0, name='ppo-cartPole',
-                     optimization_steps=(1, 2), batch_size=20,
+                     optimization_steps=(1, 1), batch_size=20, target_kl=None,
                      log_mode='summary', load=False)
 
     agent.learn(episodes=200, timesteps=200, render_every=10, save_every=False)

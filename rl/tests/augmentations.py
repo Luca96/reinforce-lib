@@ -114,7 +114,7 @@ def test_aug_with_dataset(batch_size=25):
 
     trace_path = 'traces/test-preprocess/trace-0-20200708-103027.npz'
     images = np.load(trace_path)['state_image']
-    dataset = tf.data.Dataset.from_tensor_slices(images).map(augmentations2).batch(batch_size)
+    dataset = tf.data.Dataset.from_tensor_slices(images).skip(1).map(augmentations2).batch(batch_size)
 
     for batch in dataset:
         utils.plot_images(list(batch))

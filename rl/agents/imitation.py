@@ -20,7 +20,8 @@ class ImitationWrapper:
     """Imitation Learning wrapper for Agents"""
 
     def __init__(self, agent: Agent, policy_lr=3e-4, value_lr=3e-4, traces_dir='traces',
-                 weights_dir='weights_imitation', log_mode='summary', name='imitation'):
+                 weights_dir='weights_imitation', log_mode='summary', name='imitation',
+                 drop_batch_reminder=False, skip_data=0, consider_obs_every=1):
         self.agent = agent
         self.batch_size = agent.batch_size
         self.save_path = dict(policy=os.path.join(weights_dir, name, 'policy_net'),
@@ -28,6 +29,11 @@ class ImitationWrapper:
         # Traces
         self.traces_dir = os.path.join(traces_dir, name)
         self.traces_names = utils.file_names(self.traces_dir, sort=True)
+
+        # Data options
+        self.drop_batch_reminder = drop_batch_reminder
+        self.skip_count = skip_data
+        self.obs_skipping = consider_obs_every
 
         # Assign the policy and value network
         self.policy_network = self.agent.policy_network
@@ -71,9 +77,10 @@ class ImitationWrapper:
 
     def train_policy(self, states, actions, shuffle: bool):
         """One training step for policy network"""
-        dataset = utils.data_to_batches((states, actions),  batch_size=self.batch_size,
-                                        shuffle=shuffle, map_fn=self.augment(),
-                                        drop_remainder=self.agent.drop_batch_reminder)
+        dataset = utils.data_to_batches((states, actions), batch_size=self.batch_size,
+                                        shuffle_batches=shuffle, map_fn=self.augment(),
+                                        drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
+                                        num_shards=self.obs_skipping)
         for batch in dataset:
             states_batch, true_actions = batch
 
@@ -93,8 +100,9 @@ class ImitationWrapper:
     def train_value(self, states, returns, shuffle: bool):
         """One training step for value network"""
         dataset = utils.data_to_batches((states, returns), batch_size=self.batch_size,
-                                        shuffle=shuffle, map_fn=self.augment(),
-                                        drop_remainder=self.agent.drop_batch_reminder)
+                                        shuffle_batches=shuffle, map_fn=self.augment(),
+                                        drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
+                                        num_shards=self.obs_skipping)
         for batch in dataset:
             states_batch, true_values = batch
 
