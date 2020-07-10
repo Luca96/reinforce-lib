@@ -22,7 +22,7 @@ def ppo_cartpole_test():
     agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.20,
                      lambda_=0.95, entropy_regularization=0.0, name='ppo-cartPole',
                      optimization_steps=(1, 1), batch_size=20, target_kl=None,
-                     log_mode='summary', load=False)
+                     log_mode='summary', load=False, seed=42)
 
     agent.learn(episodes=200, timesteps=200, render_every=10, save_every=False)
 

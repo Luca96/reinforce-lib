@@ -105,6 +105,20 @@ def test_dual_head_value_network(state_shape=1, units=1):
     print('info:\n', info)
 
 
+def test_add_noise_action(n=4, state_shape=(2,), units=8, noise_std=0.05):
+    # Network
+    inputs = Input(shape=state_shape, dtype=tf.float32)
+    x = Dense(units, activation='tanh')(inputs)
+    action = Dense(units=1, activation='tanh')(x)
+    model = Model(inputs, action)
+
+    actions = model(tf.random.normal((n,) + state_shape))
+    print('actions:', actions)
+    noise = tf.random.normal(actions.shape, mean=0.0, stddev=noise_std)
+    print('noise:', noise)
+    print('action + noise:', actions + noise)
+
+
 def test_tf_data_api(data_size=10, batch_size=4):
     data = [[i] for i in range(data_size)]
     print('data:', data)
@@ -221,6 +235,7 @@ if __name__ == '__main__':
     # Networks:
     # test_dual_head_value_network()
     # test_dict_inputs()
+    test_add_noise_action()
 
     # Data:
     # test_tf_data_api()
@@ -228,5 +243,5 @@ if __name__ == '__main__':
     # test_gym_spaces_change_shape()
     # test_gym_spaces_expand()
     # test_tf_dataset_shard()
-    test_data_to_batches()
+    # test_data_to_batches()
     pass

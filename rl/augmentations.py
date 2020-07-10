@@ -2,11 +2,12 @@
 
 import tensorflow as tf
 
-# TODO: 'seed' argument to all functions
+from typing import Union
 
 
-def tf_normalize(image, low=0.0):
-    image -= tf.reduce_min(image) + low
+def tf_normalize(image):
+    """Scale the given image in range [0.0, 1.0]"""
+    image -= tf.reduce_min(image)
     image /= tf.reduce_max(image)
     return image
 
@@ -16,7 +17,7 @@ def tf_chance():
     return tf.random.uniform(shape=(1,), minval=0.0, maxval=1.0)
 
 
-def tf_resize(image, size: tuple):
+def tf_resize(image, size: Union[tuple, tf.TensorShape]):
     return tf.image.resize(image, size)
 
 

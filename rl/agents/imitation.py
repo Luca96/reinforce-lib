@@ -46,14 +46,16 @@ class ImitationWrapper:
         # Statistics
         self.statistics = utils.Statistics(mode=log_mode, name=name)
 
-    # TODO: include 'seed' parameter
     def imitate(self, discount=0.99, shuffle_traces=False, shuffle_batches=False,
-                repetitions=1, save_every=1):
+                repetitions=1, save_every=1, seed=None):
+        print('== IMITATION LEARNING ==')
+        self.agent.set_random_seed(seed)
+
         for r in range(1, repetitions + 1):
-            print('repetition:', r)
+            print('\trepetition:', r)
 
             for i, trace in enumerate(self.load_traces(shuffle=shuffle_traces)):
-                print('trace:', i)
+                print('\t\ttrace:', i)
                 states, actions, rewards, done = self.interpret(trace)
                 returns = utils.rewards_to_go(rewards, discount, normalize=True)
 

@@ -238,36 +238,6 @@ def scale(num, from_interval=(-1.0, +1.0), to_interval=(0.0, 7.0)) -> float:
     return float(round(x))
 
 
-def get_record_path(base_dir: str, prefix='ep', pattern='-') -> str:
-    """Recording directory is organized as follows:
-        - A [base_dir], usually `data/recordings` is the main folder.
-        - Each new recording is stored within a new folder, named [prefix][pattern][count] where [count] is a number.
-        - By default: [prefix] is 'ep' and [pattern] is '-'. So the folders within [base_dir] will be named 'ep-0',
-          'ep-1', and so on. The idea is to separate recordings by the episode number.
-       :returns a path.
-    """
-    if not os.path.isdir(base_dir):
-        # create base_dir if not exists
-        os.mkdir(base_dir)
-        count = 0
-    else:
-        dirs = sorted(os.listdir(base_dir))
-        count = 0
-
-        if len(dirs) > 0:
-            count = 1 + int(dirs[-1].split(pattern)[1])
-
-    record_path = os.path.join(base_dir, f'{prefix}{pattern}{count}')
-    os.mkdir(record_path)
-
-    return record_path
-
-
-def clamp(value, min_value, max_value):
-    """Clips the given [value] in the given interval [min_value, max_value]"""
-    return max(min_value, min(value, max_value))
-
-
 def cv2_grayscale(image: np.ndarray, is_bgr=True, depth=1):
     """Convert a RGB or BGR image to grayscale using OpenCV (cv2).
         :param image: input image, a numpy.ndarray.
@@ -331,5 +301,6 @@ def sign(number: float) -> float:
     return abs(number) / number
 
 
-def clip_bound(value: float, v_max: float, v_min: float):
-    return max(v_min, min(v_max, value))
+def clamp(value: float, min_value: float, max_value: float):
+    """Clips the given [value] in the given interval [min_value, max_value]"""
+    return max(min_value, min(value, max_value))

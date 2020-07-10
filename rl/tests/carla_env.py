@@ -97,10 +97,14 @@ class CARLAImitationLearning(ImitationWrapper):
         self.to_grayscale = grayscale
 
     def augment(self):
+        target_size = tf.TensorShape(dims=self.target_size)
+        should_grayscale = tf.constant(self.to_grayscale, dtype=tf.bool)
+
         @tf.function
-        def augment_fn(state):
+        def augment_fn(state, _):
+            state = state.copy()
             image = state['state_image']
-            image = aug.tf_resize(image, size=self.target_size)
+            image = aug.tf_resize(image, size=target_size)
 
             # contrast, tone, saturation, brightness
             if aug.tf_chance() > 0.5:
@@ -135,12 +139,13 @@ class CARLAImitationLearning(ImitationWrapper):
             if aug.tf_chance() < 0.10:
                 image = aug.tf_coarse_dropout(image, size=49, amount=0.1)
 
-            if self.to_grayscale:
+            if should_grayscale:
                 image = aug.tf_grayscale(image)
 
             state['state_image'] = 2.0 * image - 1.0  # -1, +1
-            return state
+            return state, _
 
+        # print(tf.autograph.to_code(augment_fn.python_function))
         return augment_fn
 
 
@@ -152,17 +157,17 @@ if __name__ == '__main__':
     # CARLAPlayWrapper(ThreeCameraCARLAEnvironment(debug=True, window_size=(720, 320))).play()
 
     # Collect Wrapper
-    # CARLACollectWrapper(OneCameraCARLAEnvironment(debug=False, window_size=(600, 450), render=False,
-    #                                               image_shape=(150, 200, 3)),
-    #                     ignore_traffic_light=True, name='test-preprocess') \
-    #     .collect(episodes=16, timesteps=256, episode_reward_threshold=15.0 * 200)
+    CARLACollectWrapper(ThreeCameraCARLAEnvironment(debug=False, window_size=(600, 450), render=False,
+                                                    image_shape=(120, 160, 3)),
+                        ignore_traffic_light=True, name='collect-3camera') \
+        .collect(episodes=64, timesteps=1000, episode_reward_threshold=15.0 * 900)  # 100 traces
 
     # Imitation Learning
-    env = OneCameraCARLAEnvironment(debug=True, window_size=(600, 450), render=False,
-                                    image_shape=(150-15, 200-20, 1))
-    agent = CarlaPPOAgent(env, batch_size=32)
-    agent.summary()
-
-    CARLAImitationLearning(agent, target_size=(135, 180), policy_lr=1e-3, value_lr=1e-4, name='test-preprocess')\
-        .imitate(shuffle_batches=True, repetitions=2, save_every=16)
+    # env = OneCameraCARLAEnvironment(debug=True, window_size=(600, 450), render=False,
+    #                                 image_shape=(150-15, 200-20, 1))
+    # agent = CarlaPPOAgent(env, batch_size=32)
+    # agent.summary()
+    #
+    # CARLAImitationLearning(agent, target_size=(135, 180), policy_lr=1e-3, value_lr=1e-4, name='test-preprocess')\
+    #     .imitate(shuffle_batches=True, repetitions=2, save_every=16)
     pass

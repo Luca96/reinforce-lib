@@ -33,8 +33,6 @@ class CARLAEvent(enum.Enum):
 # -- Base Class and Wrappers
 # -------------------------------------------------------------------------------------------------
 
-# TODO: implement 'observation skip'
-# TODO: implement 'action repetition'?
 class CARLABaseEnvironment(gym.Env):
     """Base extendable environment for the CARLA driving simulator"""
 
@@ -519,7 +517,7 @@ class CARLACollectWrapper(CARLAWrapper):
     """
 
     def __init__(self, env: CARLABaseEnvironment, ignore_traffic_light: bool, traces_dir='traces', name='carla',
-                 behaviour='normal', unnormalize=True,):
+                 behaviour='normal'):
         self.env = env
         self.agent = None
         self.agent_behaviour = behaviour  # 'normal', 'cautious', or 'aggressive'
@@ -638,53 +636,6 @@ class CARLACollectWrapper(CARLAWrapper):
         # recursion
         for key, value in item.items():
             self._store_item(item=value, index=index, name=f'{name}_{key}')
-
-
-# TODO: 'CARLAObservationWrapper' takes (obs, r, d, info) in env.step() and wraps obs as a temporal
-#  sequence with N frames skipping.
-#  - change state space according to 'temporal horizon
-class CARLAObservationWrapper(gym.ObservationWrapper):
-
-    def __init__(self, env: CARLABaseEnvironment, temporal_horizon=1, consider_obs_every=1):
-        super().__init__(env)
-
-        self.temporal_horizon = temporal_horizon
-        self.consider_obs_every = consider_obs_every
-
-        # Expand observation space according to temporal horizon (i.e. add a temporal dimension):
-        self._expand_space_shape(self.observation_space)
-
-    def observation(self, observation):
-        if isinstance(observation, dict):
-            # Complex observation
-            for name, obs in observation.items():
-                new_obs = self.observation(obs)
-                observation[name] = new_obs
-
-            return observation
-        else:
-            if rl_utils.is_image(observation):
-                arrays = (observation,) * self.temporal_horizon
-                return rl_utils.depth_concat(*arrays)
-
-            elif rl_utils.is_vector(observation):
-                pass
-
-    def _expand_space_shape(self, space: gym.Space):
-        if isinstance(space, spaces.Box):
-            if rl_utils.is_image(space):
-                space.shape = space.shape[:2] + (space.shape[2] * self.temporal_horizon,)
-
-            elif rl_utils.is_vector(space):
-                space.shape = (self.temporal_horizon,) + space.shape
-            else:
-                raise ValueError(f'Unsupported space type: {type(space)}!')
-
-        elif isinstance(space, spaces.Dict):
-            for _, sub_space in space.spaces.items():
-                self._expand_space_shape(space=sub_space)
-        else:
-            raise ValueError(f'Unsupported space type: {type(space)}!')
 
 
 class CARLARecordWrapper:
@@ -1016,7 +967,6 @@ class ThreeCameraCARLAEnvironment(OneCameraCARLAEnvironment):
         super().__init__(*args, image_shape=image_shape, window_size=window_size, **kwargs)
         self.image_size = (image_shape[1] // 3, image_shape[0])
 
-    # TODO: add 'depth camera' only to frontal camera, add 'radar' sensor
     def define_sensors(self) -> dict:
         return dict(collision=SensorSpecs.collision_detector(callback=self.on_collision),
                     imu=SensorSpecs.imu(),

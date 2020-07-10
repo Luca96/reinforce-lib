@@ -19,11 +19,14 @@ from tensorflow.keras.models import Model
 
 class PPOAgent(Agent):
     # TODO: same 'optimization steps' for both policy and value functions?
+    # TODO: implement 'action repetition'?
     # TODO: 'value_loss' a parameter that selects the loss (either 'mse' or 'huber') for the value network
     # TODO: try 'mixture' of Beta/Gaussian distribution
-    def __init__(self, *args, policy_lr=3e-4, value_lr=1e-4, optimization_steps=(10, 10), clip_ratio=0.2,
+    #  https://keras.io/guides/training_with_built_in_methods/#using-learning-rate-schedules
+    # TODO: decay and/or halve parameters (lr, noise, ...) by step
+    def __init__(self, *args, policy_lr=3e-4, value_lr=1e-4, optimization_steps=(10, 10), clip_ratio=0.2, noise=0.0,
                  gamma=0.99, lambda_=0.95, target_kl=0.01, entropy_regularization=0.0, load=False, name='ppo-agent',
-                 drop_batch_reminder=False, skip_data=0, consider_obs_every=1, shuffle_batches=False, **kwargs):
+                 **kwargs):
         super().__init__(*args, name=name, **kwargs)
         self.memory = None
         self.gamma = gamma
@@ -40,12 +43,6 @@ class PPOAgent(Agent):
         else:
             self.early_stop = False
 
-        # Data options
-        self.drop_batch_reminder = drop_batch_reminder
-        self.skip_count = skip_data
-        self.obs_skipping = consider_obs_every
-        self.shuffle_batches = shuffle_batches
-
         # TODO: handle complex action spaces
         # Action space
         if isinstance(self.env.action_space, gym.spaces.Box):
@@ -59,11 +56,18 @@ class PPOAgent(Agent):
             else:
                 self.distribution_type = 'gaussian'
                 self.convert_action = lambda a: a
+
+            # Gaussian noise (for exploration)
+            if noise > 0.0:
+                self.add_noise = lambda a: a + tf.random.normal(a.shape, mean=0.0, stddev=noise)
+            else:
+                self.add_noise = lambda a: a
         else:
             # discrete:
             self.num_actions = 1
             self.distribution_type = 'categorical'
             self.convert_action = lambda a: a
+            self.add_noise = lambda a: a
 
         # print('state_shape:', self.state_shape)
         print('state_spec:', self.state_spec)
@@ -78,8 +82,6 @@ class PPOAgent(Agent):
             self.value_network = self._value_network()
 
         # Optimization
-        # TODO: use learning rate schedules:
-        #  https://keras.io/guides/training_with_built_in_methods/#using-learning-rate-schedules
         self.policy_optimizer = optimizers.Adam(learning_rate=policy_lr)
         self.value_optimizer = optimizers.Adam(learning_rate=value_lr)
         self.optimization_steps = dict(policy=optimization_steps[0], value=optimization_steps[1])
@@ -204,7 +206,7 @@ class PPOAgent(Agent):
 
                 # Compute action, log_prob, and value
                 policy = self.policy_network(state, training=False)
-                action = policy
+                action = self.add_noise(policy)
                 log_prob = policy.log_prob(action)
                 value = self.value_network(state, training=False)
 
@@ -348,7 +350,6 @@ class PPOAgent(Agent):
         return Model(inputs=model.input, outputs=action, name='policy')
 
 
-# TODO: use 'tf' instead of 'np'
 class PPOMemory:
     def __init__(self, capacity: int, state_spec: dict, num_actions: int):
         self.index = 0

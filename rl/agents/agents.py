@@ -11,23 +11,22 @@ from tensorflow.keras import layers
 
 # TODO: implement RandomAgent
 # TODO: actor-critic agent interface (to include policy/value network as well as loading/saving)?
-
 class Agent:
     """Agent abstract class"""
-    # TODO: check random seed issue
-    def __init__(self, env: gym.Env, batch_size: int, seed=None, weights_dir='weights', name='agent', log_mode='summary'):
+    def __init__(self, env: gym.Env, batch_size: int, seed=None, weights_dir='weights', name='agent',
+                 log_mode='summary', drop_batch_reminder=False, skip_data=0, consider_obs_every=1,
+                 shuffle_batches=False):
         self.env = env
         self.batch_size = batch_size
         self.state_spec = utils.space_to_flat_spec(space=self.env.observation_space, name='state')
         self.action_spec = utils.space_to_flat_spec(space=self.env.action_space, name='action')
+        self.set_random_seed(seed)
 
-        # Set random seed:
-        if seed is not None:
-            tf.random.set_seed(seed)
-            np.random.seed(seed)
-            random.seed(seed)
-            self.env.seed(seed)
-            print(f'Random seed {seed} set.')
+        # Data options
+        self.drop_batch_reminder = drop_batch_reminder
+        self.skip_count = skip_data
+        self.obs_skipping = consider_obs_every
+        self.shuffle_batches = shuffle_batches
 
         # Saving stuff:
         self.base_path = os.path.join(weights_dir, name)
@@ -35,6 +34,14 @@ class Agent:
                               value=os.path.join(self.base_path, 'value_net'))
         # Statistics:
         self.statistics = utils.Statistics(mode=log_mode, name=name)
+
+    def set_random_seed(self, seed):
+        if seed is not None:
+            tf.random.set_seed(seed)
+            np.random.seed(seed)
+            random.seed(seed)
+            self.env.seed(seed)
+            print(f'Random seed {seed} set.')
 
     def act(self, state):
         pass
@@ -93,7 +100,11 @@ class Agent:
         input_layers = dict()
 
         for name, shape in self.state_spec.items():
-            layer = layers.Input(shape=shape, dtype=tf.float32, name=name)
+            if self.drop_batch_reminder:
+                layer = layers.Input(shape=shape, batch_size=self.batch_size, dtype=tf.float32, name=name)
+            else:
+                layer = layers.Input(shape=shape, dtype=tf.float32, name=name)
+
             input_layers[name] = layer
 
         return input_layers
