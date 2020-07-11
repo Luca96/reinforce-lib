@@ -235,7 +235,7 @@ class PPOAgent(Agent):
 
                 # check whether a termination (terminal state or end of a transition) is reached:
                 if done or (t == timesteps):
-                    print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 4)}s ' +
+                    print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
                           f'with reward {episode_reward}.')
                     self.memory.end_trajectory(last_value=0 if done else self.value_network(state)[0])
                     break

@@ -37,12 +37,19 @@ def tf_hue(image, delta=0.5):
     return tf.image.random_hue(image, max_delta=delta)
 
 
-def tf_grayscale(image):
-    return tf.image.rgb_to_grayscale(image)
+def tf_grayscale(rgb_image):
+    return tf.image.rgb_to_grayscale(rgb_image)
+
+
+def tf_rgb(gray_image):
+    return tf.image.grayscale_to_rgb(gray_image)
 
 
 def tf_repeat_channels(image, n=3):
-    return tf.stack((image,) * n, axis=-1)
+    if len(image.shape) == 2:
+        return tf.stack((image,) * n, axis=-1)
+
+    return tf.concat((image,) * n, axis=-1)
 
 
 def tf_gaussian_noise(image, amount=0.25, std=0.2):
@@ -64,14 +71,14 @@ def tf_salt_and_pepper(image, amount=0.1, prob=0.5):
 
 def tf_gaussian_blur(image, size=5, std=0.25):
     # source: https://gist.github.com/blzq/c87d42f45a8c5a53f5b393e27b1f5319
-    gaussian_kernel = tf.random.normal(shape=(size, size, 3, 1), mean=1.0, stddev=std)
+    gaussian_kernel = tf.random.normal(shape=(size, size, image.shape[-1], 1), mean=1.0, stddev=std)
     image = tf.nn.depthwise_conv2d([image], gaussian_kernel, [1, 1, 1, 1], padding='SAME',
                                    data_format='NHWC')[0]
     return image
 
 
 def tf_median_blur(image, size=5):
-    mean_kernel = tf.ones((size, size, 3, 1))
+    mean_kernel = tf.ones((size, size, image.shape[-1], 1))
     image = tf.nn.depthwise_conv2d([image], mean_kernel, [1, 1, 1, 1], padding='SAME',
                                    data_format='NHWC')[0]
     return image

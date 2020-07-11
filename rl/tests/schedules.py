@@ -4,11 +4,11 @@ import matplotlib.pyplot as plt
 from tensorflow.keras.optimizers import schedules
 
 
-def test_schedule(schedule_class: schedules.LearningRateSchedule, **kwargs):
+def test_schedule(schedule_class: schedules.LearningRateSchedule, repeat=4, **kwargs):
     steps = kwargs['decay_steps']
     schedule = schedule_class(**kwargs)
 
-    x = list(range(steps * 4))
+    x = list(range(steps * repeat))
     y = [schedule(step=i) for i in x]
 
     plt.scatter(x, y)
@@ -19,6 +19,8 @@ if __name__ == '__main__':
     # Exponential decay:
     # test_schedule(schedules.ExponentialDecay, initial_learning_rate=1.0, decay_steps=50, decay_rate=0.5)
     # test_schedule(schedules.ExponentialDecay, initial_learning_rate=1.0, decay_steps=50, decay_rate=0.5,
+    #               staircase=True)
+    # test_schedule(schedules.ExponentialDecay, 40, initial_learning_rate=1e-3, decay_steps=4000, decay_rate=0.9,
     #               staircase=True)
 
     # Inverse time decay:

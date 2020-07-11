@@ -112,9 +112,51 @@ def test_aug_with_dataset(batch_size=25):
 
         return image
 
+    @tf.function
+    def augmentations3(image):
+        image = aug.tf_normalize(image)
+        image = 2.0 * aug.tf_grayscale(image) - 1.0
+        # image = aug.tf_repeat_channels(image, n=3)
+        image = tf.image.grayscale_to_rgb(image)
+
+        # contrast, tone, saturation, brightness
+        if aug.tf_chance() > 0.5:
+            image = aug.tf_saturation(image)
+
+        if aug.tf_chance() > 0.5:
+            image = aug.tf_contrast(image, lower=0.5, upper=1.5)
+
+        if aug.tf_chance() > 0.5:
+            image = aug.tf_hue(image)
+
+        if aug.tf_chance() > 0.5:
+            image = aug.tf_brightness(image, delta=0.5)
+
+        # blur
+        if aug.tf_chance() < 0.33:
+            image = aug.tf_gaussian_blur(image, size=5)
+
+        # noise
+        if aug.tf_chance() < 0.2:
+            image = aug.tf_salt_and_pepper(image, amount=0.1)
+
+        if aug.tf_chance() < 0.33:
+            image = aug.tf_gaussian_noise(image, amount=0.15, std=0.15)
+
+        image = aug.tf_normalize(image)
+
+        # cutout & dropout
+        if aug.tf_chance() < 0.15:
+            image = aug.tf_cutout(image, size=6)
+
+        if aug.tf_chance() < 0.10:
+            image = aug.tf_coarse_dropout(image, size=49, amount=0.1)
+
+        return image
+
     trace_path = 'traces/test-preprocess/trace-0-20200708-103027.npz'
     images = np.load(trace_path)['state_image']
-    dataset = tf.data.Dataset.from_tensor_slices(images).skip(1).map(augmentations2).batch(batch_size)
+    dataset = tf.data.Dataset.from_tensor_slices(images).skip(1).map(augmentations3).batch(batch_size)
 
     for batch in dataset:
         utils.plot_images(list(batch))

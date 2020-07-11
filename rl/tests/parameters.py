@@ -14,8 +14,8 @@ def test_exponential_parameter(num_steps=15, **kwargs):
     plt.show()
 
 
-def test_linear_parameter(initial=10.0, final=0.0, num_steps=15):
-    p = param.LinearParameter(initial=initial, final=final, steps=num_steps)
+def test_linear_parameter(initial=10.0, final=0.0, rate=1.0, num_steps=15):
+    p = param.LinearParameter(initial=initial, rate=rate, final=final, steps=num_steps)
     v = [p() for _ in range(num_steps)]
 
     plt.scatter(x=list(range(num_steps)), y=v)
@@ -69,6 +69,7 @@ if __name__ == '__main__':
     # test_linear_parameter(initial=2.5, final=10.0, num_steps=30)
     # test_rate_comparison_linear(num_steps=100, initial=10.0, final=2.5)
     # test_rate_comparison_linear((num_steps=100, final=10.0, initial=2.5)
+    # test_linear_parameter(initial=1.0, final=0.01, rate=0.1, num_steps=1000)
 
     # Restart:
     # test_parameter_restart('linear', num_steps=50, repeat=4, initial=1.0, final=0.0, restart=True,

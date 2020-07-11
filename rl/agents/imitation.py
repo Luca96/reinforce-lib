@@ -1,6 +1,7 @@
 """Imitation Learning Agents"""
 
 import os
+import time
 import random
 import numpy as np
 import tensorflow as tf
@@ -51,11 +52,12 @@ class ImitationWrapper:
         print('== IMITATION LEARNING ==')
         self.agent.set_random_seed(seed)
 
+        k = 1
         for r in range(1, repetitions + 1):
             print('\trepetition:', r)
 
             for i, trace in enumerate(self.load_traces(shuffle=shuffle_traces)):
-                print('\t\ttrace:', i)
+                t0 = time.time()
                 states, actions, rewards, done = self.interpret(trace)
                 returns = utils.rewards_to_go(rewards, discount, normalize=True)
 
@@ -66,9 +68,10 @@ class ImitationWrapper:
                 self.log(actions=actions, done=done, rewards=rewards, returns=returns)
                 self.write_summaries()
 
-                # TODO: better saving..
-                if (i + 1) % save_every == 0:
+                if k % save_every == 0:
                     self.save()
+                k += 1
+                print(f'\t\ttrace: {i} completed in time {round(time.time() - t0, 3)}s')
 
     def preprocess(self):
         @tf.function
