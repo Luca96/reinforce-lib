@@ -70,17 +70,17 @@ class ImitationWrapper:
                 if (i + 1) % save_every == 0:
                     self.save()
 
-    def augment(self):
+    def preprocess(self):
         @tf.function
-        def augment_fn(element):
+        def preprocess_fn(element):
             return element
 
-        return augment_fn
+        return preprocess_fn
 
     def train_policy(self, states, actions, shuffle: bool):
         """One training step for policy network"""
         dataset = utils.data_to_batches((states, actions), batch_size=self.batch_size,
-                                        shuffle_batches=shuffle, map_fn=self.augment(),
+                                        shuffle_batches=shuffle, map_fn=self.preprocess(),
                                         drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
                                         num_shards=self.obs_skipping)
         for batch in dataset:
@@ -102,7 +102,7 @@ class ImitationWrapper:
     def train_value(self, states, returns, shuffle: bool):
         """One training step for value network"""
         dataset = utils.data_to_batches((states, returns), batch_size=self.batch_size,
-                                        shuffle_batches=shuffle, map_fn=self.augment(),
+                                        shuffle_batches=shuffle, map_fn=self.preprocess(),
                                         drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
                                         num_shards=self.obs_skipping)
         for batch in dataset:

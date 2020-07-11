@@ -5,6 +5,8 @@ from rl.agents import PPOAgent, PPO2Agent
 
 
 def ppo_cartpole_test():
+    from tensorflow.keras.optimizers.schedules import ExponentialDecay
+
     env = gym.make('CartPole-v0')
     utils.print_info(env)
 
@@ -19,7 +21,11 @@ def ppo_cartpole_test():
 
     # reaches 200 as reward (also cartPole3)
     # (batch shuffling works but learning is worse)
-    agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.20,
+    # decaying lr improves convergence speed
+    lr = ExponentialDecay(1e-3, decay_steps=200, decay_rate=0.95, staircase=True)
+
+    # lr = 1e-3
+    agent = PPOAgent(env, policy_lr=lr, value_lr=1e-3, clip_ratio=0.20,
                      lambda_=0.95, entropy_regularization=0.0, name='ppo-cartPole',
                      optimization_steps=(1, 1), batch_size=20, target_kl=None,
                      log_mode='summary', load=False, seed=42)
@@ -28,6 +34,8 @@ def ppo_cartpole_test():
 
 
 def ppo_mountaincar_test():
+    from rl.parameters import LinearParameter
+
     env = gym.make('MountainCarContinuous-v0')
     utils.print_info(env)
     # agent = PPO2Agent(env, policy_lr=1e-3, value_lr=3e-4, clip_ratio=0.20,
@@ -39,7 +47,10 @@ def ppo_mountaincar_test():
     agent = PPOAgent(env, policy_lr=1e-3, value_lr=3e-4, clip_ratio=0.20,
                      lambda_=0.95, entropy_regularization=0.001, name='ppo-mountainCarContinuous',
                      optimization_steps=(1, 1), batch_size=50,
-                     load=False, log_mode='summary')
+                     noise=LinearParameter(initial=1.0, final=0.01, steps=1000, rate=0.5,
+                                           restart=True, decay_on_restart=0.9),
+                     recurrent_policy=True,
+                     load=False, log_mode='summary', seed=42)
 
     agent.learn(episodes=200, timesteps=1000, render_every=5, save_every='end')
 
@@ -48,5 +59,5 @@ if __name__ == '__main__':
     # main()
     # gym_test()
     # reinforce_test()
-    ppo_cartpole_test()
-    # ppo_mountaincar_test()
+    # ppo_cartpole_test()
+    ppo_mountaincar_test()

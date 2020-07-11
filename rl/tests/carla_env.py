@@ -96,7 +96,7 @@ class CARLAImitationLearning(ImitationWrapper):
         self.target_size = target_size
         self.to_grayscale = grayscale
 
-    def augment(self):
+    def preprocess(self):
         target_size = tf.TensorShape(dims=self.target_size)
         should_grayscale = tf.constant(self.to_grayscale, dtype=tf.bool)
 
@@ -151,16 +151,16 @@ class CARLAImitationLearning(ImitationWrapper):
 
 if __name__ == '__main__':
     # 1 camera
-    # CARLAPlayWrapper(OneCameraCARLAEnvironment(debug=True, window_size=(600, 450))).play()
+    CARLAPlayWrapper(OneCameraCARLAEnvironment(debug=True, camera='rgb', window_size=(600, 450))).play()
 
     # 3 cameras
     # CARLAPlayWrapper(ThreeCameraCARLAEnvironment(debug=True, window_size=(720, 320))).play()
 
     # Collect Wrapper
-    CARLACollectWrapper(ThreeCameraCARLAEnvironment(debug=False, window_size=(600, 450), render=False,
-                                                    image_shape=(120, 160, 3)),
-                        ignore_traffic_light=True, name='collect-3camera') \
-        .collect(episodes=64, timesteps=1000, episode_reward_threshold=15.0 * 900)  # 100 traces
+    # CARLACollectWrapper(ThreeCameraCARLAEnvironment(debug=False, window_size=(600, 450), render=False,
+    #                                                 image_shape=(120, 160, 3)),
+    #                     ignore_traffic_light=True, name='collect-3camera') \
+    #     .collect(episodes=64, timesteps=1000, episode_reward_threshold=15.0 * 900)  # 100 traces
 
     # Imitation Learning
     # env = OneCameraCARLAEnvironment(debug=True, window_size=(600, 450), render=False,

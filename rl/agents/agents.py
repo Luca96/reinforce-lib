@@ -11,6 +11,7 @@ from tensorflow.keras import layers
 
 # TODO: implement RandomAgent
 # TODO: actor-critic agent interface (to include policy/value network as well as loading/saving)?
+# TODO: accept strings for env parameter, the strings should represent Gym's environments
 class Agent:
     """Agent abstract class"""
     def __init__(self, env: gym.Env, batch_size: int, seed=None, weights_dir='weights', name='agent',
@@ -36,6 +37,7 @@ class Agent:
         self.statistics = utils.Statistics(mode=log_mode, name=name)
 
     def set_random_seed(self, seed):
+        """Sets the random seed for tensorflow, numpy, python's random, and the environment"""
         if seed is not None:
             tf.random.set_seed(seed)
             np.random.seed(seed)
@@ -82,7 +84,15 @@ class Agent:
         print(f'Mean reward: {round(np.mean(rewards), 2)}, std: {round(np.std(rewards), 2)}')
         return rewards
 
+    def preprocess(self):
+        @tf.function
+        def preprocess_fn(*args):
+            return args
+
+        return preprocess_fn
+
     def pretrain(self):
+        # TODO: use ImitationWrapper here?
         pass
 
     def log(self, **kwargs):

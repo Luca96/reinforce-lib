@@ -49,7 +49,6 @@ class CARLABaseEnvironment(gym.Env):
         self.sync_mode_enabled = False
         self.num_frames_to_skip = skip_frames
 
-        # TODO: loading map support
         # Map
         self.map: carla.Map = self.world.get_map()
 
@@ -66,7 +65,7 @@ class CARLABaseEnvironment(gym.Env):
 
         # TODO: weather support
         # Weather (default is ClearNoon)
-        self.world.set_weather(carla.WeatherParameters.ClearNoon)
+        # self.world.set_weather(carla.WeatherParameters.ClearNoon)
 
         # Path: origin, destination, and path-length:
         self.origin_type = 'map'  # 'map' means sample a random point from the world's map
@@ -394,8 +393,15 @@ class CARLABaseEnvironment(gym.Env):
     def get_observation(self, sensors_data: dict) -> dict:
         raise NotImplementedError
 
+    def available_towns(self) -> list:
+        """Returns a list with the names of the currently available maps/towns"""
+        return list(map(lambda s: s.split('/')[-1], self.client.get_available_maps()))
+
     def _create_sensors(self):
         for name, args in self.define_sensors().items():
+            if args is None:
+                continue
+
             kwargs = args.copy()
             sensor = Sensor.create(sensor_type=kwargs.pop('type'), parent_actor=self.vehicle, **kwargs)
 
@@ -405,6 +411,7 @@ class CARLABaseEnvironment(gym.Env):
             self.sensors[name] = sensor
 
 
+# TODO: make wrappers be composable? (e.g. treat them as environments)
 class CARLAWrapper:
     pass
 
@@ -669,10 +676,11 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
     # Radar: velocity, altitude, azimuth, depth
     # RADAR_SPACE = dict(space=spaces.Box(low=-np.inf, high=np.inf, shape=(50, 4)), default=None)
 
-    def __init__(self, *args, disable_reverse=False, **kwargs):
+    def __init__(self, *args, disable_reverse=False, camera='segmentation', **kwargs):
         super().__init__(*args, **kwargs)
         self.disable_reverse = disable_reverse
         self.image_space = spaces.Box(low=-1.0, high=1.0, shape=self.image_shape)
+        self.camera_type = camera
 
         # reward computation
         self.collision_penalty = 0.0
@@ -708,7 +716,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         # Direction term: alignment of the vehicle's forward vector with the waypoint's forward vector
         speed = min(utils.speed(self.vehicle), v_max)
 
-        if 0.8 <= self.similarity <= 1.0:
+        if 0.75 <= self.similarity <= 1.0:
             direction_penalty = speed * self.similarity
         else:
             direction_penalty = (speed + 1.0) * abs(self.similarity) * -d
@@ -754,19 +762,27 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         return self.route.distance_to_destination(self.vehicle.get_location()) < 2.0
 
     def define_sensors(self) -> dict:
-        return dict(collision=SensorSpecs.collision_detector(callback=self.on_collision),
-                    imu=SensorSpecs.imu(),
-                    camera=SensorSpecs.segmentation_camera(position='on-top2', attachment_type='Rigid',
-                                                           image_size_x=self.image_size[0],
-                                                           image_size_y=self.image_size[1],
-                                                           sensor_tick=self.tick_time),
-                    depth=SensorSpecs.depth_camera(position='on-top2', attachment_type='Rigid',
+        if self.camera_type == 'rgb':
+            camera_sensor = SensorSpecs.rgb_camera(position='on-top2', attachment_type='Rigid',
                                                    image_size_x=self.image_size[0],
                                                    image_size_y=self.image_size[1],
-                                                   sensor_tick=self.tick_time),
-                    # radar=SensorSpecs.radar(position='radar', points_per_second=1000,
-                    #                         sensor_tick=self.tick_time)
-                    )
+                                                   sensor_tick=self.tick_time)
+            depth_sensor = None
+        else:
+            camera_sensor = SensorSpecs.segmentation_camera(position='on-top2', attachment_type='Rigid',
+                                                            image_size_x=self.image_size[0],
+                                                            image_size_y=self.image_size[1],
+                                                            sensor_tick=self.tick_time)
+
+            depth_sensor = SensorSpecs.depth_camera(position='on-top2', attachment_type='Rigid',
+                                                    image_size_x=self.image_size[0],
+                                                    image_size_y=self.image_size[1],
+                                                    sensor_tick=self.tick_time)
+
+        return dict(collision=SensorSpecs.collision_detector(callback=self.on_collision),
+                    imu=SensorSpecs.imu(),
+                    camera=camera_sensor,
+                    depth=depth_sensor)
 
     def on_collision(self, event: carla.CollisionEvent, penalty=1000.0):
         actor_type = event.other_actor.type_id
@@ -787,10 +803,6 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         assert self.render_data is not None
         image = self.render_data['camera']
         env_utils.display_image(self.display, image, window_size=self.window_size)
-
-        # radar_data = self.render_data['radar']
-        # print('radar count:', radar_data.get_detection_count())
-        # env_utils.draw_radar_measurement(debug_helper=self.world.debug, data=radar_data)
 
     def debug_text(self, actions):
         speed_limit = self.vehicle.get_speed_limit()
@@ -831,17 +843,15 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
 
     def on_sensors_data(self, data: dict) -> dict:
         data['camera'] = self.sensors['camera'].convert_image(data['camera'])
-        data['depth'] = self.sensors['depth'].convert_image(data['depth'])
 
-        # include depth information in one image:
-        data['camera_plus_depth'] = np.multiply(1 - data['depth'] / 255.0, data['camera'])
+        if 'depth' in self.sensors:
+            # include depth information in one image:
+            data['depth'] = self.sensors['depth'].convert_image(data['depth'])
+            data['camera'] = np.multiply(1 - data['depth'] / 255.0, data['camera'])
 
         if self.image_shape[2] == 1:
-            data['camera'] = env_utils.cv2_grayscale(data['camera_plus_depth'])
-        else:
-            data['camera'] = data['camera_plus_depth']
+            data['camera'] = env_utils.cv2_grayscale(data['camera'])
 
-        # data['radar_converted'] = self.sensors['radar'].convert(data['radar'])
         return data
 
     def after_world_step(self, sensors_data: dict):

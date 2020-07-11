@@ -17,6 +17,9 @@ class DynamicParameter:
         self.step_counter = 0
         self.max_steps = steps
 
+    def __repr__(self) -> str:
+        raise NotImplementedError
+
     def __call__(self, *args, **kwargs) -> float:
         """Returns the (decayed) value of this parameter"""
         if self.step_counter == 0:
@@ -54,6 +57,10 @@ class ExponentialParameter(DynamicParameter):
         self.rate = 1 / (rate + 1e-7)
         self.delta = self.initial_value - self.final_value
 
+    def __repr__(self) -> str:
+        return f'ExponentialParameter(initial={self.initial_value}, final={self.final_value}, steps={self.max_steps}, ' \
+               f'rate={self.rate}, restart={self.should_restart}, decay_on_restart={self.restart_decay_rate})'
+
     def compute_value(self, *args, **kwargs):
         t = self.step_counter / self.max_steps
         return self.delta * self.base**(-self.rate * t) + self.final_value
@@ -73,6 +80,10 @@ class LinearParameter(DynamicParameter):
         self.rate = rate
         self.decay_rate = (self.initial_value - self.final_value) / self.max_steps
 
+    def __repr__(self) -> str:
+        return f'LinearParameter(initial={self.initial_value}, final={self.final_value}, steps={self.max_steps}, ' \
+               f'rate={self.rate}, restart={self.should_restart}, decay_on_restart={self.restart_decay_rate})'
+
     def compute_value(self, *args, **kwargs):
         k = self.rate**(self.step_counter / self.max_steps)
         return self.decay_rate * k * (self.max_steps - self.step_counter) + self.final_value
@@ -88,6 +99,10 @@ class StepParameter(DynamicParameter):
     """Step-Parameter (can be seen as a constant-parameter as special case)"""
     def __init__(self, value: float, *args, **kwargs):
         super().__init__(*args, initial=value, final=value, **kwargs)
+
+    def __repr__(self) -> str:
+        return f'StepParameter(value={self.value}, steps={self.max_steps}, ' \
+               f'restart={self.should_restart}, decay_on_restart={self.restart_decay_rate})'
 
     def compute_value(self):
         return self.value

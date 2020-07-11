@@ -10,28 +10,30 @@ from typing import Union
 from rl import utils
 from rl.agents.agents import Agent
 from rl.exploration import RandomNetworkDistillation, NoExploration
+from rl.parameters import DynamicParameter
 
 from tensorflow.keras import losses
 from tensorflow.keras import optimizers
 from tensorflow.keras.layers import *
 from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers.schedules import LearningRateSchedule
 
 
 class PPOAgent(Agent):
-    # TODO: same 'optimization steps' for both policy and value functions?
     # TODO: implement 'action repetition'?
     # TODO: 'value_loss' a parameter that selects the loss (either 'mse' or 'huber') for the value network
     # TODO: try 'mixture' of Beta/Gaussian distribution
-    #  https://keras.io/guides/training_with_built_in_methods/#using-learning-rate-schedules
-    # TODO: decay and/or halve parameters (lr, noise, ...) by step
-    def __init__(self, *args, policy_lr=3e-4, value_lr=1e-4, optimization_steps=(10, 10), clip_ratio=0.2, noise=0.0,
-                 gamma=0.99, lambda_=0.95, target_kl=0.01, entropy_regularization=0.0, load=False, name='ppo-agent',
-                 **kwargs):
+    def __init__(self, *args, policy_lr: Union[float, LearningRateSchedule] = 1e-3, clip_ratio=0.2, gamma=0.99,
+                 value_lr: Union[float, LearningRateSchedule] = 3e-4, optimization_steps=(10, 10), lambda_=0.95,
+                 noise: Union[float, DynamicParameter] = 0.0, target_kl=0.01, entropy_regularization=0.0, load=False,
+                 name='ppo-agent', recurrent_policy=False, **kwargs):
         super().__init__(*args, name=name, **kwargs)
         self.memory = None
         self.gamma = gamma
         self.lambda_ = lambda_
         self.entropy_strength = tf.constant(entropy_regularization)
+        self.is_recurrent = isinstance(recurrent_policy, str)
+        self.drop_batch_reminder |= self.is_recurrent
 
         # Ratio clipping
         self.min_ratio = tf.constant(1.0 - clip_ratio)
@@ -58,8 +60,16 @@ class PPOAgent(Agent):
                 self.convert_action = lambda a: a
 
             # Gaussian noise (for exploration)
-            if noise > 0.0:
+            if isinstance(noise, float) and (noise > 0.0):
                 self.add_noise = lambda a: a + tf.random.normal(a.shape, mean=0.0, stddev=noise)
+
+            elif isinstance(noise, DynamicParameter):
+                def add_noise(action):
+                    std = noise()
+                    self.log(noise=std)
+                    return action + tf.random.normal(action.shape, mean=0.0, stddev=std)
+
+                self.add_noise = add_noise
             else:
                 self.add_noise = lambda a: a
         else:
@@ -101,13 +111,14 @@ class PPOAgent(Agent):
         # Prepare data: (states, returns) and (states, advantages, actions, log_prob)
         value_batches = utils.data_to_batches(tensors=(self.memory.states, returns), batch_size=self.batch_size,
                                               drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
+                                              map_fn=self.preprocess(),
                                               num_shards=self.obs_skipping, shuffle_batches=self.shuffle_batches)
 
         policy_batches = utils.data_to_batches(tensors=(self.memory.states, advantages,
                                                         self.memory.actions, self.memory.log_probabilities),
                                                batch_size=self.batch_size, drop_remainder=self.drop_batch_reminder,
                                                skip=self.skip_count, num_shards=self.obs_skipping,
-                                               shuffle_batches=self.shuffle_batches)
+                                               shuffle_batches=self.shuffle_batches, map_fn=self.preprocess())
         # Policy network optimization:
         for opt_step in range(self.optimization_steps['policy']):
             for data_batch in policy_batches:
@@ -241,7 +252,10 @@ class PPOAgent(Agent):
     def get_distribution_layer(self, layer: Layer) -> tfp.layers.DistributionLambda:
         if self.distribution_type == 'categorical':
             # Categorical
-            logits = Dense(units=self.env.action_space.n, activation=None, name='logits')(layer)
+            if self.is_recurrent:
+                logits = GRU(units=self.env.action_space.n, activation=None, stateful=True)(layer)
+            else:
+                logits = Dense(units=self.env.action_space.n, activation=None, name='logits')(layer)
 
             return tfp.layers.DistributionLambda(
                 make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t),
@@ -250,10 +264,14 @@ class PPOAgent(Agent):
         elif self.distribution_type == 'beta':
             # Beta
             # for activations choice see chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
-            alpha = Dense(units=self.num_actions, activation='softplus')(layer)
-            alpha = Add(name='alpha')([alpha, tf.ones_like(alpha)])
+            if self.is_recurrent:
+                alpha = GRU(units=self.num_actions, activation='softplus', stateful=True)(layer)
+                beta = GRU(units=self.num_actions, activation='softplus', stateful=True)(layer)
+            else:
+                alpha = Dense(units=self.num_actions, activation='softplus')(layer)
+                beta = Dense(units=self.num_actions, activation='softplus')(layer)
 
-            beta = Dense(units=self.num_actions, activation='softplus')(layer)
+            alpha = Add(name='alpha')([alpha, tf.ones_like(alpha)])
             beta = Add(name='beta')([beta, tf.ones_like(beta)])
 
             return tfp.layers.DistributionLambda(
@@ -262,8 +280,12 @@ class PPOAgent(Agent):
 
         # Gaussian (Normal)
         # for activations choice see chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
-        mu = Dense(units=self.num_actions, activation='linear', name='mu')(layer)
-        sigma = Dense(units=self.num_actions, activation='softplus', name='sigma')(layer)
+        if self.is_recurrent:
+            mu = GRU(units=self.num_actions, activation='liner', stateful=True)(layer)
+            sigma = GRU(units=self.num_actions, activation='softplus', stateful=True)(layer)
+        else:
+            mu = Dense(units=self.num_actions, activation='linear', name='mu')(layer)
+            sigma = Dense(units=self.num_actions, activation='softplus', name='sigma')(layer)
 
         return tfp.layers.DistributionLambda(
             make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[0], scale=t[1]),
