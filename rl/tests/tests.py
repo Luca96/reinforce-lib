@@ -1,3 +1,4 @@
+import random
 import gym
 import numpy as np
 import matplotlib.pyplot as plt
@@ -119,6 +120,26 @@ def test_add_noise_action(n=4, state_shape=(2,), units=8, noise_std=0.05):
     print('action + noise:', actions + noise)
 
 
+def test_noise_lambda_layer(seed=42):
+    tf.random.set_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+    def get_model(noise=0.01):
+        inp = Input(shape=(2,))
+        x = Dense(2, activation='tanh')(inp)
+        x = Lambda(lambda y: y + tf.random.normal(tf.shape(y), stddev=noise))(x)
+        out = tfp.layers.DistributionLambda(
+                make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t))(x)
+        return Model(inp, out)
+
+    data = tf.random.normal((4, 2))
+    r1 = get_model(noise=0.01)(data)
+    r2 = get_model(noise=0.01)(data)
+    for x, y in zip(r1, r2):
+        print(x.numpy(), y.numpy())
+
+
 def test_tf_data_api(data_size=10, batch_size=4):
     data = [[i] for i in range(data_size)]
     print('data:', data)
@@ -207,6 +228,84 @@ def test_data_to_batches(size=20, batch_size=5):
         print(batch)
 
 
+def test_predict_different_batch():
+    def get_model(shape=(2,), batch=2):
+        inp = Input(shape=shape, batch_size=batch)
+        x = Dense(2)(inp)
+        out = Dense(4, activation='softmax')(x)
+        return Model(inp, out)
+
+    model = get_model()
+    data = tf.random.normal((1, 2))
+    # model.predict(x=data, batch_size=1)
+    model(data)
+    # model(data, training=True)
+    pass
+
+
+def test_iterate_layer_output():
+    def get_model():
+        inp = Input(shape=(2,))
+        x = Dense(4, name='layer')(inp)
+        return Model(inp, Dense(1)(x))
+
+    model = get_model()
+    model(tf.random.normal((1, 2)))
+    layer: Layer = model.get_layer(name='layer')
+
+    weights, bias = layer.weights
+    print('weights:')
+    for w in weights.value():
+        print(w)
+
+    print('bias:')
+    for b in bias.value():
+        print(b)
+
+
+def test_incremental_mean(x: list, alpha=1.0):
+    m = [x[0]]
+
+    for i in range(1, len(x)):
+        c1 = (i - 1) / i
+        c2 = 1 / i
+
+        m_i = (c1 * m[i - 1]) + (c2 * alpha * x[i])
+        m.append(m_i)
+
+    mean = np.mean(x)
+    print(f'mean: {mean} vs i.mean: {np.round(m, 2)}')
+
+
+def test_incremental_mean2(x: list):
+    # Source: http://datagenetics.com/blog/november22017/index.html
+    m = [x[0]]
+
+    for i in range(1, len(x)):
+        m_i = m[i - 1] + (x[i] - m[i - 1]) / i
+        m.append(m_i)
+
+    mean = np.mean(x)
+    print(f'mean: {mean} vs i.mean: {np.round(m, 2)}')
+
+
+def test_incremental_std(x: list):
+    # Source: http://datagenetics.com/blog/november22017/index.html
+    m = [0]
+    s = [0]
+
+    for i in range(1, len(x) + 1):
+        m_i = m[i - 1] + (x[i - 1] - m[i - 1]) / i
+        s_i = s[i - 1] + (x[i - 1] - m[i - 1]) * (x[i - 1] - m_i)
+
+        m.append(m_i)
+        s.append(s_i)
+
+    std = np.std(x)
+    inc_std = np.sqrt(s[-1] / len(x))
+    print(f'std: {std} vs i.std: {inc_std}')
+
+
 if __name__ == '__main__':
     # Memories:
     # test_recent_memory()
@@ -235,7 +334,10 @@ if __name__ == '__main__':
     # Networks:
     # test_dual_head_value_network()
     # test_dict_inputs()
-    test_add_noise_action()
+    # test_add_noise_action()
+    # test_noise_lambda_layer()
+    # test_predict_different_batch()
+    # test_iterate_layer_output()
 
     # Data:
     # test_tf_data_api()
@@ -244,4 +346,9 @@ if __name__ == '__main__':
     # test_gym_spaces_expand()
     # test_tf_dataset_shard()
     # test_data_to_batches()
+
+    # test_incremental_mean([1, 2, 3, 3, 0, -1, -6, 13, 2, -7], alpha=0.9)
+    # test_incremental_mean([1, 2, 3, 3, 0, -1, -6, 13, 2, -7])
+    # test_incremental_mean2([1, 2, 3, 3, 0, -1, -6, 13, 2, -7])
+    # test_incremental_std([1, 2, 3, 3, 0, -1, -6, 13, 2, -7])
     pass

@@ -96,7 +96,7 @@ class LinearParameter(DynamicParameter):
 
 
 class StepParameter(DynamicParameter):
-    """Step-Parameter (can be seen as a constant-parameter as special case)"""
+    """Step-Parameter"""
     def __init__(self, value: float, *args, **kwargs):
         super().__init__(*args, initial=value, final=value, **kwargs)
 
@@ -106,3 +106,9 @@ class StepParameter(DynamicParameter):
 
     def compute_value(self):
         return self.value
+
+
+class ConstantParameter(StepParameter):
+    """Constant parameter"""
+    def __init__(self, value: float):
+        super().__init__(value=value, steps=1, restart=False)

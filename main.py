@@ -1,7 +1,10 @@
 import gym
 
 from rl import utils
-from rl.agents import PPOAgent, PPO2Agent
+from rl.agents import PPOAgent
+
+from rl.parameters import LinearParameter
+from tensorflow.keras.optimizers.schedules import ExponentialDecay
 
 
 def ppo_cartpole_test():
@@ -22,37 +25,86 @@ def ppo_cartpole_test():
     # reaches 200 as reward (also cartPole3)
     # (batch shuffling works but learning is worse)
     # decaying lr improves convergence speed
-    lr = ExponentialDecay(1e-3, decay_steps=200, decay_rate=0.95, staircase=True)
+    lr = ExponentialDecay(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True)
+    # lr = ExponentialDecay(1e-4, decay_steps=2000, decay_rate=0.95, staircase=True)
+    # lr = 3e-4
 
-    # lr = 1e-3
-    agent = PPOAgent(env, policy_lr=lr, value_lr=1e-3, clip_ratio=0.20,
-                     lambda_=0.95, entropy_regularization=0.0, name='ppo-cartPole',
-                     optimization_steps=(1, 1), batch_size=20, target_kl=None,
+    agent = PPOAgent(env, policy_lr=lr, value_lr=lr, clip_ratio=0.05,
+                     lambda_=0.95, entropy_regularization=0.0, name='ppo-cartPole-r',
+                     optimization_steps=(1, 2), batch_size=20, target_kl=None,
+                     recurrent_policy=False,
                      log_mode='summary', load=False, seed=42)
 
-    agent.learn(episodes=200, timesteps=200, render_every=10, save_every=False)
+    # CartPole baseline agent (avg. 130 - 200)
+    agent = PPOAgent(env,
+                     policy_lr=ExponentialDecay(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True),
+                     value_lr=ExponentialDecay(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True),
+                     clip_ratio=0.05,
+                     lambda_=0.95, entropy_regularization=0.0, name='ppo-cartPole-r',
+                     optimization_steps=(1, 2), batch_size=20, target_kl=None,
+                     recurrent_policy=False,
+                     log_mode='summary', load=False, seed=42)
+
+    agent.learn(episodes=200, timesteps=200, render_every=10, save_every='end')
 
 
-def ppo_mountaincar_test():
+def ppo_gym_test(e: int, t: int, b: int, env_name='MountainCarContinuous-v0'):
     from rl.parameters import LinearParameter
+    from tensorflow.keras.optimizers.schedules import ExponentialDecay
 
-    env = gym.make('MountainCarContinuous-v0')
+    env = gym.make(env_name)
     utils.print_info(env)
-    # agent = PPO2Agent(env, policy_lr=1e-3, value_lr=3e-4, clip_ratio=0.20,
-    #                   lambda_=0.95, entropy_regularization=0.001, name='ppo-mountainCarContinuous',
-    #                   optimization_steps=(1, 1),
-    #                   advantage_weights=(2.2, 0.4),
-    #                   load=False, log_mode='summary')
 
-    agent = PPOAgent(env, policy_lr=1e-3, value_lr=3e-4, clip_ratio=0.20,
-                     lambda_=0.95, entropy_regularization=0.001, name='ppo-mountainCarContinuous',
-                     optimization_steps=(1, 1), batch_size=50,
-                     noise=LinearParameter(initial=1.0, final=0.01, steps=1000, rate=0.5,
-                                           restart=True, decay_on_restart=0.9),
+    p_lr = ExponentialDecay(3e-4, decay_steps=2000, decay_rate=0.95, staircase=True)
+    v_lr = ExponentialDecay(3e-4, decay_steps=2000, decay_rate=0.95, staircase=True)
+
+    agent = PPOAgent(env, policy_lr=p_lr, value_lr=v_lr, clip_ratio=0.05,
+                     lambda_=0.95, entropy_regularization=0.001, name=f'ppo-{env_name}',
+                     optimization_steps=(1, 2), batch_size=b,
                      recurrent_policy=True,
-                     load=False, log_mode='summary', seed=42)
+                     load=True, log_mode='summary', seed=51)
 
-    agent.learn(episodes=200, timesteps=1000, render_every=5, save_every='end')
+    agent.learn(episodes=e, timesteps=t, render_every=5, save_every='end')
+
+
+def ppo_pendulum_test(e: int, t: int, b: int, load=False):
+    env = gym.make('Pendulum-v0')
+    utils.print_info(env)
+
+    p_lr = ExponentialDecay(1e-3, decay_steps=1000, decay_rate=0.95, staircase=True)
+    v_lr = ExponentialDecay(1e-3, decay_steps=1000, decay_rate=0.95, staircase=True)
+
+    class MyAgent(PPOAgent):
+        def policy_layers(self, inputs: dict, **kwargs):
+            return super().policy_layers(inputs, units=64, layers=8)
+
+    agent = MyAgent(env, policy_lr=p_lr, value_lr=v_lr, clip_ratio=0.10,
+                    entropy_regularization=0.0, name=f'ppo-Pendulum',
+                    optimization_steps=(2, 2), batch_size=b, target_kl=False,
+                    recurrent_policy=False, consider_obs_every=4,
+                    load=load, log_mode='summary', seed=31)
+
+    agent.learn(episodes=e, timesteps=t, render_every=5, save_every='end')
+
+
+def ppo_lunar_lander(e: int, t: int, b: int, load=False):
+    env = gym.make('LunarLanderContinuous-v2')
+    utils.print_info(env)
+
+    p_lr = ExponentialDecay(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True)
+    v_lr = ExponentialDecay(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True)
+
+    class MyAgent(PPOAgent):
+        def policy_layers(self, inputs: dict, **kwargs):
+            return super().policy_layers(inputs, units=64, layers=4)
+
+    agent = MyAgent(env, policy_lr=p_lr, value_lr=v_lr, clip_ratio=0.10,
+                    entropy_regularization=0.0, name=f'ppo-LunarLander',
+                    optimization_steps=(1, 2), batch_size=b, target_kl=False,
+                    recurrent_policy=False, consider_obs_every=2,
+                    load=load, log_mode='summary', seed=42)
+
+    agent.learn(episodes=e, timesteps=t, render_every=5, save_every='end')
 
 
 if __name__ == '__main__':
@@ -60,4 +112,8 @@ if __name__ == '__main__':
     # gym_test()
     # reinforce_test()
     # ppo_cartpole_test()
-    ppo_mountaincar_test()
+    # ppo_pendulum_test(e=200, t=200, b=50, load=False)
+    ppo_lunar_lander(e=200, t=200, b=32)
+    # BipedalWalker-v2
+    # ppo_gym_test(e=32, t=64, b=16, env_name='Pendulum-v0')
+    pass

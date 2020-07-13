@@ -48,7 +48,7 @@ class ImitationWrapper:
         self.statistics = utils.Statistics(mode=log_mode, name=name)
 
     def imitate(self, discount=0.99, shuffle_traces=False, shuffle_batches=False,
-                repetitions=1, save_every=1, seed=None):
+                repetitions=1, save_every=1, save_distinct=False, seed=None):
         print('== IMITATION LEARNING ==')
         self.agent.set_random_seed(seed)
 
@@ -69,7 +69,7 @@ class ImitationWrapper:
                 self.write_summaries()
 
                 if k % save_every == 0:
-                    self.save()
+                    self.save(info=(r, i) if save_distinct is True else None)
                 k += 1
                 print(f'\t\ttrace: {i} completed in time {round(time.time() - t0, 3)}s')
 
@@ -151,10 +151,16 @@ class ImitationWrapper:
 
         return trace['state'], trace['action'], trace['reward'], trace['done']
 
-    def save(self):
+    def save(self, info: tuple = None):
         print('saving...')
-        self.policy_network.save(self.save_path['policy'], include_optimizer=False)
-        self.value_network.save(self.save_path['value'], include_optimizer=False)
+
+        if isinstance(info, tuple):
+            repetition, iteration = info
+            self.policy_network.save(f"{self.save_path['policy']}-{repetition}-{iteration}", include_optimizer=False)
+            self.value_network.save(f"{self.save_path['value']}-{repetition}-{iteration}", include_optimizer=False)
+        else:
+            self.policy_network.save(self.save_path['policy'], include_optimizer=False)
+            self.value_network.save(self.save_path['value'], include_optimizer=False)
 
     def log(self, **kwargs):
         self.statistics.log(**kwargs)

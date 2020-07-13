@@ -80,4 +80,10 @@ if __name__ == '__main__':
 
     # step-parameter can be used as constant parameter
     # test_parameter_restart('step', num_steps=50, value=2.0, repeat=2, restart=True)
+
+    # Constant Parameter
+    const = param.ConstantParameter(value=1.0)
+    plt.scatter(x=list(range(100)),
+                y=[const() for _ in range(100)])
+    plt.show()
     pass

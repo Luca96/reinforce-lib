@@ -15,8 +15,10 @@ from gym import spaces
 def to_tensor(x, expand_axis=0):
     if isinstance(x, dict):
         for k, v in x.items():
+            v = tf.cast(v, dtype=tf.float32)
             x[k] = tf.expand_dims(tf.convert_to_tensor(v), axis=expand_axis)
     else:
+        x = tf.cast(x, dtype=tf.float32)
         x = tf.convert_to_tensor(x)
         x = tf.expand_dims(x, axis=expand_axis)
     return x
@@ -37,13 +39,15 @@ def discount_cumsum(x, discount: float):
 
 
 def gae(rewards, values, gamma: float, lambda_: float, normalize=False):
+    rewards = tf.expand_dims(rewards, axis=-1)
     deltas = rewards[:-1] + tf.math.multiply(values[1:], gamma) - values[:-1]
     advantages = discount_cumsum(deltas, discount=gamma * lambda_)
 
     if normalize:
         advantages = tf_normalize(advantages)
 
-    return tf.cast(advantages, dtype=tf.float32)
+    return advantages
+    # return tf.cast(advantages, dtype=tf.float32)
 
 
 def rewards_to_go(rewards, discount: float, normalize=False):

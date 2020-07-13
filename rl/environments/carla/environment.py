@@ -8,10 +8,12 @@ import pygame
 import numpy as np
 
 from gym import spaces
-from typing import Callable, Dict, Union
+from typing import Callable, Dict, Union, List
 from pygame.constants import K_q, K_UP, K_w, K_LEFT, K_a, K_RIGHT, K_d, K_DOWN, K_s, K_SPACE, K_ESCAPE, KMOD_CTRL
 
+from rl.agents import Agent
 from rl import utils as rl_utils
+
 from rl.environments.carla import env_utils
 from rl.environments.carla.sensors import Sensor, SensorSpecs
 
@@ -23,10 +25,11 @@ from rl.environments.carla.tools.utils import WAYPOINT_DICT
 from rl.environments.carla.tools.synchronous_mode import CARLASyncContext
 
 
-# TODO: add more events
 class CARLAEvent(enum.Enum):
     """Available events (callbacks) related to CARLAEnvironment"""
     RESET = 0
+    ON_COLLISION = 1
+    OUT_OF_LANE = 2
 
 
 # -------------------------------------------------------------------------------------------------
@@ -38,7 +41,7 @@ class CARLABaseEnvironment(gym.Env):
 
     def __init__(self, address='localhost', port=2000, timeout=5.0, image_shape=(150, 200, 3),
                  window_size=(800, 600), vehicle_filter='vehicle.tesla.model3', fps=30.0, render=True, debug=True,
-                 path: dict = None, skip_frames=30):
+                 path: dict = None, town: str = None, weather=carla.WeatherParameters.ClearNoon, skip_frames=30):
         super().__init__()
         env_utils.init_pygame()
 
@@ -50,22 +53,25 @@ class CARLABaseEnvironment(gym.Env):
         self.num_frames_to_skip = skip_frames
 
         # Map
+        if isinstance(town, str):
+            self.set_town(town)
+
         self.map: carla.Map = self.world.get_map()
 
         # set fix fps:
-        self.world.apply_settings(carla.WorldSettings(
-            no_rendering_mode=False,
-            synchronous_mode=False,
-            fixed_delta_seconds=1.0 / fps))
+        self.world_settings = carla.WorldSettings(no_rendering_mode=False,
+                                                  synchronous_mode=False,
+                                                  fixed_delta_seconds=1.0 / fps)
+        self.world.apply_settings(self.world_settings)
 
         # Vehicle
         self.vehicle_filter = vehicle_filter
         self.vehicle: carla.Vehicle = None
         self.control = carla.VehicleControl()
 
-        # TODO: weather support
-        # Weather (default is ClearNoon)
-        # self.world.set_weather(carla.WeatherParameters.ClearNoon)
+        # Weather
+        self.weather = weather
+        self.set_weather(weather)
 
         # Path: origin, destination, and path-length:
         self.origin_type = 'map'  # 'map' means sample a random point from the world's map
@@ -164,7 +170,7 @@ class CARLABaseEnvironment(gym.Env):
         self.sensors = dict()
 
         # events and callbacks
-        self.events: Dict[CARLAEvent, Callable] = dict()
+        self.events: Dict[CARLAEvent, List[Callable]] = dict()
 
     @property
     def observation_space(self) -> spaces.Space:
@@ -195,6 +201,36 @@ class CARLABaseEnvironment(gym.Env):
     def reward(self, actions, **kwargs):
         """Agent's reward function"""
         raise NotImplementedError
+
+    def set_weather(self, weather: Union[carla.WeatherParameters, List[carla.WeatherParameters]]):
+        """Sets the given weather. If [weather] is a list, a random preset from the list is chosen and set"""
+        if isinstance(weather, list):
+            weather = random.choice(weather)
+
+        self.world.set_weather(weather)
+        self.weather = weather
+        print(f'Weather changed to {weather}.')
+
+    def set_town(self, town: str, timeout=2.0, max_trials=5):
+        """Loads then given town"""
+        print(f'Loading town: {town}...')
+        self.world = self.client.load_world(town)
+        self.map = None
+
+        for _ in range(max_trials):
+            time.sleep(timeout)
+
+            try:
+                self.map = self.world.get_map()
+            except:
+                print('[set_town] retrying...')
+                continue
+
+            if self.map is not None:
+                break
+
+        self.world.apply_settings(self.world_settings)
+        print(f'Town {town} loaded.')
 
     @staticmethod
     def consume_pygame_events():
@@ -257,6 +293,18 @@ class CARLABaseEnvironment(gym.Env):
         print(f'Event {str(event)} triggered.')
         for callback in self.events.get(event, []):
             callback(**kwargs)
+
+    def unregister_event(self, event: CARLAEvent, callback):
+        """Unregisters a given [callback] to a specific [event]"""
+        assert isinstance(event, CARLAEvent)
+        assert callable(callback)
+
+        if event in self.events:
+            callbacks = self.events[event]
+            callbacks.remove(callback)
+            self.events[event] = callbacks
+        else:
+            print(f'Event {event} not yet registered!')
 
     def render(self, mode='human'):
         """Renders sensors' output"""
@@ -536,6 +584,10 @@ class CARLACollectWrapper(CARLAWrapper):
         self.buffer = None
         self.timestep = 0
 
+        # Check for collisions
+        self.have_collided = False
+        self.should_terminate = False
+
     def reset(self) -> dict:
         self.timestep = 0
         observation = self.env.reset()
@@ -546,38 +598,61 @@ class CARLACollectWrapper(CARLAWrapper):
                                    clean=True)
         return observation
 
+    def on_collision(self, actor):
+        self.have_collided = True
+
+        if 'pedestrian' in actor:
+            self.should_terminate = True
+        elif 'vehicle' in actor:
+            self.should_terminate = True
+        else:
+            self.should_terminate = False
+
     def collect(self, episodes: int, timesteps: int, agent_debug=False, episode_reward_threshold=0.0):
         self.init_buffer(num_timesteps=timesteps)
         env = self.env
+        env.register_event(event=CARLAEvent.ON_COLLISION, callback=self.on_collision)
 
-        for episode in range(episodes):
-            state = self.reset()
-            episode_reward = 0.0
+        self.have_collided = False
+        self.should_terminate = False
 
-            for t in range(timesteps):
-                # act
-                self.agent.update_information()
-                control = self.agent.run_step(debug=agent_debug)
-                action = env.control_to_actions(control)
+        try:
+            for episode in range(episodes):
+                state = self.reset()
+                episode_reward = 0.0
 
-                # step
-                next_state, reward, done, _ = env.step(action)
-                episode_reward += reward
+                for t in range(timesteps):
+                    # act
+                    self.agent.update_information()
+                    control = self.agent.run_step(debug=agent_debug)
+                    action = env.control_to_actions(control)
 
-                # record
-                self.store_transition(state=state, action=action, reward=reward, done=done)
-                state = next_state
+                    # step
+                    next_state, reward, done, _ = env.step(action)
+                    episode_reward += reward
 
-                if done or (t == timesteps - 1):
-                    buffer = self.end_trajectory()
-                    break
+                    if self.have_collided:
+                        self.have_collided = False
 
-            if episode_reward > episode_reward_threshold:
-                self.serialize(buffer, episode)
-            else:
-                print(f'Trace-{episode} discarded because reward={round(episode_reward, 2)} below threshold!')
+                        if self.should_terminate:
+                            episode_reward = -episode_reward_threshold
+                            break
 
-        env.close()
+                    # record
+                    self.store_transition(state=state, action=action, reward=reward, done=done)
+                    state = next_state
+
+                    if done or (t == timesteps - 1):
+                        buffer = self.end_trajectory()
+                        break
+
+                if episode_reward > episode_reward_threshold:
+                    self.serialize(buffer, episode)
+                else:
+                    print(f'Trace-{episode} discarded because reward={round(episode_reward, 2)} below threshold!')
+        finally:
+            env.unregister_event(event=CARLAEvent.ON_COLLISION, callback=self.on_collision)
+            env.close()
 
     def init_buffer(self, num_timesteps: int):
         # partial buffer: misses 'state' and 'action'
@@ -657,8 +732,8 @@ class CARLARecordWrapper:
 class OneCameraCARLAEnvironment(CARLABaseEnvironment):
     """One camera (front) CARLA Environment"""
     # Control: throttle or brake, steer, reverse
-    ACTION = dict(space=spaces.Box(low=-1, high=1, shape=(3,)), default=np.zeros(shape=3, dtype=np.float32))
-    CONTROL = dict(space=spaces.Box(low=-1, high=1, shape=(4,)), default=np.zeros(shape=4, dtype=np.float32))
+    ACTION = dict(space=spaces.Box(low=-1.0, high=1.0, shape=(3,)), default=np.zeros(shape=3, dtype=np.float32))
+    CONTROL = dict(space=spaces.Box(low=-1.0, high=1.0, shape=(4,)), default=np.zeros(shape=4, dtype=np.float32))
 
     # Vehicle: speed, acceleration, angular velocity, similarity, distance to waypoint
     VEHICLE_FEATURES = dict(space=spaces.Box(low=np.array([0.0, -np.inf, 0.0, -1.0, -np.inf]),
@@ -672,9 +747,6 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
 
     # High-level routing command (aka RoadOption)
     COMMAND_SPACE = spaces.Box(low=0.0, high=1.0, shape=(len(RoadOption),))
-
-    # Radar: velocity, altitude, azimuth, depth
-    # RADAR_SPACE = dict(space=spaces.Box(low=-np.inf, high=np.inf, shape=(50, 4)), default=None)
 
     def __init__(self, *args, disable_reverse=False, camera='segmentation', **kwargs):
         super().__init__(*args, **kwargs)
@@ -697,7 +769,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         self.total_travelled_distance = 0.0
 
         # Observations
-        self.default_image = np.zeros(shape=self.image_shape, dtype=np.uint8)
+        self.default_image = np.zeros(shape=self.image_shape, dtype=np.float32)
 
     @property
     def action_space(self) -> spaces.Space:
@@ -728,9 +800,6 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         # Speed-limit compliance:
         speed_limit = self.vehicle.get_speed_limit()
         speed_penalty = s * (speed_limit - speed) if speed > speed_limit else 0.0
-
-        # Risk penalty discourages long action's horizon (validity)
-        # risk_penalty = x**(self.last_actions['validity'] - 1)
 
         return time_cost - self.collision_penalty + waypoint_term + direction_penalty + speed_penalty
 
@@ -787,6 +856,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
     def on_collision(self, event: carla.CollisionEvent, penalty=1000.0):
         actor_type = event.other_actor.type_id
         print(f'Collision with actor={actor_type})')
+        self.trigger_event(event=CARLAEvent.ON_COLLISION, actor=actor_type)
 
         if 'pedestrian' in actor_type:
             self.collision_penalty += penalty
@@ -912,17 +982,17 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         else:
             lane_type = 2  # other
 
-        return [waypoint.is_intersection,
-                waypoint.is_junction,
-                round(speed_limit / 10.0),
-                # Traffic light:
-                is_at_traffic_light,
-                WAYPOINT_DICT['traffic_light'][traffic_light_state],
-                # Lanes:
-                lane_type,
-                WAYPOINT_DICT['lane_marking_type'][waypoint.left_lane_marking.type],
-                WAYPOINT_DICT['lane_marking_type'][waypoint.right_lane_marking.type],
-                WAYPOINT_DICT['lane_change'][waypoint.lane_change]]
+        return np.array([waypoint.is_intersection,
+                         waypoint.is_junction,
+                         round(speed_limit / 10.0),
+                         # Traffic light:
+                         is_at_traffic_light,
+                         WAYPOINT_DICT['traffic_light'][traffic_light_state],
+                         # Lanes:
+                         lane_type,
+                         WAYPOINT_DICT['lane_marking_type'][waypoint.left_lane_marking.type],
+                         WAYPOINT_DICT['lane_marking_type'][waypoint.right_lane_marking.type],
+                         WAYPOINT_DICT['lane_change'][waypoint.lane_change]], dtype=np.float32)
 
     def _get_vehicle_features(self):
         imu_sensor = self.sensors['imu']
@@ -1018,3 +1088,58 @@ class ThreeCameraCARLAEnvironment(OneCameraCARLAEnvironment):
             data['camera'] = env_utils.cv2_grayscale(data['camera'])
 
         return data
+
+
+# -------------------------------------------------------------------------------------------------
+# -- Benchmarks: CARLA + NoCrash
+# -------------------------------------------------------------------------------------------------
+
+class CARLABenchmark(CARLAWrapper):
+    """CARLA benchmark, as described in the paper: "End-to-end Driving via Conditional Imitation Learning"
+         - https://arxiv.org/pdf/1710.02410
+
+       The agent is evaluated on:
+         - Town: "Town02".
+         - Performance are measured in two ways: (1) success rate, and (2) avg. distance without infractions.
+         - Six weather presets (almost like in "Controllable Imitative Reinforcement Learning" paper):
+            1. CloudyNoon,
+            2. SoftRainSunset,
+            3. CloudyNoon,
+            4. MidRainyNoon,
+            5. CloudySunset,
+            6. HardRainSunset.
+         - An episode terminates when an "infraction". An infraction occurs when the agent is not able to
+           reach the goal location within the time-budget, and/or when the agent drives in the opposite road
+           segment (in this case, this kind of infraction is detected by measuring "direction-similarity" with
+           the next correct waypoint).
+         - Time-budget: in this case, the time budget is represented by "average speed".
+    """
+    TRAIN_TOWN = 'Town01'
+    TEST_TOWN = 'Town02'
+
+    TRAIN_WEATHERS = [carla.WeatherParameters.ClearNoon,
+                      carla.WeatherParameters.ClearSunset,
+                      carla.WeatherParameters.SoftRainyNoon,
+                      carla.WeatherParameters.SoftRainSunset]
+    WEATHERS = [carla.WeatherParameters.CloudyNoon,
+                carla.WeatherParameters.SoftRainSunset,
+                carla.WeatherParameters.WetCloudyNoon,
+                carla.WeatherParameters.MidRainyNoon,
+                carla.WeatherParameters.CloudySunset,
+                carla.WeatherParameters.HardRainSunset]
+
+    def __init__(self, env: CARLABaseEnvironment, time_budget=10.0):
+        self.env = env
+
+    def reset(self):
+        pass
+
+    def step(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class CARLANoCrashBenchmark(CARLABenchmark):
+    pass

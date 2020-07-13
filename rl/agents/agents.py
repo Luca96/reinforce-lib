@@ -5,23 +5,28 @@ import numpy as np
 import tensorflow as tf
 
 from rl import utils
-from typing import List, Dict
+from typing import List, Dict, Union
 from tensorflow.keras import layers
 
 
 # TODO: implement RandomAgent
 # TODO: actor-critic agent interface (to include policy/value network as well as loading/saving)?
-# TODO: accept strings for env parameter, the strings should represent Gym's environments
+# TODO: save agent configuration as json
 class Agent:
     """Agent abstract class"""
-    def __init__(self, env: gym.Env, batch_size: int, seed=None, weights_dir='weights', name='agent',
+    def __init__(self, env: Union[gym.Env, str], batch_size: int, seed=None, weights_dir='weights', name='agent',
                  log_mode='summary', drop_batch_reminder=False, skip_data=0, consider_obs_every=1,
                  shuffle_batches=False):
-        self.env = env
+        if isinstance(env, str):
+            self.env = gym.make(env)
+        else:
+            self.env = env
+
         self.batch_size = batch_size
         self.state_spec = utils.space_to_flat_spec(space=self.env.observation_space, name='state')
         self.action_spec = utils.space_to_flat_spec(space=self.env.action_space, name='action')
         self.set_random_seed(seed)
+        self.last_value = tf.zeros((1, 1), dtype=tf.float32)
 
         # Data options
         self.drop_batch_reminder = drop_batch_reminder
@@ -33,6 +38,9 @@ class Agent:
         self.base_path = os.path.join(weights_dir, name)
         self.save_path = dict(policy=os.path.join(self.base_path, 'policy_net'),
                               value=os.path.join(self.base_path, 'value_net'))
+
+        self.weights_path = dict(policy=os.path.join('checkpoints', name, 'policy_net'),
+                                 value=os.path.join('checkpoints', name, 'value_net'))
         # Statistics:
         self.statistics = utils.Statistics(mode=log_mode, name=name)
 
@@ -54,10 +62,19 @@ class Agent:
     def learn(self, *args, **kwargs):
         pass
 
-    def evaluate(self, episodes: int, timesteps: int, render=True) -> list:
+    def evaluate(self, episodes: int, timesteps: int, render=True, seeds=None) -> list:
         rewards = []
+        sample_seed = False
+
+        if isinstance(seeds, int):
+            self.set_random_seed(seed=seeds)
+        elif isinstance(seeds, list):
+            sample_seed = True
 
         for episode in range(1, episodes + 1):
+            if sample_seed:
+                self.set_random_seed(seed=random.choice(seeds))
+
             state = self.env.reset()
             episode_reward = 0.0
 
@@ -104,6 +121,9 @@ class Agent:
     def summary(self):
         """Networks summary"""
         raise NotImplementedError
+
+    def clear(self):
+        pass
 
     def _get_input_layers(self) -> Dict[str, layers.Input]:
         """Handles arbitrary complex state-spaces"""
