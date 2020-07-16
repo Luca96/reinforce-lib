@@ -1,5 +1,6 @@
 import os
 import gym
+import json
 import random
 import numpy as np
 import tensorflow as tf
@@ -36,11 +37,13 @@ class Agent:
 
         # Saving stuff:
         self.base_path = os.path.join(weights_dir, name)
-        self.save_path = dict(policy=os.path.join(self.base_path, 'policy_net'),
-                              value=os.path.join(self.base_path, 'value_net'))
+        self.weights_path = dict(policy=os.path.join(self.base_path, 'policy_net'),
+                                 value=os.path.join(self.base_path, 'value_net'))
 
-        self.weights_path = dict(policy=os.path.join('checkpoints', name, 'policy_net'),
-                                 value=os.path.join('checkpoints', name, 'value_net'))
+        # JSON configuration file (keeps track of useful quantities)
+        self.config_path = os.path.join(self.base_path, 'config.json')
+        self.config = dict()
+
         # Statistics:
         self.statistics = utils.Statistics(mode=log_mode, name=name)
 
@@ -122,8 +125,32 @@ class Agent:
         """Networks summary"""
         raise NotImplementedError
 
-    def clear(self):
+    def update_config(self, **kwargs):
+        """Stores the given variables in the configuration dict for later saving"""
+        for k, v in kwargs.items():
+            self.config[k] = v
+
+    def load_config(self):
+        with open(self.config_path, 'r') as file:
+            self.config = json.load(file)
+            print('config loaded.')
+            print(self.config)
+
+    def save_config(self):
+        with open(self.config_path, 'w') as file:
+            json.dump(self.config, fp=file)
+            print('config saved.')
+
+    def reset(self):
         pass
+
+    def load(self):
+        """Loads the past agent's state"""
+        self.load_config()
+
+    def save(self):
+        """Saves the agent's state"""
+        self.save_config()
 
     def _get_input_layers(self) -> Dict[str, layers.Input]:
         """Handles arbitrary complex state-spaces"""

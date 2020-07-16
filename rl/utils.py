@@ -5,6 +5,7 @@ import numpy as np
 import scipy.signal
 import tensorflow as tf
 import matplotlib.pyplot as plt
+import tensorflow_probability as tfp
 
 from typing import Union, List, Dict, Tuple
 from datetime import datetime
@@ -60,7 +61,7 @@ def rewards_to_go(rewards, discount: float, normalize=False):
 
 
 def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batches=False, seed=None,
-                    drop_remainder=False, map_fn=None, prefetch=2, num_shards=1, skip=0):
+                    drop_remainder=False, map_fn=None, prefetch_size=2, num_shards=1, skip=0):
     """Transform some tensors data into a dataset of mini-batches"""
     dataset = tf.data.Dataset.from_tensor_slices(tensors).skip(count=skip)
 
@@ -84,7 +85,7 @@ def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batche
     if shuffle_batches:
         dataset = dataset.shuffle(buffer_size=batch_size, seed=seed)
 
-    return dataset.prefetch(buffer_size=prefetch)
+    return dataset.prefetch(buffer_size=prefetch_size)
 
 
 def print_info(gym_env):
@@ -294,4 +295,126 @@ class Statistics:
 
         plt.show()
 
+
+class IncrementalStatistics:
+    """Compute mean, variance, and standard deviation incrementally."""
+    def __init__(self):
+        self.mean = 0.0
+        self.variance = 0.0
+        self.std = 0.0
+        self.count = 0
+
+    def update(self, x):
+        old_mean = self.mean
+        new_mean = tf.reduce_mean(x)
+        m = self.count
+        n = tf.shape(x)[0]
+        c1 = m / (m + n)
+        c2 = n / (m + n)
+        c3 = (m * n) / (m + n) ** 2
+
+        self.mean = c1 * old_mean + c2 * new_mean
+        self.variance = c1 * self.variance + c2 * tf.math.reduce_variance(x) + c3 * (old_mean - new_mean) ** 2
+        self.std = tf.sqrt(self.variance)
+        self.count += n
+
+    def set(self, mean: float, variance: float, std: float, count: int):
+        self.mean = mean
+        self.variance = variance
+        self.std = std
+        self.count = count
+
+    def as_dict(self) -> dict:
+        return dict(mean=np.float(self.mean), variance=np.float(self.variance),
+                    std=np.float(self.std), count=np.int(self.count))
+
+
 # -------------------------------------------------------------------------------------------------
+# -- probability distribution
+# -------------------------------------------------------------------------------------------------
+
+class MixtureDistribution(tfp.distributions.Mixture):
+
+    def entropy(self, name='entropy', **kwargs):
+        return super().entropy_lower_bound()
+
+    def kl_divergence(self, other, name='kl_divergence'):
+        """Roughly approximated KL-divergence"""
+        approx_kl = 0.0
+
+        for i, component in enumerate(self.components):
+            approx_kl += self.cat.prob(i) * component.kl_divergence(other)
+
+        return approx_kl
+
+
+def get_mixture_of_categorical(layer: tf.keras.layers.Layer, num_actions: int,
+                               num_components: int) -> tfp.layers.DistributionLambda:
+    layers = []
+
+    # define the layers that weights the mixture's components
+    weights = tf.keras.layers.Dense(units=num_components)(layer)
+    weights = tf.expand_dims(weights, axis=0, name='mixture-weights')
+    layers.append(weights)
+
+    # create a logits (dense) layer for each component
+    for i in range(num_components):
+        logits = tf.keras.layers.Dense(units=num_actions, activation='linear')(layer)
+        logits = tf.expand_dims(logits, axis=0, name=f'logits-{i + 1}')
+        layers.append(logits)
+
+    # make the distribution lambda layer that wraps the mixture
+    return tfp.layers.DistributionLambda(
+        make_distribution_fn=lambda t: MixtureDistribution(
+            cat=tfp.distributions.Categorical(logits=t[0]),
+            components=[tfp.distributions.Categorical(logits=t[j + 1]) for j in range(num_components)]
+        )
+    )(layers)
+
+
+def get_mixture_of_dirichlet(layer: tf.keras.layers.Layer, num_actions: int,
+                             num_components: int) -> tfp.layers.DistributionLambda:
+    layers = []
+
+    # define the layers that weights the mixture's components
+    weights = tf.keras.layers.Dense(units=num_components, name='mixture-weights')(layer)
+    layers.append(weights)
+
+    # create a dense layer for alpha and beta parameters for each component
+    for i in range(num_components):
+        alpha = tf.keras.layers.Dense(units=num_actions, activation='softplus')(layer)
+        alpha = tf.keras.layers.Add(name=f'alpha-{i}')([alpha, tf.ones_like(alpha)])
+        layers.append(alpha)
+
+    # make the distribution lambda layer that wraps the mixture
+    return tfp.layers.DistributionLambda(
+        make_distribution_fn=lambda t: MixtureDistribution(
+            cat=tfp.distributions.Categorical(logits=t[0]),
+            components=[tfp.distributions.Dirichlet(concentration=t[j + 1]) for j in range(num_components)]
+        )
+    )(layers)
+
+
+def get_mixture_of_gaussian(layer: tf.keras.layers.Layer, num_actions: int,
+                            num_components: int) -> tfp.layers.DistributionLambda:
+    layers = []
+
+    # define the layers that weights the mixture's components
+    weights = tf.keras.layers.Dense(units=num_components, name='mixture-weights')(layer)
+    layers.append(weights)
+
+    # create a dense layer for alpha and beta parameters for each component
+    for i in range(num_components):
+        mu = tf.keras.layers.Dense(units=num_actions, activation='linear', name=f'mu-{i}')(layer)
+        sigma = tf.keras.layers.Dense(units=num_actions, activation='softplus', name=f'sigma-{i}')(layer)
+
+        layers.append([mu, sigma])
+
+    # make the distribution lambda layer that wraps the mixture
+    return tfp.layers.DistributionLambda(
+        make_distribution_fn=lambda t: MixtureDistribution(
+            cat=tfp.distributions.Categorical(logits=t[0]),
+            components=[tfp.distributions.MultivariateNormalDiag(
+                loc=t[j + 1][0], scale_diag=t[j + 1][1]) for j in range(num_components)]
+        )
+    )(layers)
