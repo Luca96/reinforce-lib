@@ -133,6 +133,29 @@ def random_blueprint(world: carla.World, actor_filter='vehicle.*', role_name='ag
     return blueprint
 
 
+def get_blueprints(world: carla.World, vehicles_filter: str = None, pedestrians_filter: str = None, safe=True):
+    """Returns a list of blueprints for vehicles and pedestrians"""
+    if vehicles_filter is None:
+        vehicles_filter = 'vehicle.*'
+
+    if pedestrians_filter is None:
+        pedestrians_filter = 'walker.pedestrian.*'
+
+    blueprint_lib = world.get_blueprint_library()
+
+    vehicles_blueprints = blueprint_lib.filter(vehicles_filter)
+    walkers_blueprints = blueprint_lib.filter(pedestrians_filter)
+
+    if safe:
+        vehicles_blueprints = filter(lambda b: (int(b.get_attribute('number_of_wheels')) == 4) and not
+                                               (b.id.endswith('isetta') or b.id.endswith('carlacola') or
+                                                b.id.endswith('cybertruck') or b.id.endswith('t2')),
+                                     vehicles_blueprints)
+        vehicles_blueprints = list(vehicles_blueprints)
+
+    return vehicles_blueprints, walkers_blueprints
+
+
 def random_spawn_point(world_map: carla.Map, different_from: carla.Location = None) -> carla.Transform:
     """Returns a random spawning location.
         :param world_map: a carla.Map instance obtained by calling world.get_map()
@@ -164,9 +187,153 @@ def spawn_actor(world: carla.World, blueprint: carla.ActorBlueprint, spawn_point
     actor = world.try_spawn_actor(blueprint, spawn_point, attach_to, attachment_type)
 
     if actor is None:
-        raise ValueError(f'Cannot spawn actor. Try changing the spawn_point ({spawn_point}) to something else.')
+        raise ValueError(f'Cannot spawn actor. Try changing the spawn_point ({spawn_point.location}) to something else.')
 
     return actor
+
+
+def spawn_vehicles(amount: int, blueprints: list, client: carla.Client, spawn_points: List[carla.Transform]) -> list:
+    """Spawns vehicles, based on spawn_npc.py"""
+    assert amount >= 0
+
+    traffic_manager = client.get_trafficmanager()
+    batch = []
+    vehicles = []
+    random.shuffle(spawn_points)
+
+    for i, transform in enumerate(spawn_points):
+        if i >= amount:
+            break
+
+        blueprint = random.choice(blueprints)
+
+        if blueprint.has_attribute('color'):
+            color = random.choice(blueprint.get_attribute('color').recommended_values)
+            blueprint.set_attribute('color', color)
+
+        if blueprint.has_attribute('driver_id'):
+            driver_id = random.choice(blueprint.get_attribute('driver_id').recommended_values)
+            blueprint.set_attribute('driver_id', driver_id)
+
+        blueprint.set_attribute('role_name', 'autopilot')
+
+        # spawn the cars and set their autopilot
+        batch.append(carla.command.SpawnActor(blueprint, transform)
+                     .then(carla.command.SetAutopilot(carla.command.FutureActor, True, traffic_manager.get_port())))
+
+    for response in client.apply_batch_sync(batch, True):
+        if response.error:
+            print(response.error)
+        else:
+            vehicles.append(response.actor_id)
+
+    return vehicles
+
+
+def spawn_pedestrians(amount: int, blueprints: list, client: carla.Client, running=0.0, crossing=0.0) -> list:
+    """Spawns pedestrians, based on spawn_npc.py"""
+    assert amount >= 0
+    assert 0.0 <= running <= 1.0
+    assert 0.0 <= crossing <= 1.0
+
+    percentage_pedestrians_running = running  # how many pedestrians will run
+    percentage_pedestrians_crossing = crossing  # how many pedestrians will walk through the road
+
+    traffic_manager = client.get_trafficmanager()
+    world = client.get_world()
+
+    # 1. Spawn point with random location (for navigation purpose)
+    spawn_points = []
+
+    for i in range(amount):
+        spawn_point = carla.Transform()
+        loc = world.get_random_location_from_navigation()
+
+        if loc is not None:
+            spawn_point.location = loc
+            spawn_points.append(spawn_point)
+
+    # 2. spawn the walker object
+    batch = []
+    walker_speed = []
+
+    for spawn_point in spawn_points:
+        walker_bp = random.choice(blueprints)
+
+        # set as not invincible
+        if walker_bp.has_attribute('is_invincible'):
+            walker_bp.set_attribute('is_invincible', 'false')
+
+        # set the max speed
+        if walker_bp.has_attribute('speed'):
+            if random.random() > percentage_pedestrians_running:
+                # walking
+                walker_speed.append(walker_bp.get_attribute('speed').recommended_values[1])
+            else:
+                # running
+                walker_speed.append(walker_bp.get_attribute('speed').recommended_values[2])
+        else:
+            print("Walker has no speed")
+            walker_speed.append(0.0)
+
+        batch.append(carla.command.SpawnActor(walker_bp, spawn_point))
+
+    results = client.apply_batch_sync(batch, True)
+    walker_speed2 = []
+    walkers = []
+
+    for i in range(len(results)):
+        if results[i].error:
+            print(results[i].error)
+        else:
+            walkers.append(dict(id=results[i].actor_id, controller=None))
+            walker_speed2.append(walker_speed[i])
+
+    walker_speed = walker_speed2
+
+    # 3. Spawn the walker controller
+    batch = []
+    walker_controller_bp = world.get_blueprint_library().find('controller.ai.walker')
+
+    for i in range(len(walkers)):
+        batch.append(carla.command.SpawnActor(walker_controller_bp, carla.Transform(), walkers[i]['id']))
+
+    results = client.apply_batch_sync(batch, True)
+
+    for i in range(len(results)):
+        if results[i].error:
+            print(results[i].error)
+        else:
+            walkers[i]['controller'] = results[i].actor_id
+
+    # 4. Put altogether the walkers and controllers id to get the objects from their id
+    all_id = []
+
+    for i in range(len(walkers)):
+        all_id.append(walkers[i]['controller'])
+        all_id.append(walkers[i]['id'])
+
+    all_actors = world.get_actors(all_id)
+
+    # wait for a tick to ensure client receives the last transform of the walkers we have just created
+    if not world.get_settings().synchronous_mode:
+        world.wait_for_tick()
+    else:
+        world.tick()
+
+    # 5. initialize each controller and set target to walk to (list is [controller, actor, controller, actor ...])
+    # set how many pedestrians can cross the road
+    world.set_pedestrians_cross_factor(percentage_pedestrians_crossing)
+
+    for i in range(0, len(all_id), 2):
+        # start walker
+        all_actors[i].start()
+        # set walk to random point
+        all_actors[i].go_to_location(world.get_random_location_from_navigation())
+        # max speed
+        all_actors[i].set_max_speed(float(walker_speed[int(i / 2)]))
+
+    return all_id
 
 
 def get_blueprint(world: carla.World, actor_id: str) -> carla.ActorBlueprint:
@@ -285,10 +452,10 @@ def magnitude(vec3d: Union[carla.Vector3D, Tuple[float, float, float], List[floa
     """Returns the magnitude (norm) of the given 3D vector (tuple/list or carla.Vector3D)."""
     if isinstance(vec3d, tuple) or isinstance(vec3d, list):
         assert len(vec3d) == 3
-        return math.sqrt(vec3d[0]**2 + vec3d[1]**2 + vec3d[2]**2)
+        return math.sqrt(vec3d[0] ** 2 + vec3d[1] ** 2 + vec3d[2] ** 2)
 
     elif isinstance(vec3d, carla.Vector3D):
-        return math.sqrt(vec3d.x**2 + vec3d.y**2 + vec3d.z**2)
+        return math.sqrt(vec3d.x ** 2 + vec3d.y ** 2 + vec3d.z ** 2)
     else:
         raise TypeError(f"Type for argument 'vec3d' must be 'list', 'tuple' or 'carla.Vector3D', not {type(vec3d)}.")
 

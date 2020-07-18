@@ -130,7 +130,7 @@ def test_noise_lambda_layer(seed=42):
         x = Dense(2, activation='tanh')(inp)
         x = Lambda(lambda y: y + tf.random.normal(tf.shape(y), stddev=noise))(x)
         out = tfp.layers.DistributionLambda(
-                make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t))(x)
+            make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t))(x)
         return Model(inp, out)
 
     data = tf.random.normal((4, 2))
@@ -221,10 +221,10 @@ def test_tf_dataset_shard(size=20, num_shards=4, batch_size=5):
         print(batch)
 
 
-def test_data_to_batches(size=20, batch_size=5):
+def test_data_to_batches(size=20, batch_size=5, **kwargs):
     data = tf.data.Dataset.range(size).as_numpy_iterator()
 
-    for batch in utils.data_to_batches(list(data), batch_size):
+    for batch in utils.data_to_batches(list(data), batch_size, **kwargs):
         print(batch)
 
 
@@ -306,14 +306,95 @@ def test_incremental_std(x: list):
     print(f'std: {std} vs i.std: {inc_std}')
 
 
+def test_dataset_sharding_scenarios():
+    print('ideal')
+    test_data_to_batches(size=50, batch_size=10, num_shards=5)  # assert (batch_size * num_shards) % size == 0
+    print('-------')
+    test_data_to_batches(size=100, batch_size=10, num_shards=5)
+
+
+def test_model_independent_distribution():
+    import tensorflow_probability as tfp
+
+    np.random.seed(42)
+    tf.random.set_seed(42)
+    random.seed(42)
+
+    def get_models():
+        inp = Input(shape=(2,))
+        x = Dense(2)(inp)
+
+        out1 = tfp.layers.DistributionLambda(
+            make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t))(x)
+
+        out2 = tfp.layers.DistributionLambda(
+            make_distribution_fn=lambda t: tfp.distributions.Independent(
+                distribution=tfp.distributions.Categorical(logits=t)))(x)
+
+        return Model(inp, out1), Model(inp, out2)
+
+    model1, model2 = get_models()
+
+    for data in [tf.random.normal((1, 2)), tf.random.normal((5, 2))]:
+        print([x.numpy() for x in model1(data)])
+        print([x.numpy() for x in model2(data)])
+        print()
+
+
+def test_rnn_sequences():
+    def get_model():
+        inp = Input(shape=(None, 2))
+        gru = GRU(8, return_sequences=True, return_state=True)  # x == state if return_sequences=False
+        x, state = gru(inp)
+        return Model(inp, [x, state]), gru
+
+    model, gru_layer = get_model()
+    model.summary()
+
+    data = tf.random.normal((1, 6, 2))
+    y, h = model(data)
+    print(y, h)
+
+    # print(gru_layer.get_initial_state(h))  # prints [0, 0, ..., 0]
+    # gru_layer.reset_states(states=h)  # CANNOT DO THIS! needs stateful=True)
+    # print(model(data))
+
+
+def test_mixture_distribution():
+    mixture = tfp.distributions.Mixture(
+        cat=tfp.distributions.Categorical(logits=[1, 2, 3]),
+        components=[
+            tfp.distributions.Normal(loc=-1., scale=0.1),
+            tfp.distributions.Normal(loc=0., scale=0.30),
+            tfp.distributions.Normal(loc=+1., scale=0.5)])
+
+    x = tf.linspace(-2., 3., int(1e4))
+    plt.plot(x, mixture.prob(x))
+    plt.show()
+
+    approx_entropy = 0.0
+    for i, component in enumerate(mixture.components):
+        print(f'[{i}] entropy: {component.entropy()}')
+        approx_entropy += mixture.cat.prob(i) * component.entropy()
+    print('approx entropy:', approx_entropy, mixture.entropy_lower_bound())
+
+
+def test_mixture_same_family_distribution():
+    mixture = tfp.distributions.MixtureSameFamily(
+        mixture_distribution=tfp.distributions.Categorical(logits=[1, 3]),
+        components_distribution=tfp.distributions.MultivariateNormalDiag(
+            loc=[[0.5, 0.6], [0.1, 0.3]],
+            scale_diag=[[0.3, 0.1], [0.6, 0.99]]))
+
+    print(mixture.sample())
+
+
 if __name__ == '__main__':
     # Memories:
     # test_recent_memory()
     # test_replay_memory()
 
     # GAE:
-    # test_generalized_advantage_estimation(gamma=0.99, lambda_=0.0)
-    # test_generalized_advantage_estimation(gamma=0.99, lambda_=1.0)
 
     # Environments:
     # test_gym_env(num_episodes=200 * 5, max_timesteps=100, env='CartPole-v0')
@@ -330,6 +411,8 @@ if __name__ == '__main__':
     # cat = tfp.distributions.Categorical(logits=[1, 2, 3, 4])
     # print(cat.log_prob([[1], [2], [3]]))
     # test_categorical_vs_beta_prob(action_shape=1)
+    # test_mixture_distribution()
+    test_mixture_same_family_distribution()
 
     # Networks:
     # test_dual_head_value_network()
@@ -338,6 +421,8 @@ if __name__ == '__main__':
     # test_noise_lambda_layer()
     # test_predict_different_batch()
     # test_iterate_layer_output()
+    # test_model_independent_distribution()
+    # test_rnn_sequences()
 
     # Data:
     # test_tf_data_api()
@@ -346,6 +431,7 @@ if __name__ == '__main__':
     # test_gym_spaces_expand()
     # test_tf_dataset_shard()
     # test_data_to_batches()
+    # test_dataset_sharding_scenarios()
 
     # test_incremental_mean([1, 2, 3, 3, 0, -1, -6, 13, 2, -7], alpha=0.9)
     # test_incremental_mean([1, 2, 3, 3, 0, -1, -6, 13, 2, -7])

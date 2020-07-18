@@ -39,8 +39,8 @@ class CARLAEvent(enum.Enum):
 class CARLABaseEnvironment(gym.Env):
     """Base extendable environment for the CARLA driving simulator"""
 
-    def __init__(self, address='localhost', port=2000, timeout=5.0, image_shape=(150, 200, 3),
-                 window_size=(800, 600), vehicle_filter='vehicle.tesla.model3', fps=30.0, render=True, debug=True,
+    def __init__(self, address='localhost', port=2000, timeout=5.0, image_shape=(150, 200, 3), window_size=(800, 600),
+                 vehicle_filter='vehicle.tesla.model3', fps=30.0, render=True, debug=True, spawn: dict = None,
                  path: dict = None, town: str = None, weather=carla.WeatherParameters.ClearNoon, skip_frames=30):
         super().__init__()
         env_utils.init_pygame()
@@ -51,6 +51,10 @@ class CARLABaseEnvironment(gym.Env):
         self.synchronous_context = None
         self.sync_mode_enabled = False
         self.num_frames_to_skip = skip_frames
+
+        # Time
+        self.initial_timestamp: carla.Timestamp = None
+        self.current_timestamp: carla.Timestamp = None
 
         # Map
         if isinstance(town, str):
@@ -72,6 +76,12 @@ class CARLABaseEnvironment(gym.Env):
         # Weather
         self.weather = weather
         self.set_weather(weather)
+
+        # Spawning (vehicles and pedestrians)
+        self.vehicles = []
+        self.walkers_ids = []
+        self.should_spawn = isinstance(spawn, dict)
+        self.spawn_dict = spawn
 
         # Path: origin, destination, and path-length:
         self.origin_type = 'map'  # 'map' means sample a random point from the world's map
@@ -195,6 +205,11 @@ class CARLABaseEnvironment(gym.Env):
         self.control = carla.VehicleControl()
         self.skip(num_frames=self.num_frames_to_skip)
 
+        if self.should_spawn:
+            self.spawn_actors(self.spawn_dict)
+            self.spawn_dict = None
+            self.should_spawn = False
+
         observation = env_utils.replace_nans(self.get_observation(sensors_data={}))
         return observation
 
@@ -214,23 +229,60 @@ class CARLABaseEnvironment(gym.Env):
     def set_town(self, town: str, timeout=2.0, max_trials=5):
         """Loads then given town"""
         print(f'Loading town: {town}...')
-        self.world = self.client.load_world(town)
         self.map = None
 
         for _ in range(max_trials):
-            time.sleep(timeout)
-
             try:
+                self.world = self.client.load_world(town)
                 self.map = self.world.get_map()
-            except:
-                print('[set_town] retrying...')
-                continue
+            except RuntimeError:
+                print('Failed to connect to newly created map, retrying...')
+                time.sleep(timeout)
 
             if self.map is not None:
                 break
 
         self.world.apply_settings(self.world_settings)
         print(f'Town {town} loaded.')
+
+    def spawn_actors(self, spawn_dict: dict, hybrid=True, safe=True):
+        """Instantiate vehicles and pedestrians in the current world"""
+        traffic_manager = self.client.get_trafficmanager()
+        traffic_manager.set_synchronous_mode(True)
+
+        if spawn_dict.get('hybrid', hybrid):
+            traffic_manager.set_hybrid_physics_mode(True)
+
+        blueprints = env_utils.get_blueprints(self.world, vehicles_filter=spawn_dict.get('vehicles_filter', None),
+                                              pedestrians_filter=spawn_dict.get('pedestrians_filter', None),
+                                              safe=safe)
+        # Spawn stuff
+        self.vehicles = env_utils.spawn_vehicles(amount=spawn_dict.get('vehicles', 0), blueprints=blueprints[0],
+                                                 client=self.client, spawn_points=self.map.get_spawn_points())
+
+        self.walkers_ids = env_utils.spawn_pedestrians(amount=spawn_dict.get('pedestrians', 0),
+                                                       blueprints=blueprints[1], client=self.client,
+                                                       running=spawn_dict.get('running', 0.0),
+                                                       crossing=spawn_dict.get('crossing', 0.0))
+
+        traffic_manager.global_percentage_speed_difference(30.0)
+
+    def destroy_actors(self):
+        """Removes the previously spawned actors (vehicles and pedestrians/walkers)"""
+        # Remove vehicles
+        print(f'Destroying {len(self.vehicles)} vehicles...')
+        self.client.apply_batch([carla.command.DestroyActor(x) for x in self.vehicles])
+
+        # Stop walker controllers only (list is [controller, actor, controller, actor ...])
+        actors = self.world.get_actors(self.walkers_ids)
+
+        for i in range(0, len(self.walkers_ids), 2):
+            actors[i].stop()
+
+        print(f'Destroying {len(self.walkers_ids) // 2} pedestrians...')
+        self.client.apply_batch([carla.command.DestroyActor(x) for x in self.walkers_ids])
+
+        time.sleep(1.0)
 
     @staticmethod
     def consume_pygame_events():
@@ -262,6 +314,10 @@ class CARLABaseEnvironment(gym.Env):
     def close(self):
         print('env.close')
         super().close()
+
+        self.destroy_actors()
+        self.vehicles = []
+        self.walkers_ids = []
 
         if self.vehicle:
             self.vehicle.destroy()
@@ -334,7 +390,10 @@ class CARLABaseEnvironment(gym.Env):
 
     def after_world_step(self, sensors_data: dict):
         """Callback: called after world.tick()."""
-        pass
+        self.current_timestamp = sensors_data['world'].timestamp
+
+        if self.initial_timestamp is None:
+            self.initial_timestamp = self.current_timestamp
 
     @staticmethod
     def on_sensors_data(data: dict) -> dict:
@@ -441,6 +500,10 @@ class CARLABaseEnvironment(gym.Env):
     def get_observation(self, sensors_data: dict) -> dict:
         raise NotImplementedError
 
+    def elapsed_time(self):
+        """Returns the total elapsed time in seconds, computed from the last reset() call."""
+        return self.current_timestamp.elapsed_seconds - self.initial_timestamp.elapsed_seconds
+
     def available_towns(self) -> list:
         """Returns a list with the names of the currently available maps/towns"""
         return list(map(lambda s: s.split('/')[-1], self.client.get_available_maps()))
@@ -460,7 +523,7 @@ class CARLABaseEnvironment(gym.Env):
 
 
 # TODO: make wrappers be composable? (e.g. treat them as environments)
-class CARLAWrapper:
+class CARLAWrapper(gym.Wrapper):
     pass
 
 
@@ -470,6 +533,7 @@ class CARLAPlayWrapper(CARLAWrapper):
                    default=[0.0, 0.0, 0.0, 0.0, 0.0])
 
     def __init__(self, env: CARLABaseEnvironment):
+        super().__init__(env)
         print('Controls: (W, or UP) accelerate, (A or LEFT) steer left, (D or RIGHT) steer right, (S or DOWN) brake, '
               '(Q) toggle reverse, (SPACE) hand-brake, (ESC) quit.')
         self.env = env
@@ -573,6 +637,7 @@ class CARLACollectWrapper(CARLAWrapper):
 
     def __init__(self, env: CARLABaseEnvironment, ignore_traffic_light: bool, traces_dir='traces', name='carla',
                  behaviour='normal'):
+        super().__init__(env)
         self.env = env
         self.agent = None
         self.agent_behaviour = behaviour  # 'normal', 'cautious', or 'aggressive'
@@ -792,6 +857,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
             direction_penalty = speed * self.similarity
         else:
             direction_penalty = (speed + 1.0) * abs(self.similarity) * -d
+            self.trigger_event(CARLAEvent.OUT_OF_LANE, similarity=self.similarity)
 
         # Distance from waypoint (and also lane center)
         waypoint_term = min(self.route.distance_to_next_waypoint(), d_max)
@@ -925,6 +991,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         return data
 
     def after_world_step(self, sensors_data: dict):
+        super().after_world_step(sensors_data)
         self._update_env_state()
 
     def actions_to_control(self, actions):
@@ -1113,33 +1180,127 @@ class CARLABenchmark(CARLAWrapper):
            segment (in this case, this kind of infraction is detected by measuring "direction-similarity" with
            the next correct waypoint).
          - Time-budget: in this case, the time budget is represented by "average speed".
+
+       Details:
+       - https://github.com/carla-simulator/driving-benchmarks
     """
     TRAIN_TOWN = 'Town01'
     TEST_TOWN = 'Town02'
-
     TRAIN_WEATHERS = [carla.WeatherParameters.ClearNoon,
                       carla.WeatherParameters.ClearSunset,
-                      carla.WeatherParameters.SoftRainyNoon,
+                      carla.WeatherParameters.SoftRainNoon,
                       carla.WeatherParameters.SoftRainSunset]
-    WEATHERS = [carla.WeatherParameters.CloudyNoon,
-                carla.WeatherParameters.SoftRainSunset,
-                carla.WeatherParameters.WetCloudyNoon,
-                carla.WeatherParameters.MidRainyNoon,
-                carla.WeatherParameters.CloudySunset,
-                carla.WeatherParameters.HardRainSunset]
+    TEST_WEATHERS = [carla.WeatherParameters.CloudyNoon,
+                     carla.WeatherParameters.SoftRainSunset,
+                     carla.WeatherParameters.WetCloudyNoon,
+                     carla.WeatherParameters.MidRainyNoon,
+                     carla.WeatherParameters.CloudySunset,
+                     carla.WeatherParameters.HardRainSunset]
 
-    def __init__(self, env: CARLABaseEnvironment, time_budget=10.0):
+    class Tasks(enum.Enum):
+        """Kind of tasks that the benchmark supports"""
+        EMPTY_TOWN = 0
+        REGULAR_TRAFFIC = 1
+        DENSE_TRAFFIC = 2
+
+    # Specifications of each task for training/testing evaluation:
+    TASKS_SPEC = {Tasks.EMPTY_TOWN: {
+                    TRAIN_TOWN: dict(vehicles=0, pedestrians=0),
+                    TEST_TOWN: dict(vehicles=0, pedestrians=0)},
+
+                  Tasks.REGULAR_TRAFFIC: {
+                      TRAIN_TOWN: dict(vehicles=20, pedestrians=50),
+                      TEST_TOWN: dict(vehicles=15, pedestrians=50)},
+
+                  Tasks.DENSE_TRAFFIC: {
+                      TRAIN_TOWN: dict(vehicles=100, pedestrians=250),
+                      TEST_TOWN: dict(vehicles=70, pedestrians=150)}}
+
+    def __init__(self, env: CARLABaseEnvironment, task: Tasks, preset='test', weather=None, avg_speed=10.0):
+        assert isinstance(task, CARLABenchmark.Tasks)
+        assert preset in ['test', 'train']
+        super().__init__(env)
+
         self.env = env
+        self.is_out_of_lane = False
+        self.has_collided = False
+
+        # metrics
+        self.successful = []
+        self.route_length = None
+        self.time_limit = None
+        self.avg_speed = avg_speed
+
+        # events
+        # self.env.register_event(CARLAEvent.OUT_OF_LANE, callback=self.on_out_of_lane)
+        self.env.register_event(CARLAEvent.ON_COLLISION, callback=self.on_collision)
+
+        # prepare stuff for benchmark
+        if preset == 'test':
+            self.task_spec = self.TASKS_SPEC[task][self.TEST_TOWN]
+            self.env.set_town(self.TEST_TOWN)
+        else:
+            self.task_spec = self.TASKS_SPEC[task][self.TRAIN_TOWN]
+            self.env.set_town(self.TRAIN_TOWN)
+
+        if weather is None:
+            weather = self.TEST_WEATHERS
+
+        self.env.set_weather(weather)
+        self.env.spawn_actors(spawn_dict=self.task_spec)
 
     def reset(self):
-        pass
+        self.env.reset()
+        self.is_out_of_lane = False
+        self.has_collided = False
+        self.route_length = self.env.route.distance_to_destination(self.env.destination)
+        self.time_limit = self.route_length / self.avg_speed * 3.6
 
-    def step(self):
-        pass
+    def on_collision(self, actor):
+        if 'sidewalk' in actor:
+            self.has_collided = False
+        else:
+            self.has_collided = True
+
+    def on_out_of_lane(self, **kwargs):
+        self.is_out_of_lane = True
+
+    def destination_reached(self, threshold=2.0) -> bool:
+        """Tells whether or not the agent has reached the goal (destination) location"""
+        return self.env.route.distance_to_destination(self.env.vehicle.get_location()) <= threshold
+
+    def step(self, actions):
+        next_state, reward, terminal, info = self.env.step(actions)
+
+        if self.env.elapsed_time() < self.time_limit:
+            if terminal:
+                self.successful.append(True)
+        else:
+            terminal = True
+            self.successful.append(False)
+
+        # benchmark's termination condition
+        # terminal |= self.is_out_of_lane
+        terminal |= self.has_collided
+
+        if self.env.elapsed_time() > self.time_limit:
+            terminal = True
+            self.successful.append(False)
+        elif terminal:
+            self.successful.append(self.destination_reached())
+        
+        # reset flags
+        self.is_out_of_lane = False
+        self.has_collided = False
+
+        return next_state, reward, terminal, info
+
+    def success_rate(self) -> float:
+        """Returns the success rate: num. of successful episodes"""
+        if len(self.successful) == 0:
+            return 0.0
+
+        return sum(self.successful) / len(self.successful) * 100.0
 
     def close(self):
-        pass
-
-
-class CARLANoCrashBenchmark(CARLABenchmark):
-    pass
+        self.env.close()

@@ -3,12 +3,12 @@ import tensorflow as tf
 from tensorflow.keras.layers import *
 
 from rl.environments import OneCameraCARLAEnvironment, ThreeCameraCARLAEnvironment, CARLAPlayWrapper, \
-                            CARLACollectWrapper
+                            CARLACollectWrapper, CARLABenchmark
 from rl.environments.carla import env_utils as carla_utils
 
 from rl import utils
 from rl import augmentations as aug
-from rl.agents import PPOAgent, PPO2Agent
+from rl.agents import PPOAgent
 from rl.agents.imitation import ImitationWrapper
 
 
@@ -157,10 +157,10 @@ if __name__ == '__main__':
     # CARLAPlayWrapper(ThreeCameraCARLAEnvironment(debug=True, window_size=(720, 320))).play()
 
     # Collect Wrapper
-    CARLACollectWrapper(ThreeCameraCARLAEnvironment(debug=False, window_size=(600, 450), render=False,
-                                                    image_shape=(120, 160, 3)),
-                        ignore_traffic_light=True, name='collect-3camera') \
-        .collect(episodes=64, timesteps=1000, episode_reward_threshold=15.0 * 900)  # 100 traces
+    # CARLACollectWrapper(ThreeCameraCARLAEnvironment(debug=False, window_size=(600, 450), render=False,
+    #                                                 image_shape=(120, 160, 3)),
+    #                     ignore_traffic_light=True, name='collect-3camera') \
+    #     .collect(episodes=64, timesteps=1000, episode_reward_threshold=15.0 * 900)  # 100 traces
 
     # Imitation Learning
     # env = OneCameraCARLAEnvironment(debug=True, window_size=(600, 450), render=False,
@@ -170,4 +170,12 @@ if __name__ == '__main__':
     #
     # CARLAImitationLearning(agent, target_size=(135, 180), policy_lr=1e-3, value_lr=1e-4, name='test-preprocess')\
     #     .imitate(shuffle_batches=True, repetitions=2, save_every=16)
+
+    # Test Benchmark:
+    bench_env = CARLABenchmark(OneCameraCARLAEnvironment(debug=True, camera='rgb'),
+                               task=CARLABenchmark.Tasks.REGULAR_TRAFFIC,
+                               weather=CARLABenchmark.TRAIN_WEATHERS)
+
+    CARLAPlayWrapper(bench_env).play()
+    print(bench_env.success_rate())
     pass
