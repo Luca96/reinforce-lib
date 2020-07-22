@@ -2,6 +2,7 @@
 import math
 
 
+# TODO: serialize as dict, set state from dict
 class DynamicParameter:
     """Base class for dynamic (step-dependent) parameters"""
     def __init__(self, initial: float, final: float, steps: int, restart=False, decay_on_restart=None):
@@ -112,3 +113,6 @@ class ConstantParameter(StepParameter):
     """Constant parameter"""
     def __init__(self, value: float):
         super().__init__(value=value, steps=1, restart=False)
+
+    def __call__(self, *args, **kwargs):
+        return self.value

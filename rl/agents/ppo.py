@@ -9,10 +9,10 @@ from typing import Union
 
 from rl import utils
 from rl.agents.agents import Agent
-from rl.parameters import DynamicParameter, ConstantParameter
+from rl.parameters import DynamicParameter, ConstantParameter, schedules
+from rl.networks.recurrent import OnlineGRU
 
 from tensorflow.keras import losses
-from tensorflow.keras import optimizers
 from tensorflow.keras.layers import *
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers.schedules import LearningRateSchedule
@@ -21,12 +21,13 @@ from tensorflow.keras.optimizers.schedules import LearningRateSchedule
 class PPOAgent(Agent):
     # TODO: implement 'action repetition'?
     # TODO: 'value_loss' a parameter that selects the loss (either 'mse' or 'huber') for the value network
-    # TODO: make 'clip_ratio', 'entropy_reg' as dynamic parameters...
+    # TODO: make 'clip_ratio', as dynamic parameters...
     # TODO: 'noise' is broken...
     def __init__(self, *args, policy_lr: Union[float, LearningRateSchedule] = 1e-3, clip_ratio=0.2, gamma=0.99,
                  value_lr: Union[float, LearningRateSchedule] = 3e-4, optimization_steps=(10, 10), lambda_=0.95,
-                 noise: Union[float, DynamicParameter] = 0.0, target_kl=False, entropy_regularization=0.0, load=False,
-                 name='ppo-agent', recurrent_policy=False, recurrent_units=8, mixture_components=1, **kwargs):
+                 noise: Union[float, DynamicParameter] = 0.0, target_kl=False, load=False, name='ppo-agent',
+                 entropy_regularization: Union[float, DynamicParameter] = 0.0,  recurrence: dict = None,
+                 mixture_components=1, clip_norm=(1.0, 1.0), optimizer='adam', **kwargs):
         assert clip_ratio > 0.0
         assert mixture_components >= 1
         super().__init__(*args, name=name, **kwargs)
@@ -34,11 +35,28 @@ class PPOAgent(Agent):
         self.memory = None
         self.gamma = gamma
         self.lambda_ = lambda_
-        self.entropy_strength = tf.constant(entropy_regularization)
-        self.is_recurrent = recurrent_policy
-        self.recurrent_units = recurrent_units
-        self.drop_batch_reminder |= self.is_recurrent
         self.mixture_components = mixture_components
+        self.min_float = tf.constant(np.finfo(np.float32).eps, dtype=tf.float32)
+        # self.min_float = tf.constant(np.finfo(np.float32).tiny, dtype=tf.float32)
+
+        # Entropy regularization
+        if isinstance(entropy_regularization, DynamicParameter):
+            self.entropy_strength = entropy_regularization
+        else:
+            self.entropy_strength = ConstantParameter(entropy_regularization)
+
+        # RNN-related stuff
+        if isinstance(recurrence, dict):
+            self.is_recurrent = True
+            self.rnn_units = recurrence['units']
+            self.rnn_depth = recurrence.get('depth', 0)
+            self.policy_rnn = None
+            self.value_rnn = None
+        else:
+            self.is_recurrent = False
+
+        # self.drop_batch_reminder |= self.is_recurrent
+        self.drop_batch_reminder = False
 
         # Ratio clipping
         self.min_ratio = tf.constant(1.0 - clip_ratio)
@@ -57,15 +75,17 @@ class PPOAgent(Agent):
 
             # continuous:
             if self.env.action_space.is_bounded():
-                # self.distribution_type = 'beta'
-                self.distribution_type = 'dirichlet'
+                self.distribution_type = 'beta'
+
                 self.action_low = tf.constant(self.env.action_space.low, dtype=tf.float32)
+                self.action_high = tf.constant(self.env.action_space.high, dtype=tf.float32)
                 self.action_range = tf.constant(self.env.action_space.high - self.env.action_space.low,
                                                 dtype=tf.float32)
+
                 self.convert_action = lambda a: (a * self.action_range + self.action_low)[0].numpy()
             else:
                 self.distribution_type = 'gaussian'
-                self.normalize_action = lambda a: a[0].numpy()
+                self.convert_action = lambda a: a[0].numpy()
         else:
             # discrete:
             self.num_actions = 1
@@ -92,35 +112,68 @@ class PPOAgent(Agent):
         if load:
             self.load()
 
+        # Gradient clipping:
+        if clip_norm is None:
+            self.should_clip_policy_grads = False
+            self.should_clip_value_grads = False
+        else:
+            assert isinstance(clip_norm, tuple)
+
+            if clip_norm[0] is None:
+                self.should_clip_policy_grads = False
+            else:
+                self.should_clip_policy_grads = True
+                self.grad_norm_policy = tf.constant(clip_norm[0], dtype=tf.float32)
+
+            if clip_norm[1] is None:
+                self.should_clip_value_grads = False
+            else:
+                self.should_clip_value_grads = True
+                self.grad_norm_value = tf.constant(clip_norm[1], dtype=tf.float32)
+
         # Optimization
-        self.policy_optimizer = optimizers.Adam(learning_rate=policy_lr)
-        self.value_optimizer = optimizers.Adam(learning_rate=value_lr)
+        self.policy_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=policy_lr)
+        self.value_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=value_lr)
         self.optimization_steps = dict(policy=optimization_steps[0], value=optimization_steps[1])
+
+        self.has_schedule_policy = isinstance(policy_lr, schedules.Schedule2)
+        self.has_schedule_value = isinstance(value_lr, schedules.Schedule2)
+        self.policy_lr = policy_lr
+        self.value_lr = value_lr
 
         # Incremental mean and std of "returns" (used to normalize them)
         self.returns = utils.IncrementalStatistics()
         self.advantages = utils.IncrementalStatistics()
 
-        # self.returns_mean = 0.0
-        # self.returns_variance = 0.0
-        # self.returns_std = 0.0
-        # self.returns_count = 0
-        #
-        # # Incremental mean and std of "advantages" (used to normalize them)
-        # self.adv_mean = 0.0
-        # self.adv_variance = 0.0
-        # self.adv_std = 0.0
-        # self.adv_count = 0
-
     def act(self, state):
         action = self.policy_network(utils.to_tensor(state), training=False)
         return self.convert_action(action)
 
+    @tf.function
+    def predict(self, state):
+        policy = self.policy_network(state, training=False)
+
+        if self.distribution_type != 'categorical':
+            # round samples (actions) before computing density:
+            # motivation: https://www.tensorflow.org/probability/api_docs/python/tfp/distributions/Beta
+            log_prob = policy.log_prob(tf.clip_by_value(policy, self.min_float, 1.0 - self.min_float))
+            mean = policy.mean()
+            std = policy.stddev()
+        else:
+            mean = 0.0
+            std = 0.0
+            log_prob = policy.log_prob(policy)
+
+        value = self.value_network(state, training=False)
+
+        return policy, mean, std, log_prob, value
+
     def update(self):
+        t0 = time.time()
+
         # Reset recurrent state before training (to forget what has been seen while acting)
         if self.is_recurrent:
-            self.policy_network.reset_states()
-            self.value_network.reset_states()
+            self.reset_recurrences()
 
         # Compute advantages and returns:
         advantages = self.get_advantages()
@@ -146,10 +199,36 @@ class PPOAgent(Agent):
                     total_loss, kl = self.ppo_clip_objective(data_batch)
 
                 policy_grads = tape.gradient(total_loss, self.policy_network.trainable_variables)
+
+                if self.should_clip_policy_grads:
+                    policy_grads = [tf.clip_by_norm(grad, clip_norm=self.grad_norm_policy) for grad in policy_grads]
+
                 self.policy_optimizer.apply_gradients(zip(policy_grads, self.policy_network.trainable_variables))
 
+                # total_loss, kl, policy_grads = self.update_policy(batch=data_batch)
+
                 self.log(loss_total=total_loss.numpy(),
+                         lr_policy=self.policy_lr.lr if self.has_schedule_policy else self.policy_lr,
                          gradients_norm_policy=[tf.norm(gradient) for gradient in policy_grads])
+
+                if self.distribution_type == 'categorical':
+                    logits = self.policy_network.get_layer(name='logits')
+                    weights, bias = logits.trainable_variables
+
+                    self.log(weights_logits=tf.norm(weights), bias_logits=tf.norm(weights))
+
+                elif self.distribution_type == 'beta':
+                    alpha = self.policy_network.get_layer(name='alpha')
+                    beta = self.policy_network.get_layer(name='beta')
+
+                    weights_a, bias_a = alpha.trainable_variables
+                    weights_b, bias_b = beta.trainable_variables
+
+                    self.log(weights_alpha=tf.norm(weights_a), bias_alpha=tf.norm(bias_a),
+                             weights_beta=tf.norm(weights_b), bias_beta=tf.norm(bias_b))
+
+                if self.is_recurrent:
+                    self.log(rnn_policy=tf.norm(self.policy_rnn.get_state()))
 
             # Stop early if target_kl is reached:
             if self.early_stop and (kl > self.target_kl):
@@ -164,10 +243,44 @@ class PPOAgent(Agent):
                     value_loss = self.value_objective(batch=data_batch)
 
                 value_grads = tape.gradient(value_loss, self.value_network.trainable_variables)
+
+                if self.should_clip_value_grads:
+                    value_grads = [tf.clip_by_norm(grad, clip_norm=self.grad_norm_value) for grad in value_grads]
+
                 self.value_optimizer.apply_gradients(zip(value_grads, self.value_network.trainable_variables))
 
+                # value_loss, value_grads = self.update_value(batch=data_batch)
+
                 self.log(loss_value=value_loss.numpy(),
+                         lr_value=self.value_lr.lr if self.has_schedule_value else self.value_lr,
                          gradients_norm_value=[tf.norm(gradient) for gradient in value_grads])
+
+                if self.is_recurrent:
+                    self.log(rnn_value=tf.norm(self.value_rnn.get_state()))
+
+        print(f'Update took {round(time.time() - t0, 3)}s')
+
+    # @tf.function
+    # def update_policy(self, batch):
+    #     """One training step on the policy network"""
+    #     with tf.GradientTape() as tape:
+    #         total_loss, kl = self.ppo_clip_objective(batch)
+    #
+    #     policy_grads = tape.gradient(total_loss, self.policy_network.trainable_variables)
+    #     self.policy_optimizer.apply_gradients(zip(policy_grads, self.policy_network.trainable_variables))
+    #
+    #     return total_loss, kl, policy_grads
+
+    # @tf.function
+    # def update_value(self, batch):
+    #     """One training step on the value network"""
+    #     with tf.GradientTape() as tape:
+    #         value_loss = self.value_objective(batch=batch)
+    #
+    #     value_grads = tape.gradient(value_loss, self.value_network.trainable_variables)
+    #     self.value_optimizer.apply_gradients(zip(value_grads, self.value_network.trainable_variables))
+    #
+    #     return value_loss, value_grads
 
     def value_objective(self, batch):
         states, returns = batch
@@ -179,37 +292,35 @@ class PPOAgent(Agent):
         states, advantages, actions, old_log_probabilities = batch
         new_policy: tfp.distributions.Distribution = self.policy_network(states, training=True)
 
-        new_log_prob = new_policy.log_prob(actions)
-
-        # Shape (or better, 'broadcast') fix.
-        # NOTE: this "magically" makes everything works fine...
-        if new_log_prob.shape != old_log_probabilities.shape:
-            new_log_prob = tf.reduce_mean(new_log_prob, axis=0)
-            new_log_prob = tf.expand_dims(new_log_prob, axis=-1)
+        if self.distribution_type == 'categorical':
+            batch_size = tf.shape(actions)[0]
+            new_log_prob = new_policy.log_prob(tf.reshape(actions, shape=batch_size))
+            new_log_prob = tf.reshape(new_log_prob, shape=(batch_size, self.num_actions))
+        else:
+            # round samples (actions) before computing density:
+            # motivation: https://www.tensorflow.org/probability/api_docs/python/tfp/distributions/Beta
+            new_log_prob = new_policy.log_prob(tf.clip_by_value(actions, self.min_float, 1.0 - self.min_float))
 
         kl_divergence = self.kullback_leibler_divergence(old_log_probabilities, new_log_prob)
 
         # Entropy
         entropy = new_policy.entropy()
-        # entropy_term = self.entropy_strength * entropy
-        entropy_penalty = -self.entropy_strength * tf.reduce_mean(entropy)
+        entropy_coeff = self.entropy_strength()
+        entropy_penalty = -entropy_coeff * tf.reduce_mean(entropy)
 
         # Compute the probability ratio between the current and old policy
         ratio = tf.math.exp(new_log_prob - old_log_probabilities)
 
-        # Compute the clipped ratio times advantage (NOTE: this is the simplified PPO clip-objective):
-        # clipped_ratio = tf.where(advantages > 0, x=self.max_ratio, y=self.min_ratio)
+        # Compute the clipped ratio times advantage
         clipped_ratio = tf.clip_by_value(ratio, self.min_ratio, self.max_ratio)
 
         # Loss = min { ratio * A, clipped_ratio * A } + entropy_term
-        # loss = -tf.reduce_mean(tf.minimum(ratio * advantages, clipped_ratio * advantages) + entropy_term)
-
         policy_loss = -tf.reduce_mean(tf.minimum(ratio * advantages, clipped_ratio * advantages))
         total_loss = policy_loss + entropy_penalty
 
         # Log stuff
-        self.log(ratio=ratio, prob=tf.exp(new_log_prob), entropy=entropy, kl_divergence=kl_divergence,
-                 loss_policy=policy_loss.numpy(), loss_entropy=entropy_penalty.numpy())
+        self.log(ratio=ratio, prob=tf.exp(new_log_prob), entropy=entropy, entropy_coeff=entropy_coeff,
+                 kl_divergence=kl_divergence, loss_policy=policy_loss.numpy(), loss_entropy=entropy_penalty.numpy())
 
         return total_loss, tf.reduce_mean(kl_divergence)
 
@@ -269,17 +380,20 @@ class PPOAgent(Agent):
                         self.env.render()
 
                     # Compute action, log_prob, and value
-                    policy = self.policy_network(state, training=False)
-                    action = policy
-                    log_prob = policy.log_prob(action)
-                    value = self.value_network(state, training=False)
+                    # policy = self.policy_network(state, training=False)
+                    # action = policy
+                    # log_prob = policy.log_prob(action)
+                    # value = self.value_network(state, training=False)
+
+                    action, mean, std, log_prob, value = self.predict(state)
                     action_env = self.convert_action(action)
 
                     # Environment step
                     next_state, reward, done, _ = self.env.step(action_env)
                     episode_reward += reward
 
-                    self.log(actions=action, action_env=action_env, rewards=reward)
+                    self.log(actions=action, action_env=action_env, rewards=reward,
+                             distribution_mean=mean, distribution_std=std)
 
                     self.memory.append(state, action, reward, value, log_prob)
                     state = utils.to_tensor(next_state)
@@ -290,7 +404,7 @@ class PPOAgent(Agent):
                     # check whether a termination (terminal state or end of a transition) is reached:
                     if done or (t == timesteps):
                         print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
-                              f'with reward {episode_reward}.')
+                              f'with reward {round(episode_reward, 3)}.')
                         self.memory.end_trajectory(last_value=self.last_value if done else self.value_network(state))
                         break
 
@@ -306,54 +420,45 @@ class PPOAgent(Agent):
 
     def get_distribution_layer(self, layer: Layer) -> tfp.layers.DistributionLambda:
         if self.is_recurrent:
-            layer = tf.expand_dims(layer, axis=0)
-            layer = GRU(units=self.recurrent_units, stateful=True)(layer)
+            self.policy_rnn = OnlineGRU(units=self.rnn_units, depth=self.rnn_depth)
+            layer = self.policy_rnn(layer)
 
         if self.distribution_type == 'categorical':
-            # Categorical
+            # Categorical (discrete actions)
             if self.mixture_components == 1:
-                logits = Dense(units=self.env.action_space.n, activation='linear')(layer)
-                logits = tf.expand_dims(logits, axis=0, name='logits')
+                logits = Dense(units=self.env.action_space.n, activation='linear', name='logits')(layer)
+                logits = tf.expand_dims(logits, axis=0)
 
                 return tfp.layers.DistributionLambda(
                     make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t))(logits)
             else:
                 return utils.get_mixture_of_categorical(layer, num_actions=self.env.action_space.n,
                                                         num_components=self.mixture_components)
+        elif self.distribution_type == 'beta':
+            # Beta (bounded continuous 1-dimensional actions)
+            # for activations choice refer to chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
 
-        # elif self.distribution_type == 'beta':
-        #     # Beta (for multi-dimensional action spaces the Dirichlet distribution is used)
-        #     # for activations choice see chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
-        #     if self.mixture_components == 1:
-        #         alpha = Dense(units=self.num_actions, activation='softplus')(layer)
-        #         beta = Dense(units=self.num_actions, activation='softplus')(layer)
-        #
-        #         alpha = Add(name='alpha')([alpha, tf.ones_like(alpha)])
-        #         beta = Add(name='beta')([beta, tf.ones_like(beta)])
-        #
-        #         return tfp.layers.DistributionLambda(
-        #             make_distribution_fn=lambda t: tfp.distributions.Beta(t[0], t[1]))([alpha, beta])
-        #     else:
-        #         return utils.get_mixture_of_beta(layer, self.num_actions, num_components=self.mixture_components)
-
-        elif self.distribution_type == 'dirichlet':
             if self.mixture_components == 1:
-                alpha = Dense(units=self.num_actions, activation='softplus')(layer)
-                alpha = Add(name='alpha')([alpha, tf.ones_like(alpha)])
+                # make a, b > 1, so that the Beta distribution is concave and unimodal (see paper above)
+                alpha = Dense(units=self.num_actions, activation=utils.softplus_one, name='alpha')(layer)
+                beta = Dense(units=self.num_actions, activation=utils.softplus_one, name='beta')(layer)
 
                 return tfp.layers.DistributionLambda(
-                    make_distribution_fn=lambda t: tfp.distributions.Dirichlet(concentration=t))(alpha)
+                    make_distribution_fn=lambda t: tfp.distributions.Beta(t[0], t[1]))([alpha, beta])
             else:
-                return utils.get_mixture_of_dirichlet(layer, self.num_actions, num_components=self.mixture_components)
+                return utils.get_mixture_of_beta(layer, self.num_actions, num_components=self.mixture_components)
 
-        # Gaussian (Normal)
+        # Gaussian (unbounded continuous actions)
         # for activations choice see chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
         if self.mixture_components == 1:
             mu = Dense(units=self.num_actions, activation='linear', name='mu')(layer)
             sigma = Dense(units=self.num_actions, activation='softplus', name='sigma')(layer)
 
+            # ensure variance > 0, so that loss doesn't diverge or became NaN
+            sigma = tf.add(sigma, self.min_float)
+
             return tfp.layers.DistributionLambda(
-                make_distribution_fn=lambda t: tfp.distributions.MultivariateNormalDiag(loc=t[0], scale_diag=t[1])
+                make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[0], scale=t[1])
             )([mu, sigma])
         else:
             return utils.get_mixture_of_gaussian(layer, self.num_actions, num_components=self.mixture_components)
@@ -362,19 +467,27 @@ class PPOAgent(Agent):
         """Main (central) part of the policy network"""
         units = kwargs.get('units', 32)
         num_layers = kwargs.get('layers', 2)
+        activation = kwargs.get('activation', 'swish')
+        dropout_rate = kwargs.get('dropout', 0.0)
 
-        x = Dense(units, activation='tanh')(inputs['state'])
+        x = Dense(units, activation=activation)(inputs['state'])
+        x = LayerNormalization()(x)
 
-        for _ in range(num_layers):
-            x = Dense(units, activation='relu')(x)
-            x = Dense(units, activation='relu')(x)
+        for _ in range(0, num_layers, 2):
+            x = Dense(units, activation=activation)(x)
+            x = Dropout(rate=dropout_rate)(x)
+
+            x = Dense(units, activation=activation)(x)
+            x = Dropout(rate=dropout_rate)(x)
+
+            x = LayerNormalization()(x)
 
         return x
 
     def value_layers(self, inputs: dict, **kwargs) -> Layer:
         """Main (central) part of the value network"""
         # Default: use same layers as policy
-        return self.policy_layers(inputs)
+        return self.policy_layers(inputs, **kwargs)
 
     def _policy_network(self) -> Model:
         inputs = self._get_input_layers()
@@ -389,8 +502,8 @@ class PPOAgent(Agent):
         x = self.value_layers(inputs)
 
         if self.is_recurrent:
-            x = tf.expand_dims(x, axis=0)
-            x = GRU(units=self.recurrent_units, stateful=True)(x)
+            self.value_rnn = OnlineGRU(units=self.rnn_units, depth=self.rnn_depth)
+            x = self.value_rnn(x)
 
         value = Dense(units=1, activation=None, dtype=tf.float32, name='value_head')(x)
 
@@ -400,18 +513,15 @@ class PPOAgent(Agent):
         self.policy_network.summary()
         self.value_network.summary()
 
-    def load(self):
-        super().load()
-        self.load_weights()
-
-    def save(self):
-        super().save()
-        self.save_weights()
-
     def save_weights(self):
         print('saving weights...')
         self.policy_network.save_weights(filepath=self.weights_path['policy'])
         self.value_network.save_weights(filepath=self.weights_path['value'])
+
+    def load_weights(self):
+        print('loading weights...')
+        self.policy_network.load_weights(filepath=self.weights_path['policy'], by_name=False)
+        self.value_network.load_weights(filepath=self.weights_path['value'], by_name=False)
 
     def save_config(self):
         print('save config')
@@ -424,60 +534,24 @@ class PPOAgent(Agent):
         self.returns.set(**self.config['returns'])
         self.advantages.set(**self.config['advantages'])
 
-    def load_weights(self):
-        print('loading weights...')
-        self.policy_network.load_weights(filepath=self.weights_path['policy'], by_name=False)
-        self.value_network.load_weights(filepath=self.weights_path['value'], by_name=False)
-
     def reset(self):
         super().reset()
 
-        # reset recurrent state
         if self.is_recurrent:
-            self.policy_network.reset_states()
-            self.value_network.reset_states()
+            self.reset_recurrences()
 
-    # def _update_returns_mean_and_std(self, returns):
-    #     """Calculates the incremental mean and standard deviation of returns. one batch at a time.
-    #     Sources:
-    #       (1) http://datagenetics.com/blog/november22017/index.html
-    #       (2) https://notmatthancock.github.io/2017/03/23/simple-batch-stat-updates.html
-    #     """
-    #     old_mean = self.returns_mean
-    #     ret_mean = tf.reduce_mean(returns)
-    #     m = self.returns_count
-    #     n = tf.shape(returns)[0]
-    #     c1 = m / (m + n)
-    #     c2 = n / (m + n)
-    #     c3 = (m * n) / (m + n) ** 2
-    #
-    #     self.returns_mean = c1 * old_mean + c2 * ret_mean
-    #     self.returns_variance = c1 * self.returns_variance + c2 * tf.math.reduce_variance(returns) + \
-    #                             c3 * (old_mean - ret_mean) ** 2
-    #
-    #     self.returns_std = tf.sqrt(self.returns_variance)
-    #     self.returns_count += n
-    #
-    #     self.log(returns_mean=[self.returns_mean], returns_std=[self.returns_std])
-    #
-    # def _update_adv_mean_and_std(self, advantages):
-    #     """Calculates the incremental mean and standard deviation of returns. one batch at a time."""
-    #     old_mean = self.adv_mean
-    #     adv_mean = tf.reduce_mean(advantages)
-    #     m = self.adv_count
-    #     n = tf.shape(advantages)[0]
-    #     c1 = m / (m + n)
-    #     c2 = n / (m + n)
-    #     c3 = (m * n) / (m + n) ** 2
-    #
-    #     self.adv_mean = c1 * old_mean + c2 * adv_mean
-    #     self.adv_variance = c1 * self.adv_variance + c2 * tf.math.reduce_variance(advantages) + \
-    #                         c3 * (old_mean - adv_mean) ** 2
-    #
-    #     self.adv_std = tf.sqrt(self.adv_variance)
-    #     self.adv_count += n
-    #
-    #     self.log(advantages_mean=[self.adv_mean], advantages_std=[self.adv_std])
+    def reset_recurrences(self):
+        """Resets both policy and value network's RNNs state"""
+        self.reset_policy_rnn()
+        self.reset_value_rnn()
+
+    def reset_policy_rnn(self):
+        """Resets the value network's RNNs state"""
+        self.policy_rnn.reset_state()
+
+    def reset_value_rnn(self):
+        """Resets the value network's RNNs state"""
+        self.value_rnn.reset_state()
 
 
 class PPOMemory:
@@ -498,8 +572,7 @@ class PPOMemory:
         self.rewards = tf.zeros(shape=(0,), dtype=tf.float32)
         self.values = tf.zeros(shape=(0, 1), dtype=tf.float32)
         self.actions = tf.zeros(shape=(0, num_actions), dtype=tf.float32)
-        # self.log_probabilities = tf.zeros(shape=(0, num_actions), dtype=tf.float32)
-        self.log_probabilities = tf.zeros(shape=(0,), dtype=tf.float32)
+        self.log_probabilities = tf.zeros(shape=(0, num_actions), dtype=tf.float32)
 
     def append(self, state, action, reward, value, log_prob):
         if self.simple_state:
@@ -513,6 +586,8 @@ class PPOMemory:
         self.actions = tf.concat([self.actions, tf.cast(action, dtype=tf.float32)], axis=0)
         self.rewards = tf.concat([self.rewards, [reward]], axis=0)
         self.values = tf.concat([self.values, value], axis=0)
+
+        # double hack: `tf.reshape` for Categorical, and `tf.reduce_mean` for Beta
         self.log_probabilities = tf.concat([self.log_probabilities, log_prob], axis=0)
 
     def end_trajectory(self, last_value):

@@ -308,9 +308,13 @@ def test_incremental_std(x: list):
 
 def test_dataset_sharding_scenarios():
     print('ideal')
-    test_data_to_batches(size=50, batch_size=10, num_shards=5)  # assert (batch_size * num_shards) % size == 0
+    test_data_to_batches(size=50, batch_size=10, num_shards=5)  # (batch_size * num_shards) % size == 0
     print('-------')
     test_data_to_batches(size=100, batch_size=10, num_shards=5)
+    print('-------')
+    print(50 / (10 * 5))
+    print(100 / (10 * 5))
+    print(95 / (10 * 5))
 
 
 def test_model_independent_distribution():
@@ -389,6 +393,62 @@ def test_mixture_same_family_distribution():
     print(mixture.sample())
 
 
+def test_compare_continuous_distributions():
+    a = [0.1, 0.2, 0.3]
+    b = [1.0, 1.0, 1.0]
+    a = a[1:]
+    b = b[1:]
+
+    distributions = dict(normal=tfp.distributions.Normal(loc=a, scale=b),
+                         multivariate_normal=tfp.distributions.MultivariateNormalDiag(loc=a, scale_diag=b),
+                         truncated_normal=tfp.distributions.TruncatedNormal(loc=a, scale=b,
+                                                                            low=-1.0, high=1.0),
+                         beta=tfp.distributions.Beta(b, a),
+                         dirichlet=tfp.distributions.Dirichlet(concentration=[1.0, 3]))
+
+    for name, d in distributions.items():
+        samples = d.sample(10)
+        print(name, ':\n', samples, '\n\tmean:\n', np.mean(samples, axis=1))
+        print('prob:')
+        print(d.prob(samples))
+
+
+def test_beta2():
+    # a = tf.ones((2, 2))
+    # a = tf.ones((2,))
+    a = 0.5
+    # b = [[1, 2], [2, 1]]
+    # b = [[1, 2]]
+    b = 0.1
+    beta = tfp.distributions.Beta(a, b, validate_args=True)
+
+    samples = beta.sample(5)
+    print('samples:', samples)
+    print('prob:', beta.prob(samples))
+    print('prob:', beta.prob([0.0, 0.01, 0.001, 0.005, 0.1, 1.0, 0.9, 0.95, 0.99, 0.999]))
+    print('prob:', beta.log_prob([0.0, 0.1, 0.01, 0.001, 0.0001, 0.00001]))
+    print('prob:', beta.log_prob([1.0, 0.9, 0.99, 0.999, 0.9999, 0.99999]))
+
+
+def test_gaussian():
+    # normal = tfp.distributions.Normal(loc=[0.0], scale=[1.0])
+    normal = tfp.distributions.MultivariateNormalDiag(loc=[0.0, 0.5], scale_diag=[1.0, 1.0])
+
+    samples = normal.sample(20)
+    print('samples:', samples)
+    print('prob:', normal.prob(samples))
+
+    min_value = -3.0 * normal.stddev()
+    max_value = 3.0 * normal.stddev()
+    print('support:', min_value.numpy(), max_value.numpy())
+
+    def normalize_01(x):
+        r = max_value - min_value
+        return (tf.clip_by_value(x, min_value, max_value) - min_value) / r
+
+    print('[0, 1] samples:', normalize_01(samples))
+
+
 if __name__ == '__main__':
     # Memories:
     # test_recent_memory()
@@ -408,11 +468,15 @@ if __name__ == '__main__':
     # test_normal(mean=[1.0, 2.5])
     # test_beta(alpha=[1, 1], beta=2)
     # test_beta(alpha=1, beta=2, num_samples=1)
+    # test_beta(alpha=[[1, 2], [3, 4]], beta=[1, 1])
     # cat = tfp.distributions.Categorical(logits=[1, 2, 3, 4])
     # print(cat.log_prob([[1], [2], [3]]))
     # test_categorical_vs_beta_prob(action_shape=1)
     # test_mixture_distribution()
-    test_mixture_same_family_distribution()
+    # test_mixture_same_family_distribution()
+    # test_compare_continuous_distributions()
+    test_beta2()
+    # test_gaussian()
 
     # Networks:
     # test_dual_head_value_network()

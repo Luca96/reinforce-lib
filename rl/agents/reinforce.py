@@ -64,8 +64,7 @@ class ReinforceAgent(Agent):
 
         # Prepare data: (states, returns) and (states, advantages)
         value_batches = utils.data_to_batches(tensors=(self.memory.states, returns[:-1]), batch_size=batch_size)
-        policy_batches = utils.data_to_batches(tensors=(self.memory.states, advantages),
-                                               batch_size=batch_size)
+        policy_batches = utils.data_to_batches(tensors=(self.memory.states, advantages), batch_size=batch_size)
 
         # Policy network optimization:
         for step, (states_batch, advantages_batch) in enumerate(policy_batches):

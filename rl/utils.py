@@ -13,6 +13,34 @@ from datetime import datetime
 from gym import spaces
 
 
+# -------------------------------------------------------------------------------------------------
+# -- Constants
+# -------------------------------------------------------------------------------------------------
+
+OPTIMIZERS = dict(adadelta=tf.keras.optimizers.Adadelta,
+                  adagrad=tf.keras.optimizers.Adagrad,
+                  adam=tf.keras.optimizers.Adam,
+                  adamax=tf.keras.optimizers.Adamax,
+                  ftrl=tf.keras.optimizers.Ftrl,
+                  nadam=tf.keras.optimizers.Nadam,
+                  rmsprop=tf.keras.optimizers.RMSprop,
+                  sgd=tf.keras.optimizers.SGD)
+
+
+def get_optimizer_by_name(name: str, *args, **kwargs) -> tf.keras.optimizers.Optimizer:
+    optimizer_class = OPTIMIZERS.get(name.lower(), None)
+
+    if optimizer_class is None:
+        raise ValueError(f'Cannot find optimizer {name}. Select one of {OPTIMIZERS.keys()}.')
+
+    print(f'Optimizer: {name}.')
+    return optimizer_class(*args, **kwargs)
+
+
+# -------------------------------------------------------------------------------------------------
+# -- Misc
+# -------------------------------------------------------------------------------------------------
+
 def to_tensor(x, expand_axis=0):
     if isinstance(x, dict):
         for k, v in x.items():
@@ -48,7 +76,6 @@ def gae(rewards, values, gamma: float, lambda_: float, normalize=False):
         advantages = tf_normalize(advantages)
 
     return advantages
-    # return tf.cast(advantages, dtype=tf.float32)
 
 
 def rewards_to_go(rewards, discount: float, normalize=False):
@@ -193,6 +220,11 @@ def tf_01_scaling(x):
     return x
 
 
+@tf.function
+def softplus_one(x):
+    return 1.0 + tf.nn.softplus(x)
+
+
 def plot_images(images: list):
     """Plots a list of images, arranging them in a rectangular fashion"""
     num_plots = len(images)
@@ -259,7 +291,13 @@ class Statistics:
             if key not in self.stats:
                 self.stats[key] = dict(step=0, list=[])
 
-            if hasattr(value, '__iter__'):
+            if tf.is_tensor(value):
+                if np.prod(value.shape) > 1:
+                    self.stats[key]['list'].extend(value)
+                else:
+                    self.stats[key]['list'].append(value)
+
+            elif hasattr(value, '__iter__'):
                 self.stats[key]['list'].extend(value)
             else:
                 self.stats[key]['list'].append(value)
@@ -330,7 +368,7 @@ class IncrementalStatistics:
 
 
 # -------------------------------------------------------------------------------------------------
-# -- probability distribution
+# -- Distributions
 # -------------------------------------------------------------------------------------------------
 
 class MixtureDistribution(tfp.distributions.Mixture):
@@ -372,8 +410,8 @@ def get_mixture_of_categorical(layer: tf.keras.layers.Layer, num_actions: int,
     )(layers)
 
 
-def get_mixture_of_dirichlet(layer: tf.keras.layers.Layer, num_actions: int,
-                             num_components: int) -> tfp.layers.DistributionLambda:
+def get_mixture_of_beta(layer: tf.keras.layers.Layer, num_actions: int,
+                        num_components: int) -> tfp.layers.DistributionLambda:
     layers = []
 
     # define the layers that weights the mixture's components
@@ -384,13 +422,17 @@ def get_mixture_of_dirichlet(layer: tf.keras.layers.Layer, num_actions: int,
     for i in range(num_components):
         alpha = tf.keras.layers.Dense(units=num_actions, activation='softplus')(layer)
         alpha = tf.keras.layers.Add(name=f'alpha-{i}')([alpha, tf.ones_like(alpha)])
-        layers.append(alpha)
+
+        beta = tf.keras.layers.Dense(units=num_actions, activation='softplus')(layer)
+        beta = tf.keras.layers.Add(name=f'beta-{i}')([beta, tf.ones_like(beta)])
+
+        layers.append([alpha, beta])
 
     # make the distribution lambda layer that wraps the mixture
     return tfp.layers.DistributionLambda(
         make_distribution_fn=lambda t: MixtureDistribution(
             cat=tfp.distributions.Categorical(logits=t[0]),
-            components=[tfp.distributions.Dirichlet(concentration=t[j + 1]) for j in range(num_components)]
+            components=[tfp.distributions.Beta(t[j + 1][0], t[j + 1][1]) for j in range(num_components)]
         )
     )(layers)
 
@@ -418,3 +460,17 @@ def get_mixture_of_gaussian(layer: tf.keras.layers.Layer, num_actions: int,
                 loc=t[j + 1][0], scale_diag=t[j + 1][1]) for j in range(num_components)]
         )
     )(layers)
+
+
+def sample_and_scale01(d: tfp.distributions.Distribution):
+    # be sure `d` is a  multivariate Gaussian distribution
+    assert isinstance(d, tfp.distributions.MultivariateNormalDiag)
+
+    # distribution's support (3-sigma rule)
+    min_value = -3.0 * d.stddev()
+    max_value = +3.0 * d.stddev()
+
+    # sample and scale it in 0-1 interval:
+    sample = tf.clip_by_value(d.sample(), min_value, max_value)
+
+    return (sample - min_value) / (max_value - min_value)

@@ -146,11 +146,19 @@ class Agent:
 
     def load(self):
         """Loads the past agent's state"""
+        self.load_weights()
         self.load_config()
 
     def save(self):
         """Saves the agent's state"""
+        self.save_weights()
         self.save_config()
+
+    def load_weights(self):
+        raise NotImplementedError
+
+    def save_weights(self):
+        raise NotImplementedError
 
     def _get_input_layers(self) -> Dict[str, layers.Input]:
         """Handles arbitrary complex state-spaces"""
