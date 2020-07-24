@@ -3,7 +3,7 @@ import tensorflow as tf
 from tensorflow.keras.layers import *
 
 from rl.environments import OneCameraCARLAEnvironment, ThreeCameraCARLAEnvironment, CARLAPlayWrapper, \
-                            CARLACollectWrapper, CARLABenchmark
+                            CARLACollectWrapper, CARLABenchmark, ThreeCameraCARLAEnvironmentDiscrete
 from rl.environments.carla import env_utils as carla_utils
 
 from rl import utils
@@ -172,10 +172,14 @@ if __name__ == '__main__':
     #     .imitate(shuffle_batches=True, repetitions=2, save_every=16)
 
     # Test Benchmark:
-    bench_env = CARLABenchmark(OneCameraCARLAEnvironment(debug=True, camera='rgb'),
-                               task=CARLABenchmark.Tasks.REGULAR_TRAFFIC,
-                               weather=CARLABenchmark.TRAIN_WEATHERS)
+    # bench_env = CARLABenchmark(OneCameraCARLAEnvironment(debug=True, camera='rgb'),
+    #                            task=CARLABenchmark.Tasks.REGULAR_TRAFFIC,
+    #                            weather=CARLABenchmark.TRAIN_WEATHERS)
+    #
+    # CARLAPlayWrapper(bench_env).play()
+    # print(bench_env.success_rate())
 
-    CARLAPlayWrapper(bench_env).play()
-    print(bench_env.success_rate())
+    # Test discrete action-space:
+    # CARLAPlayWrapper(ThreeCameraCARLAEnvironmentDiscrete(bins=8, debug=True, window_size=(720, 320)))\
+    #     .play()
     pass

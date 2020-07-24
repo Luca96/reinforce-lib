@@ -1104,6 +1104,37 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         self.last_location = location2
 
 
+class OneCameraCARLAEnvironmentDiscrete(OneCameraCARLAEnvironment):
+    """One-camera CARLA Environment with discrete action-space"""
+
+    def __init__(self, bins: int, *args, **kwargs):
+        assert (bins >= 2) and (bins % 2 == 0)
+
+        action_space = self.ACTION['space']
+        assert isinstance(action_space, spaces.Box)
+
+        self.bins = bins
+        self._low = action_space.low
+        self._delta = (action_space.high - action_space.low) / bins
+
+        # change action space to "discrete"
+        self.ACTION = dict(space=spaces.MultiDiscrete([self.bins] * 3),
+                           default=np.zeros(shape=3, dtype=np.float32))
+
+        super().__init__(*args, **kwargs)
+
+    def interpolate(self, array: list):
+        """Maps a discrete array `x` of bins into their corresponding continuous values"""
+        return [self._delta * x + self._low for x in array]
+
+    def control_to_actions(self, control: carla.VehicleControl):
+        actions = super().control_to_actions(control)
+        return self.interpolate(actions)
+
+    def actions_to_control(self, actions):
+        super().actions_to_control(actions=self.interpolate(actions))
+
+
 class ThreeCameraCARLAEnvironment(OneCameraCARLAEnvironment):
     """Three Camera (front, lateral left and right) CARLA Environment"""
 
@@ -1155,6 +1186,37 @@ class ThreeCameraCARLAEnvironment(OneCameraCARLAEnvironment):
             data['camera'] = env_utils.cv2_grayscale(data['camera'])
 
         return data
+
+
+class ThreeCameraCARLAEnvironmentDiscrete(ThreeCameraCARLAEnvironment):
+    """Three-camera CARLA Environment with discrete action-space"""
+
+    def __init__(self, bins: int, *args, **kwargs):
+        assert (bins >= 2) and (bins % 2 == 0)
+
+        action_space = self.ACTION['space']
+        assert isinstance(action_space, spaces.Box)
+
+        self.bins = bins
+        self._low = action_space.low
+        self._delta = (action_space.high - action_space.low) / bins
+
+        # change action space to "discrete"
+        self.ACTION = dict(space=spaces.MultiDiscrete([self.bins] * 3),
+                           default=np.zeros(shape=3, dtype=np.float32))
+
+        super().__init__(*args, **kwargs)
+
+    def interpolate(self, array: list):
+        """Maps a discrete array `x` of bins into their corresponding continuous values"""
+        return [self._delta * x + self._low for x in array]
+
+    def control_to_actions(self, control: carla.VehicleControl):
+        actions = super().control_to_actions(control)
+        return self.interpolate(actions)
+
+    def actions_to_control(self, actions):
+        super().actions_to_control(actions=self.interpolate(actions))
 
 
 # -------------------------------------------------------------------------------------------------

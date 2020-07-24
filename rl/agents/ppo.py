@@ -21,14 +21,12 @@ from tensorflow.keras.optimizers.schedules import LearningRateSchedule
 class PPOAgent(Agent):
     # TODO: implement 'action repetition'?
     # TODO: 'value_loss' a parameter that selects the loss (either 'mse' or 'huber') for the value network
-    # TODO: make 'clip_ratio', as dynamic parameters...
     # TODO: 'noise' is broken...
-    def __init__(self, *args, policy_lr: Union[float, LearningRateSchedule] = 1e-3, clip_ratio=0.2, gamma=0.99,
-                 value_lr: Union[float, LearningRateSchedule] = 3e-4, optimization_steps=(10, 10), lambda_=0.95,
-                 noise: Union[float, DynamicParameter] = 0.0, target_kl=False, load=False, name='ppo-agent',
-                 entropy_regularization: Union[float, DynamicParameter] = 0.0,  recurrence: dict = None,
-                 mixture_components=1, clip_norm=(1.0, 1.0), optimizer='adam', **kwargs):
-        assert clip_ratio > 0.0
+    def __init__(self, *args, policy_lr: Union[float, LearningRateSchedule] = 1e-3, gamma=0.99, lambda_=0.95,
+                 value_lr: Union[float, LearningRateSchedule] = 3e-4, optimization_steps=(10, 10), target_kl=False,
+                 noise: Union[float, DynamicParameter] = 0.0, clip_ratio: Union[float, DynamicParameter] = 0.2,
+                 load=False, name='ppo-agent', entropy_regularization: Union[float, DynamicParameter] = 0.0,
+                 recurrence: dict = None, mixture_components=1, clip_norm=(1.0, 1.0), optimizer='adam', **kwargs):
         assert mixture_components >= 1
         super().__init__(*args, name=name, **kwargs)
 
@@ -37,7 +35,6 @@ class PPOAgent(Agent):
         self.lambda_ = lambda_
         self.mixture_components = mixture_components
         self.min_float = tf.constant(np.finfo(np.float32).eps, dtype=tf.float32)
-        # self.min_float = tf.constant(np.finfo(np.float32).tiny, dtype=tf.float32)
 
         # Entropy regularization
         if isinstance(entropy_regularization, DynamicParameter):
@@ -59,9 +56,14 @@ class PPOAgent(Agent):
         self.drop_batch_reminder = False
 
         # Ratio clipping
-        self.min_ratio = tf.constant(1.0 - clip_ratio)
-        self.max_ratio = tf.constant(1.0 + clip_ratio)
+        if isinstance(clip_ratio, float):
+            assert clip_ratio >= 0.0
+            self.clip_ratio = ConstantParameter(value=clip_ratio)
+        else:
+            assert isinstance(clip_ratio, DynamicParameter)
+            self.clip_ratio = clip_ratio
 
+        # KL
         if isinstance(target_kl, float):
             self.early_stop = True
             self.target_kl = tf.constant(target_kl * 1.5)
@@ -70,16 +72,18 @@ class PPOAgent(Agent):
 
         # TODO: handle complex action spaces
         # Action space
-        if isinstance(self.env.action_space, gym.spaces.Box):
-            self.num_actions = self.env.action_space.shape[0]
+        action_space = self.env.action_space
+
+        if isinstance(action_space, gym.spaces.Box):
+            self.num_actions = action_space.shape[0]
 
             # continuous:
-            if self.env.action_space.is_bounded():
+            if action_space.is_bounded():
                 self.distribution_type = 'beta'
 
-                self.action_low = tf.constant(self.env.action_space.low, dtype=tf.float32)
-                self.action_high = tf.constant(self.env.action_space.high, dtype=tf.float32)
-                self.action_range = tf.constant(self.env.action_space.high - self.env.action_space.low,
+                self.action_low = tf.constant(action_space.low, dtype=tf.float32)
+                self.action_high = tf.constant(action_space.high, dtype=tf.float32)
+                self.action_range = tf.constant(action_space.high - action_space.low,
                                                 dtype=tf.float32)
 
                 self.convert_action = lambda a: (a * self.action_range + self.action_low)[0].numpy()
@@ -88,9 +92,19 @@ class PPOAgent(Agent):
                 self.convert_action = lambda a: a[0].numpy()
         else:
             # discrete:
-            self.num_actions = 1
             self.distribution_type = 'categorical'
-            self.convert_action = lambda a: a[0][0].numpy()
+
+            if isinstance(action_space, gym.spaces.MultiDiscrete):
+                # make sure all discrete components of the space have the same number of classes
+                assert np.all(action_space.nvec == action_space.nvec[0])
+
+                self.num_actions = action_space.nvec.shape[0]
+                self.num_classes = action_space.nvec[0] + 1  # to include the last class, i.e. 0 to K (not k-1)
+                self.convert_action = lambda a: a[0].numpy()
+            else:
+                self.num_actions = 1
+                self.num_classes = action_space.n
+                self.convert_action = lambda a: a[0][0].numpy()
 
         # Gaussian noise (for exploration)
         if isinstance(noise, float):
@@ -136,12 +150,12 @@ class PPOAgent(Agent):
         self.value_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=value_lr)
         self.optimization_steps = dict(policy=optimization_steps[0], value=optimization_steps[1])
 
-        self.has_schedule_policy = isinstance(policy_lr, schedules.Schedule2)
-        self.has_schedule_value = isinstance(value_lr, schedules.Schedule2)
+        self.has_schedule_policy = isinstance(policy_lr, schedules.Schedule)
+        self.has_schedule_value = isinstance(value_lr, schedules.Schedule)
         self.policy_lr = policy_lr
         self.value_lr = value_lr
 
-        # Incremental mean and std of "returns" (used to normalize them)
+        # Incremental mean and std of returns and advantages (used to normalize them)
         self.returns = utils.IncrementalStatistics()
         self.advantages = utils.IncrementalStatistics()
 
@@ -282,9 +296,12 @@ class PPOAgent(Agent):
     #
     #     return value_loss, value_grads
 
+    def predict_value(self, states):
+        return self.value_network(states, training=True)
+
     def value_objective(self, batch):
         states, returns = batch
-        values = self.value_network(states, training=True)
+        values = self.predict_value(states)
 
         return tf.reduce_mean(losses.mean_squared_error(y_true=returns, y_pred=values))
 
@@ -292,8 +309,9 @@ class PPOAgent(Agent):
         states, advantages, actions, old_log_probabilities = batch
         new_policy: tfp.distributions.Distribution = self.policy_network(states, training=True)
 
-        if self.distribution_type == 'categorical':
+        if self.distribution_type == 'categorical' and self.num_actions == 1:
             batch_size = tf.shape(actions)[0]
+
             new_log_prob = new_policy.log_prob(tf.reshape(actions, shape=batch_size))
             new_log_prob = tf.reshape(new_log_prob, shape=(batch_size, self.num_actions))
         else:
@@ -312,7 +330,8 @@ class PPOAgent(Agent):
         ratio = tf.math.exp(new_log_prob - old_log_probabilities)
 
         # Compute the clipped ratio times advantage
-        clipped_ratio = tf.clip_by_value(ratio, self.min_ratio, self.max_ratio)
+        clip_value = self.clip_ratio()
+        clipped_ratio = tf.clip_by_value(ratio, clip_value_min=1.0 - clip_value, clip_value_max=1.0 + clip_value)
 
         # Loss = min { ratio * A, clipped_ratio * A } + entropy_term
         policy_loss = -tf.reduce_mean(tf.minimum(ratio * advantages, clipped_ratio * advantages))
@@ -320,11 +339,13 @@ class PPOAgent(Agent):
 
         # Log stuff
         self.log(ratio=ratio, prob=tf.exp(new_log_prob), entropy=entropy, entropy_coeff=entropy_coeff,
-                 kl_divergence=kl_divergence, loss_policy=policy_loss.numpy(), loss_entropy=entropy_penalty.numpy())
+                 ratio_clip=clip_value, kl_divergence=kl_divergence, loss_policy=policy_loss.numpy(),
+                 loss_entropy=entropy_penalty.numpy())
 
         return total_loss, tf.reduce_mean(kl_divergence)
 
     @staticmethod
+    @tf.function
     def kullback_leibler_divergence(log_a, log_b):
         """Source: https://www.tensorflow.org/api_docs/python/tf/keras/losses/KLD"""
         return log_a * (log_a - log_b)
@@ -380,11 +401,6 @@ class PPOAgent(Agent):
                         self.env.render()
 
                     # Compute action, log_prob, and value
-                    # policy = self.policy_network(state, training=False)
-                    # action = policy
-                    # log_prob = policy.log_prob(action)
-                    # value = self.value_network(state, training=False)
-
                     action, mean, std, log_prob, value = self.predict(state)
                     action_env = self.convert_action(action)
 
@@ -426,22 +442,31 @@ class PPOAgent(Agent):
         if self.distribution_type == 'categorical':
             # Categorical (discrete actions)
             if self.mixture_components == 1:
-                logits = Dense(units=self.env.action_space.n, activation='linear', name='logits')(layer)
-                logits = tf.expand_dims(logits, axis=0)
+                logits = Dense(units=self.num_classes * self.num_actions, activation='linear', name='logits')(layer)
+
+                if self.num_actions > 1:
+                    logits = Reshape((self.num_actions, self.num_classes))(logits)
+                else:
+                    logits = tf.expand_dims(logits, axis=0)
 
                 return tfp.layers.DistributionLambda(
                     make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t))(logits)
             else:
                 return utils.get_mixture_of_categorical(layer, num_actions=self.env.action_space.n,
                                                         num_components=self.mixture_components)
+
+        # TODO: poor performance for continuous distributions...
         elif self.distribution_type == 'beta':
             # Beta (bounded continuous 1-dimensional actions)
             # for activations choice refer to chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
 
             if self.mixture_components == 1:
                 # make a, b > 1, so that the Beta distribution is concave and unimodal (see paper above)
-                alpha = Dense(units=self.num_actions, activation=utils.softplus_one, name='alpha')(layer)
-                beta = Dense(units=self.num_actions, activation=utils.softplus_one, name='beta')(layer)
+                # alpha = Dense(units=self.num_actions, activation=utils.softplus_one, name='alpha')(layer)
+                # beta = Dense(units=self.num_actions, activation=utils.softplus_one, name='beta')(layer)
+
+                alpha = Dense(units=self.num_actions, activation='softplus', name='alpha')(layer)
+                beta = Dense(units=self.num_actions, activation='softplus', name='beta')(layer)
 
                 return tfp.layers.DistributionLambda(
                     make_distribution_fn=lambda t: tfp.distributions.Beta(t[0], t[1]))([alpha, beta])

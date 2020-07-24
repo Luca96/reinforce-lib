@@ -449,16 +449,23 @@ def test_gaussian():
     print('[0, 1] samples:', normalize_01(samples))
 
 
+def test_categirical():
+    cat = tfp.distributions.Categorical(logits=[[1, 2, 3, 4], [3, 4, 1, 2], [0, 1, 3, 1]], dtype=tf.float32)
+    print(cat.sample(20))
+
+
+def test_interpolation(bins=8, low=-1, high=1):
+    points = [i for i in range(bins + 1)]  # include `0`
+    delta = (high - low) / bins
+
+    for x in points:
+        p = delta * x + low
+        print(f'{x}: {p}')
+
+
 if __name__ == '__main__':
-    # Memories:
-    # test_recent_memory()
-    # test_replay_memory()
-
-    # GAE:
-
     # Environments:
     # test_gym_env(num_episodes=200 * 5, max_timesteps=100, env='CartPole-v0')
-    # print(discount_cumsum([1, 2, 3, 4], 1))
 
     # Distributions:
     # test_distribution()
@@ -475,8 +482,9 @@ if __name__ == '__main__':
     # test_mixture_distribution()
     # test_mixture_same_family_distribution()
     # test_compare_continuous_distributions()
-    test_beta2()
+    # test_beta2()
     # test_gaussian()
+    # test_categirical()
 
     # Networks:
     # test_dual_head_value_network()
@@ -501,4 +509,6 @@ if __name__ == '__main__':
     # test_incremental_mean([1, 2, 3, 3, 0, -1, -6, 13, 2, -7])
     # test_incremental_mean2([1, 2, 3, 3, 0, -1, -6, 13, 2, -7])
     # test_incremental_std([1, 2, 3, 3, 0, -1, -6, 13, 2, -7])
+
+    test_interpolation(bins=8, low=-1, high=1)
     pass

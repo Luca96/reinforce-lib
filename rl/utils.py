@@ -160,6 +160,9 @@ def space_to_flat_spec(space: gym.Space, name: str) -> Dict[str, tuple]:
     if isinstance(space, spaces.Discrete):
         spec[name] = (space.n,)
 
+    elif isinstance(space, spaces.MultiDiscrete):
+        spec[name] = space.nvec.shape
+
     elif isinstance(space, spaces.Box):
         spec[name] = space.shape
 
@@ -174,7 +177,7 @@ def space_to_flat_spec(space: gym.Space, name: str) -> Dict[str, tuple]:
             else:
                 spec[space_name] = result
     else:
-        raise ValueError('space must be one of Box, Discrete, or Dict')
+        raise ValueError('space must be one of Box, Discrete, MultiDiscrete, or Dict')
 
     return spec
 
