@@ -26,7 +26,8 @@ class PPOAgent(Agent):
                  value_lr: Union[float, LearningRateSchedule] = 3e-4, optimization_steps=(10, 10), target_kl=False,
                  noise: Union[float, DynamicParameter] = 0.0, clip_ratio: Union[float, DynamicParameter] = 0.2,
                  load=False, name='ppo-agent', entropy_regularization: Union[float, DynamicParameter] = 0.0,
-                 recurrence: dict = None, mixture_components=1, clip_norm=(1.0, 1.0), optimizer='adam', **kwargs):
+                 recurrence: dict = None, mixture_components=1, clip_norm=(1.0, 1.0), optimizer='adam',
+                 traces_dir: str = None, **kwargs):
         assert mixture_components >= 1
         super().__init__(*args, name=name, **kwargs)
 
@@ -35,6 +36,10 @@ class PPOAgent(Agent):
         self.lambda_ = lambda_
         self.mixture_components = mixture_components
         self.min_float = tf.constant(np.finfo(np.float32).eps, dtype=tf.float32)
+
+        # Record:
+        self.should_record = isinstance(traces_dir, str)
+        self.traces_dir = utils.makedir(traces_dir, name)
 
         # Entropy regularization
         if isinstance(entropy_regularization, DynamicParameter):
@@ -428,6 +433,9 @@ class PPOAgent(Agent):
                 self.log(episode_rewards=episode_reward)
                 self.write_summaries()
 
+                if self.should_record:
+                    self.memory.serialize(episode, save_path=self.traces_dir)
+
                 if episode % save_every == 0:
                     self.save()
         finally:
@@ -619,3 +627,22 @@ class PPOMemory:
         """Terminates the current trajectory by adding the value of the terminal state"""
         self.rewards = tf.concat([self.rewards, last_value[0]], axis=0)
         self.values = tf.concat([self.values, last_value], axis=0)
+
+    def serialize(self, episode: int, save_path: str):
+        """Writes to file (npz - numpy compressed format) all the transitions collected so far"""
+        # Trace's file path:
+        filename = f'trace-{episode}-{time.strftime("%Y%m%d-%H%M%S")}.npz'
+        trace_path = os.path.join(save_path, filename)
+
+        # Select data to save
+        buffer = dict(reward=self.rewards, action=self.actions)
+
+        if self.simple_state:
+            buffer['state'] = self.states
+        else:
+            for key, value in self.states.items():
+                buffer[key] = value
+
+        # Save buffer
+        np.savez_compressed(file=trace_path, **buffer)
+        print(f'Traces "{filename}" saved.')

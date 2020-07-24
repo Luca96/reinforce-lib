@@ -114,7 +114,8 @@ class BehaviorAgent(Agent):
             :param clean: boolean to clean the waypoint queue
         """
         if clean:
-            self._local_planner.waypoints_queue.reset()
+            self._local_planner.waypoints_queue.clear()
+
         self.start_waypoint = self._map.get_waypoint(start_location)
         self.end_waypoint = self._map.get_waypoint(end_location)
 

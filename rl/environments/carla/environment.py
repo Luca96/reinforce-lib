@@ -56,17 +56,17 @@ class CARLABaseEnvironment(gym.Env):
         self.initial_timestamp: carla.Timestamp = None
         self.current_timestamp: carla.Timestamp = None
 
-        # Map
-        if isinstance(town, str):
-            self.set_town(town)
-
-        self.map: carla.Map = self.world.get_map()
-
         # set fix fps:
         self.world_settings = carla.WorldSettings(no_rendering_mode=False,
                                                   synchronous_mode=False,
                                                   fixed_delta_seconds=1.0 / fps)
         self.world.apply_settings(self.world_settings)
+
+        # Map
+        if isinstance(town, str):
+            self.set_town(town)
+
+        self.map: carla.Map = self.world.get_map()
 
         # Vehicle
         self.vehicle_filter = vehicle_filter
@@ -557,15 +557,11 @@ class CARLAPlayWrapper(CARLAWrapper):
                 while not done:
                     actions = self.get_action(state)
                     state, reward, done, info = self.env.step(actions)
-                    self.observe(reward, done)
         finally:
             self.env.close()
 
     def get_action(self, state):
         return self._parse_events()
-
-    def observe(self, reward, done):
-        pass
 
     def _parse_events(self):
         for event in pygame.event.get():
@@ -631,7 +627,7 @@ class CARLAPlayWrapper(CARLAWrapper):
 
 
 class CARLACollectWrapper(CARLAWrapper):
-    """Wraps a CARLA Environment, collects input observations and output actions that can be later
+    """Wraps a CARLA Environment, collecting input observations and output actions that can be later
        used for pre-training or imitation learning purposes.
     """
 
@@ -1123,16 +1119,20 @@ class OneCameraCARLAEnvironmentDiscrete(OneCameraCARLAEnvironment):
 
         super().__init__(*args, **kwargs)
 
-    def interpolate(self, array: list):
-        """Maps a discrete array `x` of bins into their corresponding continuous values"""
-        return [self._delta * x + self._low for x in array]
+    def actions_to_control(self, actions):
+        super().actions_to_control(actions=self.interpolate(actions))
+
+    def interpolate(self, discrete_actions: list):
+        """Maps a discrete array of bins into their corresponding continuous values"""
+        return self._delta * np.asarray(discrete_actions) + self._low
 
     def control_to_actions(self, control: carla.VehicleControl):
         actions = super().control_to_actions(control)
-        return self.interpolate(actions)
+        return self.interpolate_inverse(actions)
 
-    def actions_to_control(self, actions):
-        super().actions_to_control(actions=self.interpolate(actions))
+    def interpolate_inverse(self, continuous_actions: list):
+        """Maps a continuous array of values into their corresponding bins (i.e. inverse of `interpolate`)"""
+        return ((np.asarray(continuous_actions) - self._low) / self._delta).astype('int')
 
 
 class ThreeCameraCARLAEnvironment(OneCameraCARLAEnvironment):
@@ -1207,16 +1207,20 @@ class ThreeCameraCARLAEnvironmentDiscrete(ThreeCameraCARLAEnvironment):
 
         super().__init__(*args, **kwargs)
 
-    def interpolate(self, array: list):
-        """Maps a discrete array `x` of bins into their corresponding continuous values"""
-        return [self._delta * x + self._low for x in array]
+    def actions_to_control(self, actions):
+        super().actions_to_control(actions=self.interpolate(actions))
+
+    def interpolate(self, discrete_actions: list):
+        """Maps a discrete array of bins into their corresponding continuous values"""
+        return self._delta * np.asarray(discrete_actions) + self._low
 
     def control_to_actions(self, control: carla.VehicleControl):
         actions = super().control_to_actions(control)
-        return self.interpolate(actions)
+        return self.interpolate_inverse(actions)
 
-    def actions_to_control(self, actions):
-        super().actions_to_control(actions=self.interpolate(actions))
+    def interpolate_inverse(self, continuous_actions: list):
+        """Maps a continuous array of values into their corresponding bins (i.e. inverse of `interpolate`)"""
+        return ((np.asarray(continuous_actions) - self._low) / self._delta).astype('int')
 
 
 # -------------------------------------------------------------------------------------------------

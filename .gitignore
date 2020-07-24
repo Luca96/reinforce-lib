@@ -1,6 +1,7 @@
 logs/
 weights/
 checkpoints/
+traces/
 .idea/
 venv/
 

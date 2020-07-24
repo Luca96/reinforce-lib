@@ -193,6 +193,9 @@ def space_to_spec(space: gym.Space) -> Union[tuple, Dict[str, Union[tuple, dict]
     if isinstance(space, spaces.Discrete):
         return space.n,  # -> tuple (space.n,)
 
+    if isinstance(space, spaces.MultiDiscrete):
+        return space.nvec.shape
+
     assert isinstance(space, spaces.Dict)
 
     spec = dict()

@@ -17,7 +17,7 @@ def ppo_cartpole_test():
     agent = PPOAgent(env,
                      policy_lr=schedules.ExponentialSchedule(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True),
                      value_lr=schedules.ExponentialSchedule(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True),
-                     clip_ratio=0.05,
+                     clip_ratio=0.05, traces_dir='traces',
                      lambda_=0.95, entropy_regularization=0.0, name='ppo-cartPole-baseline',
                      optimization_steps=(1, 2), batch_size=20, target_kl=None,
                      log_mode='summary', load=False, seed=42)
