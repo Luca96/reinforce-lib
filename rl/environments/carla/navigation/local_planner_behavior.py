@@ -38,7 +38,7 @@ class LocalPlanner(object):
 
     def __init__(self, agent):
         """
-        :param agent: agent that regulates the vehicle
+        :param agent: agents that regulates the vehicle
         :param vehicle: actor to apply to local planner logic onto
         """
         self._vehicle = agent.vehicle

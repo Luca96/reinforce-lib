@@ -3,9 +3,9 @@
 # This work is licensed under the terms of the MIT license.
 # For a copy, see <https://opensource.org/licenses/MIT>.
 
-""" This module implements an agent that roams around a track following random
+""" This module implements an agents that roams around a track following random
 waypoints and avoiding other vehicles.
-The agent also responds to traffic lights. """
+The agents also responds to traffic lights. """
 
 import sys
 import math
@@ -18,7 +18,7 @@ from rl.environments.carla.tools.misc import is_within_distance_ahead, is_within
 
 class AgentState(Enum):
     """
-    AGENT_STATE represents the possible states of a roaming agent
+    AGENT_STATE represents the possible states of a roaming agents
     """
     NAVIGATING = 1
     BLOCKED_BY_VEHICLE = 2
@@ -150,7 +150,7 @@ class Agent(object):
             :param ego_wpt: waypoint of ego-vehicle
             :param ego_log: location of ego-vehicle
             :param vehicle_list: list of potential obstacle to check
-            :param proximity_th: threshold for the agent to be alerted of
+            :param proximity_th: threshold for the agents to be alerted of
             a possible collision
             :param up_angle_th: upper threshold for angle
             :param low_angle_th: lower threshold for angle

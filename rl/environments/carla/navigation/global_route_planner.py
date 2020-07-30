@@ -313,7 +313,7 @@ class GlobalRoutePlanner(object):
         origin      : carla.Location object of the route's start position
         destination : carla.Location object of the route's end position
         return      : list of turn by turn navigation decisions as
-        agents.navigation.local_planner.RoadOption elements
+        core.navigation.local_planner.RoadOption elements
         Possible values are STRAIGHT, LEFT, RIGHT, LANE_FOLLOW, VOID
         CHANGE_LANE_LEFT, CHANGE_LANE_RIGHT
         """

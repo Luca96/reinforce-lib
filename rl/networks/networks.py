@@ -15,27 +15,17 @@ class Network:
 
 # TODO: disentangle policy-net from value-net, so that each of them can be arbitrary subclassed, moreover a
 #  Network class can be composed by these policy/value/Q-network classes...
-# TODO: summary, reset, save/load
 class PPONetwork(Network):
     def __init__(self, agent, **kwargs):
         from rl.agents.ppo import PPOAgent
 
         self.agent: PPOAgent = agent
-
-        # # define and register input layers
-        # self.inputs = dict()
-        # self.register(**self.agent.state_spec)
-
-        self.action_shape = self.agent.action_shape
         self.distribution = self.agent.distribution_type
         self.mixture_components = self.agent.mixture_components
 
         # policy and value networks
         self.policy = self.policy_network(**kwargs)
         self.value = self.value_network(**kwargs)
-
-    def __call__(self, *args, **kwargs):
-        pass
 
     @tf.function
     def predict(self, inputs: Union[tf.Tensor, List[tf.Tensor], Dict[str, tf.Tensor]]):
@@ -157,7 +147,8 @@ class PPONetwork(Network):
     def get_distribution_layer(self, layer: Layer) -> tfp.layers.DistributionLambda:
         # Discrete actions:
         if self.distribution == 'categorical':
-            num_actions, num_classes = self.action_shape
+            num_actions = self.agent.num_actions
+            num_classes = self.agent.num_classes
 
             if self.mixture_components == 1:
                 logits = Dense(units=num_actions * num_classes, activation='linear', name='logits')(layer)
@@ -175,7 +166,7 @@ class PPONetwork(Network):
         # Bounded continuous 1-dimensional actions:
         # for activations choice refer to chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
         if self.distribution == 'beta':
-            num_actions = self.action_shape[0]
+            num_actions = self.agent.num_actions
 
             if self.mixture_components == 1:
                 # make a, b > 1, so that the Beta distribution is concave and unimodal (see paper above)
@@ -194,7 +185,7 @@ class PPONetwork(Network):
         # Unbounded continuous actions)
         # for activations choice see chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
         if self.distribution == 'gaussian':
-            num_actions = self.action_shape[0]
+            num_actions = self.agent.num_actions
 
             if self.mixture_components == 1:
                 mu = Dense(units=num_actions, activation='linear', name='mu')(layer)

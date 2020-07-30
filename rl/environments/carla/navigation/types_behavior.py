@@ -5,7 +5,7 @@
 
 
 class Cautious(object):
-    """Class for Cautious agent."""
+    """Class for Cautious agents."""
     max_speed = 40
     speed_lim_dist = 6
     speed_decrease = 12
@@ -17,7 +17,7 @@ class Cautious(object):
 
 
 class Normal(object):
-    """Class for Normal agent."""
+    """Class for Normal agents."""
     max_speed = 50
     speed_lim_dist = 3
     speed_decrease = 10
@@ -29,7 +29,7 @@ class Normal(object):
 
 
 class Aggressive(object):
-    """Class for Aggressive agent."""
+    """Class for Aggressive agents."""
     max_speed = 70
     speed_lim_dist = 1
     speed_decrease = 8

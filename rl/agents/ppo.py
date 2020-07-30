@@ -68,7 +68,6 @@ class PPOAgent(Agent):
 
         if isinstance(action_space, gym.spaces.Box):
             self.num_actions = action_space.shape[0]
-            self.action_shape = (self.num_actions,)
 
             # continuous:
             if action_space.is_bounded():
@@ -98,8 +97,6 @@ class PPOAgent(Agent):
                 self.num_actions = 1
                 self.num_classes = action_space.n
                 self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
-
-            self.action_shape = (self.num_actions, self.num_classes)
 
         # Gaussian noise (for exploration)
         if isinstance(noise, float):
@@ -176,16 +173,9 @@ class PPOAgent(Agent):
         self.log(returns=returns, advantages=advantages, values=self.memory.values)
 
         # Prepare data: (states, returns) and (states, advantages, actions, log_prob)
-        value_batches = utils.data_to_batches(tensors=(self.memory.states, returns), batch_size=self.batch_size,
-                                              drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
-                                              map_fn=self.preprocess(),
-                                              num_shards=self.obs_skipping, shuffle_batches=self.shuffle_batches)
+        value_batches = self.get_value_batches(returns)
+        policy_batches = self.get_policy_batches(advantages)
 
-        policy_batches = utils.data_to_batches(tensors=(self.memory.states, advantages,
-                                                        self.memory.actions, self.memory.log_probabilities),
-                                               batch_size=self.batch_size, drop_remainder=self.drop_batch_reminder,
-                                               skip=self.skip_count, num_shards=self.obs_skipping,
-                                               shuffle_batches=self.shuffle_batches, map_fn=self.preprocess())
         # Policy network optimization:
         for opt_step in range(self.optimization_steps['policy']):
             for data_batch in policy_batches:
@@ -227,6 +217,21 @@ class PPOAgent(Agent):
                          gradients_norm_value=[tf.norm(gradient) for gradient in value_grads])
 
         print(f'Update took {round(time.time() - t0, 3)}s')
+
+    def get_value_batches(self, returns, **kwargs):
+        """Computes batches of data for updating the value network"""
+        return utils.data_to_batches(tensors=(self.memory.states, returns), batch_size=self.batch_size,
+                                     drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
+                                     map_fn=self.preprocess(),
+                                     num_shards=self.obs_skipping, shuffle_batches=self.shuffle_batches)
+
+    def get_policy_batches(self, advantages, **kwargs):
+        """Computes batches of data for updating the policy network"""
+        return utils.data_to_batches(tensors=(self.memory.states, advantages, self.memory.actions,
+                                              self.memory.log_probabilities),
+                                     batch_size=self.batch_size, drop_remainder=self.drop_batch_reminder,
+                                     skip=self.skip_count, num_shards=self.obs_skipping,
+                                     shuffle_batches=self.shuffle_batches, map_fn=self.preprocess())
 
     # @tf.function
     def value_objective(self, batch):
