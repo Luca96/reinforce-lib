@@ -17,6 +17,8 @@ from gym import spaces
 # -- Constants
 # -------------------------------------------------------------------------------------------------
 
+EPSILON = tf.constant(np.finfo(np.float32).eps, dtype=tf.float32)
+
 OPTIMIZERS = dict(adadelta=tf.keras.optimizers.Adadelta,
                   adagrad=tf.keras.optimizers.Adagrad,
                   adam=tf.keras.optimizers.Adam,
@@ -40,23 +42,6 @@ def get_optimizer_by_name(name: str, *args, **kwargs) -> tf.keras.optimizers.Opt
 # -------------------------------------------------------------------------------------------------
 # -- Misc
 # -------------------------------------------------------------------------------------------------
-
-def to_tensor(x, expand_axis=0):
-    if isinstance(x, dict):
-        for k, v in x.items():
-            v = tf.cast(v, dtype=tf.float32)
-            x[k] = tf.expand_dims(tf.convert_to_tensor(v), axis=expand_axis)
-    else:
-        x = tf.cast(x, dtype=tf.float32)
-        x = tf.convert_to_tensor(x)
-        x = tf.expand_dims(x, axis=expand_axis)
-    return x
-
-
-def tf_normalize(x):
-    """Normalizes some tensor x to 0-mean 1-stddev"""
-    return (x - tf.math.reduce_mean(x)) / tf.math.reduce_std(x)
-
 
 def np_normalize(x, epsilon=np.finfo(np.float32).eps):
     return (x - np.mean(x)) / (np.std(x) + epsilon)
@@ -87,33 +72,38 @@ def rewards_to_go(rewards, discount: float, normalize=False):
     return returns
 
 
-def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batches=False, seed=None,
-                    drop_remainder=False, map_fn=None, prefetch_size=2, num_shards=1, skip=0):
-    """Transform some tensors data into a dataset of mini-batches"""
-    dataset = tf.data.Dataset.from_tensor_slices(tensors).skip(count=skip)
+def is_image(x) -> bool:
+    """Checks whether some input [x] has a shape of the form (H, W, C)"""
+    return len(x.shape) == 3
 
-    if num_shards > 1:
-        # "observation skip trick" with tf.data.Dataset.shard()
-        ds = dataset.shard(num_shards, index=0)
 
-        for shard_index in range(1, num_shards):
-            shard = dataset.shard(num_shards, index=shard_index)
-            ds = ds.concatenate(shard)
+def is_vector(x) -> bool:
+    """Checks whether some input [x] has a shape of the form (N, D) or (D,)"""
+    return 1 <= len(x.shape) <= 2
 
-        dataset = ds
 
-    if map_fn is not None:
-        # 'map_fn' is mainly used for 'data augmentation'
-        dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE,
-                              deterministic=True)
+def depth_concat(*arrays):
+    return np.concatenate(*arrays, axis=-1)
 
-    dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
 
-    if shuffle_batches:
-        dataset = dataset.shuffle(buffer_size=batch_size, seed=seed)
+def plot_images(images: list):
+    """Plots a list of images, arranging them in a rectangular fashion"""
+    num_plots = len(images)
+    rows = round(math.sqrt(num_plots))
+    cols = math.ceil(math.sqrt(num_plots))
 
-    return dataset.prefetch(buffer_size=prefetch_size)
+    for k, img in enumerate(images):
+        plt.subplot(rows, cols, k + 1)
+        plt.axis('off')
+        plt.imshow(img)
 
+    plt.subplots_adjust(wspace=0, hspace=0)
+    plt.show()
+
+
+# -------------------------------------------------------------------------------------------------
+# -- Gym utils
+# -------------------------------------------------------------------------------------------------
 
 def print_info(gym_env):
     if isinstance(gym_env, str):
@@ -138,14 +128,6 @@ def print_info(gym_env):
     print('Metadata:', gym_env.metadata)
 
 
-def tf_to_scalar_shape(tensor):
-    return tf.reshape(tensor, shape=[])
-
-
-def assert_shapes(a, b):
-    assert tf.shape(a) == tf.shape(b)
-
-
 def space_to_flat_spec(space: gym.Space, name: str) -> Dict[str, tuple]:
     """From a gym.Space object returns a flat dictionary str -> tuple.
        Naming convention:
@@ -154,6 +136,8 @@ def space_to_flat_spec(space: gym.Space, name: str) -> Dict[str, tuple]:
             considering 'x' and 'y' be component of space.
          - With further nesting, dict keys' names got created using the above two rules.
            In this way each key (name) uniquely identifies a (sub-)component of the space.
+           Example:
+              Dict(a=x, b=Dict(c=y, d=z)) -> dict(a=x, b_c=y, b_d=z)
     """
     spec = dict()
 
@@ -206,18 +190,64 @@ def space_to_spec(space: gym.Space) -> Union[tuple, Dict[str, Union[tuple, dict]
     return spec
 
 
-def is_image(x) -> bool:
-    """Checks whether some input [x] has a shape of the form (H, W, C)"""
-    return len(x.shape) == 3
+# -------------------------------------------------------------------------------------------------
+# -- TF utils
+# -------------------------------------------------------------------------------------------------
+
+# TODO: @tf.function
+def to_tensor(x, expand_axis=0):
+    if isinstance(x, dict):
+        for k, v in x.items():
+            v = tf.cast(v, dtype=tf.float32)
+            x[k] = tf.expand_dims(tf.convert_to_tensor(v), axis=expand_axis)
+    else:
+        x = tf.cast(x, dtype=tf.float32)
+        x = tf.convert_to_tensor(x)
+        x = tf.expand_dims(x, axis=expand_axis)
+    return x
 
 
-def is_vector(x) -> bool:
-    """Checks whether some input [x] has a shape of the form (N, D) or (D,)"""
-    return 1 <= len(x.shape) <= 2
+# TODO: @tf.function
+def tf_normalize(x):
+    """Normalizes some tensor x to 0-mean 1-stddev"""
+    return (x - tf.math.reduce_mean(x)) / tf.math.reduce_std(x)
 
 
-def depth_concat(*arrays):
-    return np.concatenate(*arrays, axis=-1)
+def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batches=False, seed=None,
+                    drop_remainder=False, map_fn=None, prefetch_size=2, num_shards=1, skip=0):
+    """Transform some tensors data into a dataset of mini-batches"""
+    dataset = tf.data.Dataset.from_tensor_slices(tensors).skip(count=skip)
+
+    if num_shards > 1:
+        # "observation skip trick" with tf.data.Dataset.shard()
+        ds = dataset.shard(num_shards, index=0)
+
+        for shard_index in range(1, num_shards):
+            shard = dataset.shard(num_shards, index=shard_index)
+            ds = ds.concatenate(shard)
+
+        dataset = ds
+
+    if map_fn is not None:
+        # 'map_fn' is mainly used for 'data augmentation'
+        dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE,
+                              deterministic=True)
+
+    dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
+
+    if shuffle_batches:
+        dataset = dataset.shuffle(buffer_size=batch_size, seed=seed)
+
+    return dataset.prefetch(buffer_size=prefetch_size)
+
+
+# TODO: @tf.function
+def tf_to_scalar_shape(tensor):
+    return tf.reshape(tensor, shape=[])
+
+
+def assert_shapes(a, b):
+    assert tf.shape(a) == tf.shape(b)
 
 
 def tf_01_scaling(x):
@@ -231,23 +261,29 @@ def softplus_one(x):
     return 1.0 + tf.nn.softplus(x)
 
 
-def plot_images(images: list):
-    """Plots a list of images, arranging them in a rectangular fashion"""
-    num_plots = len(images)
-    rows = round(math.sqrt(num_plots))
-    cols = math.ceil(math.sqrt(num_plots))
+@tf.function
+def batch_norm_relu6(layer: tf.keras.layers.Layer):
+    """BatchNormalization + ReLU6, use as activation function"""
+    layer = tf.keras.layers.BatchNormalization()(layer)
+    layer = tf.nn.relu6(layer)
+    return layer
 
-    for k, img in enumerate(images):
-        plt.subplot(rows, cols, k + 1)
-        plt.axis('off')
-        plt.imshow(img)
 
-    plt.subplots_adjust(wspace=0, hspace=0)
-    plt.show()
+@tf.function
+def kl_divergence(log_a, log_b):
+    """Kullback-Leibler divergence
+        - Source: https://www.tensorflow.org/api_docs/python/tf/keras/losses/KLD
+    """
+    return log_a * (log_a - log_b)
+
+
+@tf.function
+def tf_entropy(prob, log_prob):
+    return -tf.reduce_sum(prob * log_prob)
 
 
 # -------------------------------------------------------------------------------------------------
-# -- File Utils
+# -- File utils
 # -------------------------------------------------------------------------------------------------
 
 def makedir(*args: str) -> str:
@@ -267,7 +303,7 @@ def file_names(dir_path: str, sort=True) -> list:
 
 
 # -------------------------------------------------------------------------------------------------
-# -- Statistics
+# -- Statistics utils
 # -------------------------------------------------------------------------------------------------
 
 class Statistics:
@@ -374,7 +410,7 @@ class IncrementalStatistics:
 
 
 # -------------------------------------------------------------------------------------------------
-# -- Distributions
+# -- Distributions utils
 # -------------------------------------------------------------------------------------------------
 
 class MixtureDistribution(tfp.distributions.Mixture):

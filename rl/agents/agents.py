@@ -159,17 +159,3 @@ class Agent:
 
     def save_weights(self):
         raise NotImplementedError
-
-    def _get_input_layers(self) -> Dict[str, layers.Input]:
-        """Handles arbitrary complex state-spaces"""
-        input_layers = dict()
-
-        for name, shape in self.state_spec.items():
-            if self.drop_batch_reminder:
-                layer = layers.Input(shape=shape, batch_size=self.batch_size, dtype=tf.float32, name=name)
-            else:
-                layer = layers.Input(shape=shape, dtype=tf.float32, name=name)
-
-            input_layers[name] = layer
-
-        return input_layers
