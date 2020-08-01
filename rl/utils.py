@@ -6,6 +6,7 @@ import scipy.signal
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import tensorflow_probability as tfp
+import random
 
 from typing import Union, List, Dict, Tuple
 from datetime import datetime
@@ -282,6 +283,16 @@ def tf_entropy(prob, log_prob):
     return -tf.reduce_sum(prob * log_prob)
 
 
+def to_int(tensor):
+    """Casts the given tensor to tf.int32 datatype"""
+    return tf.cast(tensor, dtype=tf.int32)
+
+
+def to_float(tensor):
+    """Casts the given tensor to tf.float32 datatype"""
+    return tf.cast(tensor, dtype=tf.float32)
+
+
 # -------------------------------------------------------------------------------------------------
 # -- File utils
 # -------------------------------------------------------------------------------------------------
@@ -300,6 +311,36 @@ def file_names(dir_path: str, sort=True) -> list:
         files = sorted(files)
 
     return list(files)
+
+
+def load_traces(traces_dir: str, shuffle=False):
+    if shuffle:
+        trace_names = file_names(traces_dir, sort=False)
+        random.shuffle(trace_names)
+    else:
+        trace_names = file_names(traces_dir, sort=True)
+
+    for name in trace_names:
+        yield np.load(file=os.path.join(traces_dir, name))
+
+
+def unpack_trace(trace: dict) -> tuple:
+    """Reads a trace (i.e. a dict-like object created by np.load()) and unpacks it as a tuple
+       (state, action, reward, done).
+    """
+    trace_keys = trace.keys()
+    trace = {k: trace[k] for k in trace_keys}  # copy
+
+    for name in ['state', 'action']:
+        # check if state/action space is simple (array, i.e sum == 1) or complex (dict of arrays)
+        if sum(k.startswith(name) for k in trace_keys) == 1:
+            continue
+
+        # select keys of the form 'state_xxx', then build a dict(state_x=trace['state_x'])
+        keys = filter(lambda k: k.startswith(name + '_'), trace_keys)
+        trace[name] = {k: trace[k] for k in keys}
+
+    return trace['state'], trace['action'], trace['reward'], trace['done']
 
 
 # -------------------------------------------------------------------------------------------------

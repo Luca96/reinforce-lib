@@ -29,7 +29,8 @@ class PPONetwork(Network):
 
     @tf.function
     def predict(self, inputs: Union[tf.Tensor, List[tf.Tensor], Dict[str, tf.Tensor]]):
-        policy = self.policy(inputs, training=False)
+        policy = self.policy_predict(inputs)
+        value = self.value_predict(inputs)
 
         if self.distribution != 'categorical':
             # round samples (actions) before computing density:
@@ -42,9 +43,18 @@ class PPONetwork(Network):
             std = 0.0
             log_prob = policy.log_prob(policy)
 
-        value = self.value(inputs, training=False)
-
         return policy, mean, std, log_prob, value
+
+    # @tf.function
+    def policy_predict(self, inputs):
+        return self.policy(inputs, training=False)
+
+    @tf.function
+    def value_predict(self, inputs):
+        return self.value(inputs, training=False)
+
+    def predict_last_value(self, terminal_state):
+        return self.value_predict(terminal_state)
 
     @tf.function
     def act(self, inputs: Union[tf.Tensor, List[tf.Tensor], Dict[str, tf.Tensor]]):

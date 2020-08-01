@@ -154,9 +154,28 @@ def test_aug_with_dataset(batch_size=25):
 
         return image
 
+    def sobel_filtering(image):
+        return aug.tf_sobel(image, grayscale=True, restore_depth=True)
+
+    def crop(image):
+        return aug.tf_crop(aug.tf_normalize(image), size=(50, 50, 3), resize=True)
+
+    def flip(image):
+        return aug.tf_flip(aug.tf_normalize(image), horizontal=True)
+
+    def quality(image):
+        return aug.tf_quality(aug.tf_normalize(image), 0, 50)
+
+    def simclr_augmentations(image):
+        image = aug.tf_normalize(image)
+        crop_size = aug.tf_scale_shape(image, scale=(0.5, 0.5))
+        image = aug.simclr.pipeline(image, crop_size, blur_size=0.04)
+        return aug.tf_normalize(image)
+
     trace_path = 'traces/test-preprocess/trace-0-20200708-103027.npz'
     images = np.load(trace_path)['state_image']
-    dataset = tf.data.Dataset.from_tensor_slices(images).skip(1).map(augmentations3).batch(batch_size)
+    # dataset = tf.data.Dataset.from_tensor_slices(images).skip(1).map(augmentations3).batch(batch_size)
+    dataset = tf.data.Dataset.from_tensor_slices(images).skip(1).map(simclr_augmentations).batch(batch_size)
 
     for batch in dataset:
         utils.plot_images(list(batch))

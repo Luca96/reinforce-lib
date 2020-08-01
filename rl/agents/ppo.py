@@ -218,24 +218,31 @@ class PPOAgent(Agent):
 
         print(f'Update took {round(time.time() - t0, 3)}s')
 
-    def get_value_batches(self, returns, **kwargs):
+    def get_value_batches(self, returns):
         """Computes batches of data for updating the value network"""
-        return utils.data_to_batches(tensors=(self.memory.states, returns), batch_size=self.batch_size,
+        return utils.data_to_batches(tensors=self.value_batch_tensors(returns), batch_size=self.batch_size,
                                      drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
                                      map_fn=self.preprocess(),
                                      num_shards=self.obs_skipping, shuffle_batches=self.shuffle_batches)
 
-    def get_policy_batches(self, advantages, **kwargs):
+    def value_batch_tensors(self, returns) -> Union[tuple, dict]:
+        """Defines which data to use in `get_value_batches()`"""
+        return self.memory.states, returns
+
+    def get_policy_batches(self, advantages):
         """Computes batches of data for updating the policy network"""
-        return utils.data_to_batches(tensors=(self.memory.states, advantages, self.memory.actions,
-                                              self.memory.log_probabilities),
-                                     batch_size=self.batch_size, drop_remainder=self.drop_batch_reminder,
-                                     skip=self.skip_count, num_shards=self.obs_skipping,
+        return utils.data_to_batches(tensors=self.policy_batch_tensors(advantages), batch_size=self.batch_size,
+                                     drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
+                                     num_shards=self.obs_skipping,
                                      shuffle_batches=self.shuffle_batches, map_fn=self.preprocess())
+
+    def policy_batch_tensors(self, advantages) -> Union[tuple, dict]:
+        """Defines which data to use in `get_policy_batches()`"""
+        return self.memory.states, advantages, self.memory.actions, self.memory.log_probabilities
 
     # @tf.function
     def value_objective(self, batch):
-        states, returns = batch
+        states, returns = batch[:2]
         values = self.network.value(states, training=True)
         # tf.print(values)
         # tf.print(returns)
@@ -243,7 +250,7 @@ class PPOAgent(Agent):
 
     def policy_objective(self, batch):
         """PPO-Clip Objective"""
-        states, advantages, actions, old_log_probabilities = batch
+        states, advantages, actions, old_log_probabilities = batch[:4]
         new_policy: tfp.distributions.Distribution = self.network.policy(states, training=True)
 
         if self.distribution_type == 'categorical' and self.num_actions == 1:
@@ -322,7 +329,7 @@ class PPOAgent(Agent):
                 state = self.env.reset()
                 state = utils.to_tensor(state)
 
-                # TODO: temporary fix (should be buggy as well...)
+                # TODO: temporary fix (shouldn't work for deeper nesting...)
                 if isinstance(state, dict):
                     state = {f'state_{k}': v for k, v in state.items()}
 
@@ -334,7 +341,7 @@ class PPOAgent(Agent):
                     if render:
                         self.env.render()
 
-                    # Compute action, log_prob, and value
+                    # Agent prediction
                     action, mean, std, log_prob, value = self.predict(state)
                     action_env = self.convert_action(action)
 
@@ -355,7 +362,9 @@ class PPOAgent(Agent):
                     if done or (t == timesteps):
                         print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
                               f'with reward {round(episode_reward, 3)}.')
-                        self.memory.end_trajectory(last_value=self.last_value if done else self.network.value(state))
+
+                        last_value = self.last_value if done else self.network.predict_last_value(state)
+                        self.memory.end_trajectory(last_value)
                         break
 
                 self.update()
