@@ -78,13 +78,13 @@ class BehaviorAgent(Agent):
         elif behavior == 'aggressive':
             self.behavior = Aggressive()
 
-    def update_information(self):
+    def update_information(self, vehicle):
         """
         This method updates the information regarding the ego
         vehicle based on the surrounding world.
         """
         self.speed = get_speed(self.vehicle)
-        self.speed_limit = self.vehicle.get_speed_limit()
+        self.speed_limit = vehicle.get_speed_limit()
         self._local_planner.set_speed(self.speed_limit)
         self.direction = self._local_planner.target_road_option
         if self.direction is None:
@@ -97,7 +97,7 @@ class BehaviorAgent(Agent):
         if self.incoming_direction is None:
             self.incoming_direction = RoadOption.LANE_FOLLOW
 
-        self.is_at_traffic_light = self.vehicle.is_at_traffic_light()
+        self.is_at_traffic_light = vehicle.is_at_traffic_light()
         if self.ignore_traffic_light:
             self.light_state = "Green"
         else:

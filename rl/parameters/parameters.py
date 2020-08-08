@@ -48,6 +48,16 @@ class DynamicParameter:
 
         self.value = self.initial_value
 
+    def as_dict(self) -> dict:
+        """Represents the current instance as a dict"""
+        return dict(initial_value=self.initial_value, final_value=self.final_value, value=self.value,
+                    should_restart=self.should_restart, should_restart_on_decay=self.should_decay_on_restart,
+                    step_counter=self.step_counter, max_steps=self.max_steps)
+
+    def from_dict(self, state: dict):
+        for key, value in state.items():
+            self.__setattr__(key, value)
+
 
 class ExponentialParameter(DynamicParameter):
     """Exponential Parameter"""

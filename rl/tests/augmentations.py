@@ -172,10 +172,32 @@ def test_aug_with_dataset(batch_size=25):
         image = aug.simclr.pipeline(image, crop_size, blur_size=0.04)
         return aug.tf_normalize(image)
 
+    def augment_fn(image):
+        size = aug.tf_scale_shape(image, scale=(0.5, 0.33))
+        image = aug.simclr.pipeline(image, crop_size=size, blur_size=0.02, blur_sigma=(0.1, 1.0))
+
+        # noise
+        if aug.tf_chance() < 0.2:
+            image = aug.tf_salt_and_pepper(image, amount=0.1)
+
+        if aug.tf_chance() < 0.33:
+            image = aug.tf_gaussian_noise(image, amount=0.15, std=0.15)
+
+        image = aug.tf_normalize(image)
+
+        # cutout & dropout
+        if aug.tf_chance() < 0.15:
+            image = aug.tf_cutout(image, size=6)
+
+        if aug.tf_chance() < 0.10:
+            image = aug.tf_coarse_dropout(image, size=49, amount=0.1)
+
+        return image
+
     trace_path = 'traces/test-preprocess/trace-0-20200708-103027.npz'
     images = np.load(trace_path)['state_image']
     # dataset = tf.data.Dataset.from_tensor_slices(images).skip(1).map(augmentations3).batch(batch_size)
-    dataset = tf.data.Dataset.from_tensor_slices(images).skip(1).map(simclr_augmentations).batch(batch_size)
+    dataset = tf.data.Dataset.from_tensor_slices(images).skip(1).map(augment_fn).batch(batch_size)
 
     for batch in dataset:
         utils.plot_images(list(batch))

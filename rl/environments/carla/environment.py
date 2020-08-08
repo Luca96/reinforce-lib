@@ -42,6 +42,10 @@ class CARLABaseEnvironment(gym.Env):
     def __init__(self, address='localhost', port=2000, timeout=5.0, image_shape=(150, 200, 3), window_size=(800, 600),
                  vehicle_filter='vehicle.tesla.model3', fps=30.0, render=True, debug=True, spawn: dict = None,
                  path: dict = None, town: str = None, weather=carla.WeatherParameters.ClearNoon, skip_frames=30):
+        """Arguments:
+            - spawn: dict(vehicle_filter: str, pedestrian_filter: str, pedestrians: int, vehicles: int, running: float,
+                          crossing: float, hybrid: bool)
+        """
         super().__init__()
         env_utils.init_pygame()
 
@@ -684,7 +688,7 @@ class CARLACollectWrapper(CARLAWrapper):
 
                 for t in range(timesteps):
                     # act
-                    self.agent.update_information()
+                    self.agent.update_information(vehicle=self.vehicle)
                     control = self.agent.run_step(debug=agent_debug)
                     action = env.control_to_actions(control)
 
@@ -1271,16 +1275,16 @@ class CARLABenchmark(CARLAWrapper):
 
     # Specifications of each task for training/testing evaluation:
     TASKS_SPEC = {Tasks.EMPTY_TOWN: {
-                    TRAIN_TOWN: dict(vehicles=0, pedestrians=0),
-                    TEST_TOWN: dict(vehicles=0, pedestrians=0)},
+        TRAIN_TOWN: dict(vehicles=0, pedestrians=0),
+        TEST_TOWN: dict(vehicles=0, pedestrians=0)},
 
-                  Tasks.REGULAR_TRAFFIC: {
-                      TRAIN_TOWN: dict(vehicles=20, pedestrians=50),
-                      TEST_TOWN: dict(vehicles=15, pedestrians=50)},
+        Tasks.REGULAR_TRAFFIC: {
+            TRAIN_TOWN: dict(vehicles=20, pedestrians=50),
+            TEST_TOWN: dict(vehicles=15, pedestrians=50)},
 
-                  Tasks.DENSE_TRAFFIC: {
-                      TRAIN_TOWN: dict(vehicles=100, pedestrians=250),
-                      TEST_TOWN: dict(vehicles=70, pedestrians=150)}}
+        Tasks.DENSE_TRAFFIC: {
+            TRAIN_TOWN: dict(vehicles=100, pedestrians=250),
+            TEST_TOWN: dict(vehicles=70, pedestrians=150)}}
 
     def __init__(self, env: CARLABaseEnvironment, task: Tasks, preset='test', weather=None, avg_speed=10.0):
         assert isinstance(task, CARLABenchmark.Tasks)
@@ -1354,7 +1358,7 @@ class CARLABenchmark(CARLAWrapper):
             self.successful.append(False)
         elif terminal:
             self.successful.append(self.destination_reached())
-        
+
         # reset flags
         self.is_out_of_lane = False
         self.has_collided = False

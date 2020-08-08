@@ -17,17 +17,27 @@ class Agent:
     """Agent abstract class"""
     def __init__(self, env: Union[gym.Env, str], batch_size: int, seed=None, weights_dir='weights', name='agent',
                  log_mode='summary', drop_batch_reminder=False, skip_data=0, consider_obs_every=1,
-                 shuffle_batches=False):
+                 shuffle_batches=False, traces_dir: str = None):
+
         if isinstance(env, str):
             self.env = gym.make(env)
         else:
             self.env = env
 
+        self.seed = None
+        self.set_random_seed(seed)
+
         self.batch_size = batch_size
         self.state_spec = utils.space_to_flat_spec(space=self.env.observation_space, name='state')
         self.action_spec = utils.space_to_flat_spec(space=self.env.action_space, name='action')
-        self.set_random_seed(seed)
         self.last_value = tf.zeros((1, 1), dtype=tf.float32)
+
+        # Record:
+        if isinstance(traces_dir, str):
+            self.should_record = True
+            self.traces_dir = utils.makedir(traces_dir, name)
+        else:
+            self.should_record = False
 
         # Data options
         self.drop_batch_reminder = drop_batch_reminder
@@ -53,10 +63,15 @@ class Agent:
             tf.random.set_seed(seed)
             np.random.seed(seed)
             random.seed(seed)
+
             self.env.seed(seed)
+            self.seed = seed
             print(f'Random seed {seed} set.')
 
     def act(self, state):
+        pass
+
+    def record(self, *args, **kwargs):
         pass
 
     def update(self):

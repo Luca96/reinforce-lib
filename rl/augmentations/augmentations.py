@@ -58,7 +58,10 @@ def tf_coarse_dropout(image, size=25, amount=0.1, seed=None):
     return image * drop_mask
 
 
-# TODO: rotation (90, 180, 270, random?), shear, shift
+def tf_rotate(image, degrees=90):
+    assert degrees % 90 == 0
+    return tf.image.rot90(image, k=degrees // 90)
+
 
 # -------------------------------------------------------------------------------------------------
 # -- Appearance Augmentations
@@ -120,8 +123,10 @@ def tf_median_blur(image, size=5):
     return image
 
 
-# TODO: rename...
-def tf_color_jitter(image, strength=1.0, seed=None):
+def tf_multiply_channels(image, strength=1.0, seed=None):
+    """Channel-wise multiplication of given image by random scalars. The scalars sum to one, each scalar multiplies
+       an entire channel
+    """
     assert len(image.shape) == 3
 
     logits = tf.random.uniform(shape=(image.shape[2],), minval=-1, maxval=1, seed=seed)
@@ -151,10 +156,10 @@ def tf_sobel(image, grayscale=False, restore_depth=True, normalize=True):
 
 # -------------------------------------------------------------------------------------------------
 
-def tf_normalize(image):
-    """Scale the given image in range [0.0, 1.0]"""
+def tf_normalize(image, eps=utils.EPSILON):
+    """Scales the given image in range [0.0, 1.0]"""
     image -= tf.reduce_min(image)
-    image /= tf.reduce_max(image)
+    image /= tf.reduce_max(image) + eps
     return image
 
 

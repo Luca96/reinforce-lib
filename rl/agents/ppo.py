@@ -20,12 +20,13 @@ class PPOAgent(Agent):
     # TODO: implement 'action repetition'?
     # TODO: 'value_loss' a parameter that selects the loss (either 'mse' or 'huber') for the value network
     # TODO: 'noise' is broken...
+    # TODO: implement value function clipping?
     def __init__(self, *args, policy_lr: Union[float, LearningRateSchedule] = 1e-3, gamma=0.99, lambda_=0.95,
-                 value_lr: Union[float, LearningRateSchedule] = 3e-4, optimization_steps=(10, 10), target_kl=False,
+                 value_lr: Union[float, LearningRateSchedule] = 3e-4, optimization_steps=(1, 1), target_kl=False,
                  noise: Union[float, DynamicParameter] = 0.0, clip_ratio: Union[float, DynamicParameter] = 0.2,
                  load=False, name='ppo-agent', entropy_regularization: Union[float, DynamicParameter] = 0.0,
-                 mixture_components=1, clip_norm=(1.0, 1.0), optimizer='adam', traces_dir: str = None,
-                 network: Union[dict, PPONetwork] = None, **kwargs):
+                 mixture_components=1, clip_norm=(1.0, 1.0), optimizer='adam', network: Union[dict, PPONetwork] = None,
+                **kwargs):
         super().__init__(*args, name=name, **kwargs)
 
         self.memory = None
@@ -33,13 +34,6 @@ class PPOAgent(Agent):
         self.lambda_ = lambda_
         self.mixture_components = mixture_components
         self.min_float = tf.constant(np.finfo(np.float32).eps, dtype=tf.float32)
-
-        # Record:
-        if isinstance(traces_dir, str):
-            self.should_record = True
-            self.traces_dir = utils.makedir(traces_dir, name)
-        else:
-            self.should_record = False
 
         # Entropy regularization
         if isinstance(entropy_regularization, DynamicParameter):
@@ -145,6 +139,9 @@ class PPOAgent(Agent):
         self.advantages = utils.IncrementalStatistics()
 
         # Networks & Loading
+        self.weights_path = dict(policy=os.path.join(self.base_path, 'policy_net'),
+                                 value=os.path.join(self.base_path, 'value_net'))
+
         if isinstance(network, PPONetwork):
             self.network = network(agent=self)
 
@@ -169,10 +166,12 @@ class PPOAgent(Agent):
         # Compute advantages and returns:
         advantages = self.get_advantages()
         returns = self.get_returns()
-
+        #
+        # self.log(advantages=advantages, values=self.memory.values)
         self.log(returns=returns, advantages=advantages, values=self.memory.values)
 
         # Prepare data: (states, returns) and (states, advantages, actions, log_prob)
+        # value_batches = self.get_value_batches(advantages)
         value_batches = self.get_value_batches(returns)
         policy_batches = self.get_policy_batches(advantages)
 
@@ -218,12 +217,17 @@ class PPOAgent(Agent):
 
         print(f'Update took {round(time.time() - t0, 3)}s')
 
-    def get_value_batches(self, returns):
+    def get_value_batches(self, advantages):
         """Computes batches of data for updating the value network"""
-        return utils.data_to_batches(tensors=self.value_batch_tensors(returns), batch_size=self.batch_size,
+        # TODO: does sharding makes sense for "supervised" value estimation?
+        return utils.data_to_batches(tensors=self.value_batch_tensors(advantages), batch_size=self.batch_size,
                                      drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
-                                     map_fn=self.preprocess(),
-                                     num_shards=self.obs_skipping, shuffle_batches=self.shuffle_batches)
+                                     map_fn=self.preprocess(), shuffle=True, shuffle_batches=False,
+                                     num_shards=self.obs_skipping)
+
+    # def value_batch_tensors(self, advantages) -> Union[tuple, dict]:
+    #     """Defines which data to use in `get_value_batches()`"""
+    #     return self.memory.states, advantages, self.memory.values[:-1]
 
     def value_batch_tensors(self, returns) -> Union[tuple, dict]:
         """Defines which data to use in `get_value_batches()`"""
@@ -240,13 +244,20 @@ class PPOAgent(Agent):
         """Defines which data to use in `get_policy_batches()`"""
         return self.memory.states, advantages, self.memory.actions, self.memory.log_probabilities
 
-    # @tf.function
+    @tf.function
     def value_objective(self, batch):
         states, returns = batch[:2]
         values = self.network.value(states, training=True)
-        # tf.print(values)
-        # tf.print(returns)
-        return tf.reduce_mean(losses.mean_squared_error(y_true=returns, y_pred=values))
+
+        return 0.5 * tf.reduce_mean(losses.mean_squared_error(y_true=returns, y_pred=values))
+
+    # def value_objective(self, batch):
+    #     """Source: http://gradientscience.org/policy_gradients_pt2#mjx-eqn-eqgaeloss"""
+    #     states, advantages, old_values = batch[:3]
+    #     values = self.network.value(states, training=True)
+    #
+    #     loss = 0.5 * tf.square(values - (advantages + old_values))
+    #     return tf.reduce_mean(loss)
 
     def policy_objective(self, batch):
         """PPO-Clip Objective"""
@@ -291,24 +302,39 @@ class PPOAgent(Agent):
 
         return total_loss, tf.reduce_mean(kl_divergence)
 
-    def get_advantages(self):
-        advantages = utils.gae(rewards=self.memory.rewards, values=self.memory.values, gamma=self.gamma,
-                               lambda_=self.lambda_, normalize=False)
-        self.advantages.update(advantages)
-        self.log(advantages_mean=[self.advantages.mean], advantages_std=[self.advantages.std])
+    # def get_advantages(self):
+    #     advantages = utils.gae(rewards=self.memory.rewards, values=self.memory.values, gamma=self.gamma,
+    #                            lambda_=self.lambda_, normalize=False)
+    #     self.advantages.update(advantages)
+    #     self.log(advantages_mean=[self.advantages.mean], advantages_std=[self.advantages.std])
+    #
+    #     return tf.cast((advantages - self.advantages.mean) / self.advantages.std, dtype=tf.float32)
 
-        return tf.cast((advantages - self.advantages.mean) / self.advantages.std, dtype=tf.float32)
+    # def get_advantages(self):
+    #     returns = utils.rewards_to_go(self.memory.rewards, discount=self.gamma)
+    #     adv = utils.gae(rewards=self.memory.rewards, values=returns, gamma=self.gamma,
+    #                     lambda_=self.lambda_, normalize=False)
+    #     return tf.cast(adv, dtype=tf.float32)
+
+    def get_advantages(self):
+        adv = utils.gae(rewards=self.memory.rewards, values=self.memory.values, gamma=self.gamma,
+                        lambda_=self.lambda_, normalize=False)
+        return tf.cast(adv, dtype=tf.float32)
+
+    # def get_returns(self):
+    #     returns = utils.rewards_to_go(rewards=self.memory.rewards, discount=self.gamma, normalize=False)
+    #     self.returns.update(returns)
+    #     self.log(returns_mean=[self.returns.mean], returns_std=[self.returns.std])
+    #
+    #     # normalize using running mean and std:
+    #     return (returns - self.returns.mean) / self.returns.std
 
     def get_returns(self):
         returns = utils.rewards_to_go(rewards=self.memory.rewards, discount=self.gamma, normalize=False)
-        self.returns.update(returns)
-        self.log(returns_mean=[self.returns.mean], returns_std=[self.returns.std])
-
-        # normalize using running mean and std:
-        return (returns - self.returns.mean) / self.returns.std
+        return tf.cast(returns, dtype=tf.float32)
 
     def learn(self, episodes: int, timesteps: int, save_every: Union[bool, str, int] = False,
-              render_every: Union[bool, str, int] = False):
+              render_every: Union[bool, str, int] = False, close=True):
         if save_every is False:
             save_every = episodes + 1
         elif save_every is True:
@@ -372,13 +398,17 @@ class PPOAgent(Agent):
                 self.write_summaries()
 
                 if self.should_record:
-                    self.memory.serialize(episode, save_path=self.traces_dir)
+                    self.record(episode)
 
                 if episode % save_every == 0:
                     self.save()
         finally:
-            print('closing...')
-            self.env.close()
+            if close:
+                print('closing...')
+                self.env.close()
+
+    def record(self, episode: int):
+        self.memory.serialize(episode, save_path=self.traces_dir)
 
     def summary(self):
         self.network.summary()

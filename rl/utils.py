@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import tensorflow_probability as tfp
 import random
 
-from typing import Union, List, Dict, Tuple
+from typing import Union, List, Dict, Tuple, Optional
 from datetime import datetime
 
 from gym import spaces
@@ -18,7 +18,8 @@ from gym import spaces
 # -- Constants
 # -------------------------------------------------------------------------------------------------
 
-EPSILON = tf.constant(np.finfo(np.float32).eps, dtype=tf.float32)
+NP_EPS = np.finfo(np.float32).eps
+EPSILON = tf.constant(NP_EPS, dtype=tf.float32)
 
 OPTIMIZERS = dict(adadelta=tf.keras.optimizers.Adadelta,
                   adagrad=tf.keras.optimizers.Adagrad,
@@ -55,10 +56,13 @@ def discount_cumsum(x, discount: float):
 
 def gae(rewards, values, gamma: float, lambda_: float, normalize=False):
     rewards = tf.expand_dims(rewards, axis=-1)
-    deltas = rewards[:-1] + tf.math.multiply(values[1:], gamma) - values[:-1]
+    deltas = rewards[:-1] + gamma * values[1:] - values[:-1]
     advantages = discount_cumsum(deltas, discount=gamma * lambda_)
 
     if normalize:
+        # advantages = tf.cast(advantages, tf.float32)
+        # advantages -= tf.reduce_min(advantages)
+        # advantages /= tf.reduce_max(advantages) + EPSILON
         advantages = tf_normalize(advantages)
 
     return advantages
@@ -68,7 +72,10 @@ def rewards_to_go(rewards, discount: float, normalize=False):
     returns = discount_cumsum(rewards, discount=discount)[:-1]
 
     if normalize:
-        returns = np_normalize(returns)
+        returns = tf.cast(returns, tf.float32)
+        returns -= tf.reduce_min(returns)
+        returns /= tf.reduce_max(returns) + EPSILON
+        # returns = np_normalize(returns)
 
     return returns
 
@@ -215,9 +222,12 @@ def tf_normalize(x):
 
 
 def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batches=False, seed=None,
-                    drop_remainder=False, map_fn=None, prefetch_size=2, num_shards=1, skip=0):
+                    drop_remainder=False, map_fn=None, prefetch_size=2, num_shards=1, skip=0, shuffle=False):
     """Transform some tensors data into a dataset of mini-batches"""
     dataset = tf.data.Dataset.from_tensor_slices(tensors).skip(count=skip)
+
+    if shuffle:
+        dataset = dataset.shuffle(buffer_size=batch_size, seed=seed, reshuffle_each_iteration=True)
 
     if num_shards > 1:
         # "observation skip trick" with tf.data.Dataset.shard()
@@ -271,6 +281,25 @@ def batch_norm_relu6(layer: tf.keras.layers.Layer):
 
 
 @tf.function
+def lisht(x):
+    """Non-Parameteric Linearly Scaled Hyperbolic Tangent Activation Function
+       Sources:
+        - https://www.tensorflow.org/addons/api_docs/python/tfa/activations/lisht
+        - https://arxiv.org/abs/1901.05894
+    """
+    return tf.multiply(x, tf.nn.tanh(x))
+
+
+@tf.function
+def mish(x):
+    """A Self Regularized Non-Monotonic Neural Activation Function
+       Source:
+        - https://www.tensorflow.org/addons/api_docs/python/tfa/activations/mish
+    """
+    return tf.multiply(x, tf.nn.tanh(tf.nn.softplus(x)))
+
+
+@tf.function
 def kl_divergence(log_a, log_b):
     """Kullback-Leibler divergence
         - Source: https://www.tensorflow.org/api_docs/python/tf/keras/losses/KLD
@@ -293,6 +322,10 @@ def to_float(tensor):
     return tf.cast(tensor, dtype=tf.float32)
 
 
+def tf_dot_product(x, y):
+    return tf.reduce_sum(tf.multiply(x, y))
+
+
 # -------------------------------------------------------------------------------------------------
 # -- File utils
 # -------------------------------------------------------------------------------------------------
@@ -313,14 +346,20 @@ def file_names(dir_path: str, sort=True) -> list:
     return list(files)
 
 
-def load_traces(traces_dir: str, shuffle=False):
+def load_traces(traces_dir: str, max_amount: Optional[int] = None, shuffle=False):
     if shuffle:
         trace_names = file_names(traces_dir, sort=False)
         random.shuffle(trace_names)
     else:
         trace_names = file_names(traces_dir, sort=True)
 
-    for name in trace_names:
+    if max_amount is None:
+        max_amount = np.inf
+
+    for i, name in enumerate(trace_names):
+        if i >= max_amount:
+            return
+
         yield np.load(file=os.path.join(traces_dir, name))
 
 
@@ -336,11 +375,14 @@ def unpack_trace(trace: dict) -> tuple:
         if sum(k.startswith(name) for k in trace_keys) == 1:
             continue
 
-        # select keys of the form 'state_xxx', then build a dict(state_x=trace['state_x'])
+        # select keys of the form 'state_xyz', then build a dict(state_xyz=trace['state_xyz'])
         keys = filter(lambda k: k.startswith(name + '_'), trace_keys)
         trace[name] = {k: trace[k] for k in keys}
 
-    return trace['state'], trace['action'], trace['reward'], trace['done']
+    if 'done' not in trace:
+        trace['done'] = None
+
+    return trace['state'], trace['action'], tf.cast(trace['reward'], dtype=tf.float32), trace['done']
 
 
 # -------------------------------------------------------------------------------------------------
@@ -419,25 +461,39 @@ class Statistics:
 
 class IncrementalStatistics:
     """Compute mean, variance, and standard deviation incrementally."""
-    def __init__(self):
+    def __init__(self, epsilon=NP_EPS, max_count=10e8):
         self.mean = 0.0
         self.variance = 0.0
         self.std = 0.0
         self.count = 0
 
-    def update(self, x):
+        self.eps = epsilon
+        self.max_count = int(max_count)  # fix: cannot convert 10e8 to EagerTensor of type int32
+
+    def update(self, x, normalize=False):
         old_mean = self.mean
         new_mean = tf.reduce_mean(x)
         m = self.count
         n = tf.shape(x)[0]
         c1 = m / (m + n)
         c2 = n / (m + n)
-        c3 = (m * n) / (m + n) ** 2
+
+        # more numerically stable than `c3 = (m * n) / (m + n + eps) ** 2` (no square at the denominator,
+        # does not go to infinite but could became zero when m -> inf, so `m` should be clipped as well)
+        c3 = 1.0 / ((m / n) + 2.0 + (n / m))
 
         self.mean = c1 * old_mean + c2 * new_mean
-        self.variance = c1 * self.variance + c2 * tf.math.reduce_variance(x) + c3 * (old_mean - new_mean) ** 2
+        self.variance = c1 * self.variance + c2 * tf.math.reduce_variance(x) + c3 * (old_mean - new_mean) ** 2 + self.eps
         self.std = tf.sqrt(self.variance)
-        self.count += n
+
+        # limit accumulating values to avoid numerical instability
+        self.count = min(self.count + n, self.max_count)
+
+        if normalize:
+            return self.normalize(x)
+
+    def normalize(self, values, eps=NP_EPS):
+        return tf.cast((values - self.mean) / (self.std + eps), dtype=tf.float32)
 
     def set(self, mean: float, variance: float, std: float, count: int):
         self.mean = mean

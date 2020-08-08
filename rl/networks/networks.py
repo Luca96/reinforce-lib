@@ -21,7 +21,7 @@ class PPONetwork(Network):
 
         self.agent: PPOAgent = agent
         self.distribution = self.agent.distribution_type
-        self.mixture_components = self.agent.mixture_components
+        self.mixture_components = self.agent.mixture_components  # TODO: unused
 
         # policy and value networks
         self.policy = self.policy_network(**kwargs)
@@ -127,10 +127,15 @@ class PPONetwork(Network):
 
         return Model(list(inputs.values()), outputs=action, name='Policy-Network')
 
-    def value_network(self, **kwargs):
+    def value_network(self, mixture_components=3, **kwargs):
         inputs = self._get_input_layers()
         last_layer = self.value_layers(inputs, **kwargs)
-        value = Dense(units=1, activation=None, dtype=tf.float32, name='value_head')(last_layer)
+        # value = Dense(units=1, activation=None, dtype=tf.float32, name='value_head')(last_layer)
+
+        # Gaussian value-head
+        num_params = tfp.layers.MixtureNormal.params_size(mixture_components, event_shape=(1,))
+        params = Dense(units=num_params, activation=utils.lisht, name='value-parameters')(last_layer)
+        value = tfp.layers.MixtureNormal(mixture_components, event_shape=(1,))(params)
 
         return Model(list(inputs.values()), outputs=value, name='Value-Network')
 

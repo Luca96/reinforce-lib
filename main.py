@@ -29,13 +29,25 @@ def ppo_lunar_lander_discrete(e=200, t=200, b=20, load=False):
     env = gym.make('LunarLander-v2')
     utils.print_info(env)
 
+    # best: (batch: 50) 500 epochs 1e-3/3e-4 + 500 epochs half lr [value_objective 2]
+    # agent = PPOAgent(env,
+    #                  policy_lr=schedules.ExponentialSchedule(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True),
+    #                  value_lr=schedules.ExponentialSchedule(3e-4, decay_steps=2000, decay_rate=0.95, staircase=True),
+    #                  clip_ratio=0.05,
+    #                  lambda_=0.95, entropy_regularization=0.0, name='ppo-LunarLander-discrete',
+    #                  optimization_steps=(1, 1), batch_size=b, clip_norm=(0.5, 0.5),
+    #                  log_mode='summary', load=load, seed=42)
+    # agent.drop_batch_reminder = True
+
     agent = PPOAgent(env,
                      policy_lr=schedules.ExponentialSchedule(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True),
-                     value_lr=schedules.ExponentialSchedule(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True),
+                     value_lr=schedules.ExponentialSchedule(3e-4, decay_steps=2000, decay_rate=0.95, staircase=True),
                      clip_ratio=0.05,
-                     lambda_=0.95, entropy_regularization=0.0, name='ppo-LunarLander-discrete',
-                     optimization_steps=(1, 2), batch_size=b,
+                     lambda_=0.95, entropy_regularization=0.001, name='ppo-LunarLander-discrete',
+                     optimization_steps=(1, 2 - 1), batch_size=b, clip_norm=(0.5, 0.5),
+                     network=dict(units=64, num_layers=2, activation=utils.lisht),
                      log_mode='summary', load=load, seed=42)
+    agent.drop_batch_reminder = True
 
     agent.learn(episodes=e, timesteps=t, render_every=10, save_every='end')
 
@@ -147,7 +159,7 @@ if __name__ == '__main__':
     # gym_test()
     # reinforce_test()
     # ppo_cartpole_test()
-    # ppo_lunar_lander_discrete(e=200, t=200, b=40)
+    ppo_lunar_lander_discrete(e=500, t=200, b=40, load=False)
     # ppo_pendulum(e=200, t=200, b=64, load=False)
     # ppo_lunar_lander(e=500, t=200, b=32, load=False)
     # ppo_mountain_car(e=400, t=1000, b=100, load=False)

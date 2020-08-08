@@ -131,26 +131,24 @@ class Agent(object):
 
         return carla.Location(point_location.x, point_location.y, point_location.z)
 
-    def _bh_is_vehicle_hazard(self, ego_wpt, ego_loc, vehicle_list, proximity_th, up_angle_th,
-                              low_angle_th=0, lane_offset=0):
+    def _bh_is_vehicle_hazard(self, ego_wpt, ego_loc, vehicle_list, proximity_th, up_angle_th, low_angle_th=0,
+                              lane_offset=0):
         """
         Check if a given vehicle is an obstacle in our way. To this end we take
         into account the road and lane the target vehicle is on and run a
         geometry test to check if the target vehicle is under a certain distance
         in front of our ego vehicle. We also check the next waypoint, just to be
         sure there's not a sudden road id change.
-
         WARNING: This method is an approximation that could fail for very large
         vehicles, which center is actually on a different lane but their
         extension falls within the ego vehicle lane. Also, make sure to remove
         the ego vehicle from the list. Lane offset is set to +1 for right lanes
         and -1 for left lanes, but this has to be inverted if lane values are
         negative.
-
             :param ego_wpt: waypoint of ego-vehicle
             :param ego_log: location of ego-vehicle
             :param vehicle_list: list of potential obstacle to check
-            :param proximity_th: threshold for the agents to be alerted of
+            :param proximity_th: threshold for the agent to be alerted of
             a possible collision
             :param up_angle_th: upper threshold for angle
             :param low_angle_th: lower threshold for angle
@@ -167,18 +165,10 @@ class Agent(object):
             lane_offset *= -1
 
         for target_vehicle in vehicle_list:
-
             target_vehicle_loc = target_vehicle.get_location()
+
             # If the object is not in our next or current lane it's not an obstacle
-
             target_wpt = self._map.get_waypoint(target_vehicle_loc)
-
-            if target_wpt is None:
-                target_wpt = self._map.get_waypoint(
-                    target_vehicle_loc, project_to_road=True,
-                    lane_type=carla.LaneType.Driving & carla.LaneType.Shoulder)
-
-            assert target_wpt is not None
 
             if target_wpt.road_id != ego_wpt.road_id or \
                     target_wpt.lane_id != ego_wpt.lane_id + lane_offset:
