@@ -13,6 +13,9 @@ from datetime import datetime
 
 from gym import spaces
 
+from tensorflow.keras.optimizers.schedules import LearningRateSchedule
+from rl.parameters import ScheduleWrapper
+
 
 # -------------------------------------------------------------------------------------------------
 # -- Constants
@@ -94,6 +97,10 @@ def depth_concat(*arrays):
     return np.concatenate(*arrays, axis=-1)
 
 
+# -------------------------------------------------------------------------------------------------
+# -- Plot utils
+# -------------------------------------------------------------------------------------------------
+
 def plot_images(images: list):
     """Plots a list of images, arranging them in a rectangular fashion"""
     num_plots = len(images)
@@ -107,6 +114,20 @@ def plot_images(images: list):
 
     plt.subplots_adjust(wspace=0, hspace=0)
     plt.show()
+
+
+def plot_lr_schedule(lr_schedule: Union[ScheduleWrapper, LearningRateSchedule], iterations: int, initial_step=0,
+                     show=True):
+    assert iterations > 0
+
+    if isinstance(lr_schedule, LearningRateSchedule):
+        lr_schedule = ScheduleWrapper(lr_schedule)
+
+    data = [lr_schedule(step=i + initial_step) for i in range(iterations)]
+    plt.plot(data)
+
+    if show:
+        plt.show()
 
 
 # -------------------------------------------------------------------------------------------------

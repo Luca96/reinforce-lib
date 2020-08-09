@@ -16,7 +16,7 @@ class Network:
 # TODO: disentangle policy-net from value-net, so that each of them can be arbitrary subclassed, moreover a
 #  Network class can be composed by these policy/value/Q-network classes...
 class PPONetwork(Network):
-    def __init__(self, agent, **kwargs):
+    def __init__(self, agent, policy: dict, value: dict):
         from rl.agents.ppo import PPOAgent
 
         self.agent: PPOAgent = agent
@@ -24,8 +24,8 @@ class PPONetwork(Network):
         self.mixture_components = self.agent.mixture_components  # TODO: unused
 
         # policy and value networks
-        self.policy = self.policy_network(**kwargs)
-        self.value = self.value_network(**kwargs)
+        self.policy = self.policy_network(**policy)
+        self.value = self.value_network(**value)
 
     @tf.function
     def predict(self, inputs: Union[tf.Tensor, List[tf.Tensor], Dict[str, tf.Tensor]]):
@@ -133,31 +133,19 @@ class PPONetwork(Network):
         # value = Dense(units=1, activation=None, dtype=tf.float32, name='value_head')(last_layer)
 
         # Gaussian value-head
-        num_params = tfp.layers.MixtureNormal.params_size(mixture_components, event_shape=(1,))
-        params = Dense(units=num_params, activation=utils.lisht, name='value-parameters')(last_layer)
-        value = tfp.layers.MixtureNormal(mixture_components, event_shape=(1,))(params)
+        value = self.value_head(last_layer, mixture_components=mixture_components)
 
         return Model(list(inputs.values()), outputs=value, name='Value-Network')
 
-    # def get_distribution_layer(self, layer: Layer) -> tfp.layers.DistributionLambda:
-    #     if self.distribution_type == 'categorical':
-    #         num_params = tfp.layers.CategoricalMixtureOfOneHotCategorical.params_size(
-    #             event_size=self.action_shape[1], num_components=self.mixture_components)
-    #
-    #         layer = Dense(units=num_params, activation=None, name='logits')(layer)
-    #
-    #         return tfp.layers.CategoricalMixtureOfOneHotCategorical(
-    #             event_size=self.action_shape, num_components=self.mixture_components, sample_dtype=tf.int32)(layer)
-    #
-    #     if self.distribution_type == 'beta':
-    #         raise NotImplementedError
-    #
-    #     if self.distribution_type == 'gaussian':
-    #         num_params = tfp.layers.MixtureNormal.params_size(self.mixture_components, event_shape=self.action_shape)
-    #
-    #         layer = Dense(units=num_params, activation=None)(layer)
-    #
-    #         return tfp.layers.MixtureNormal(self.mixture_components, event_shape=self.action_shape)(layer)
+    def value_head(self, last_layer: Layer, **kwargs):
+        mixture_components = kwargs.get('mixture_components', 3)
+        activation = kwargs.get('activation', tf.nn.swish)
+
+        # Gaussian value-head
+        num_params = tfp.layers.MixtureNormal.params_size(mixture_components, event_shape=(1,))
+        params = Dense(units=num_params, activation=activation, name='value-parameters')(last_layer)
+
+        return tfp.layers.MixtureNormal(mixture_components, event_shape=(1,))(params)
 
     def get_distribution_layer(self, layer: Layer) -> tfp.layers.DistributionLambda:
         # Discrete actions:

@@ -1,58 +1,41 @@
-
 """Learning rate schedules"""
 
-import tensorflow as tf
-
-from rl.agents import Agent
 from tensorflow.keras.optimizers import schedules
 
 
-# class ScheduleWrapper:
-#     """Wraps a LearningRateSchedule instance"""
-#     def __init__(self, agent: Agent, schedule: schedules.LearningRateSchedule, name: str):
-#         self.agent = agent
-#         self.schedule = schedule
-#         self.name = name
-#
-#     def __call__(self, step):
-#         print('my __call__')
-#         learning_rate = self.schedule(step)
-#         self.agent.log(**{f'learning_rate_{self.name}': learning_rate})
-#         return learning_rate
-
-
 class Schedule:
-    pass
+    """Interface for learning rate schedule wrappers"""
+    def serialize(self) -> dict:
+        return {}
 
 
-class ExponentialSchedule(schedules.ExponentialDecay, Schedule):
-    """Exponential learning rate schedule"""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+# TODO: decay/new lr on new episode (optional)
+class ScheduleWrapper(schedules.LearningRateSchedule, Schedule):
+    """A wrapper for built-in tf.keras' learning rate schedules"""
+    def __init__(self, lr_schedule: schedules.LearningRateSchedule, offset=0):
+        self.lr_schedule = lr_schedule
         self.lr = None
 
+        # variables for saving/loading
+        self.step_offset = offset
+        self.step = 0
+
     def __call__(self, step):
-        self.lr = super().__call__(step)
+        self.step = step + self.step_offset
+        self.lr = self.lr_schedule.__call__(self.step)
         return self.lr
 
+    def get_config(self) -> dict:
+        return self.lr_schedule.get_config()
 
-class PolynomialSchedule(schedules.PolynomialDecay, Schedule):
-    """Polynomial learning rate schedule"""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.lr = None
-
-    def __call__(self, step):
-        self.lr = super().__call__(step)
-        return self.lr
+    def serialize(self) -> dict:
+        return dict(step_offset=int(self.step))
 
 
-class InverseTimeSchedule(schedules.InverseTimeDecay, Schedule):
-    """Inverse-time learning rate schedule"""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.lr = None
+class ConstantSchedule(Schedule):
+    """A constant learning rate schedule that wraps a constant float learning rate value"""
+    def __init__(self, lr: float):
+        self.lr = lr
 
-    def __call__(self, step):
-        self.lr = super().__call__(step)
+    def __call__(self):
         return self.lr

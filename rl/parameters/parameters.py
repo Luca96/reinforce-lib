@@ -1,128 +1,50 @@
+"""Dynamic step-dependent parameters"""
 
-import math
+from tensorflow.keras.optimizers.schedules import LearningRateSchedule, ExponentialDecay
 
 
-# TODO: serialize as dict, set state from dict
 class DynamicParameter:
-    """Base class for dynamic (step-dependent) parameters"""
-    def __init__(self, initial: float, final: float, steps: int, restart=False, decay_on_restart=None):
-        assert isinstance(steps, int) and steps > 0
-        assert isinstance(restart, bool)
+    """Interface for learning rate schedule wrappers as dynamic-parameters"""
+    def __init__(self):
+        self.value = 0
+        self.step = 0
 
-        self.initial_value = initial
-        self.final_value = final
-        self.value = self.initial_value
-        self.should_restart = restart
-        self.should_decay_on_restart = isinstance(decay_on_restart, float)
-        self.restart_decay_rate = decay_on_restart
-        self.step_counter = 0
-        self.max_steps = steps
+    def serialize(self) -> dict:
+        return dict(step=int(self.step))
 
-    def __repr__(self) -> str:
-        raise NotImplementedError
+    def load(self, config: dict):
+        self.step = config.get('step', 0)
 
-    def __call__(self, *args, **kwargs) -> float:
-        """Returns the (decayed) value of this parameter"""
-        if self.step_counter == 0:
-            self.step_counter += 1
-            return self.initial_value
 
-        if self.step_counter > self.max_steps:
-            if self.should_restart:
-                self.restart()
-            else:
-                return self.value
+# TODO: decay on new episode (optional)
+class ParameterWrapper(LearningRateSchedule, DynamicParameter):
+    """A wrapper for built-in tf.keras' learning rate schedules"""
+    def __init__(self, schedule: LearningRateSchedule):
+        super().__init__()
+        self.schedule = schedule
 
-        self.value = self.compute_value()
-        self.step_counter += 1
+    def __call__(self, *args, **kwargs):
+        self.step += 1
+        self.value = self.schedule.__call__(self.step)
         return self.value
 
-    def compute_value(self):
-        raise NotImplementedError
-
-    def restart(self):
-        self.step_counter = 0
-
-        if self.should_decay_on_restart:
-            self.initial_value *= self.restart_decay_rate
-
-        self.value = self.initial_value
-
-    def as_dict(self) -> dict:
-        """Represents the current instance as a dict"""
-        return dict(initial_value=self.initial_value, final_value=self.final_value, value=self.value,
-                    should_restart=self.should_restart, should_restart_on_decay=self.should_decay_on_restart,
-                    step_counter=self.step_counter, max_steps=self.max_steps)
-
-    def from_dict(self, state: dict):
-        for key, value in state.items():
-            self.__setattr__(key, value)
+    def get_config(self) -> dict:
+        return self.schedule.get_config()
 
 
-class ExponentialParameter(DynamicParameter):
-    """Exponential Parameter"""
-    def __init__(self, rate: float, base=math.e, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.base = base
-        self.rate = 1 / (rate + 1e-7)
-        self.delta = self.initial_value - self.final_value
-
-    def __repr__(self) -> str:
-        return f'ExponentialParameter(initial={self.initial_value}, final={self.final_value}, steps={self.max_steps}, ' \
-               f'rate={self.rate}, restart={self.should_restart}, decay_on_restart={self.restart_decay_rate})'
-
-    def compute_value(self, *args, **kwargs):
-        t = self.step_counter / self.max_steps
-        return self.delta * self.base**(-self.rate * t) + self.final_value
-
-    def restart(self):
-        super().restart()
-
-        if self.should_decay_on_restart:
-            self.delta = self.initial_value - self.final_value
-
-
-class LinearParameter(DynamicParameter):
-    """Linear Parameter"""
-    def __init__(self, *args, rate=1.0, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.rate = rate
-        self.decay_rate = (self.initial_value - self.final_value) / self.max_steps
-
-    def __repr__(self) -> str:
-        return f'LinearParameter(initial={self.initial_value}, final={self.final_value}, steps={self.max_steps}, ' \
-               f'rate={self.rate}, restart={self.should_restart}, decay_on_restart={self.restart_decay_rate})'
-
-    def compute_value(self, *args, **kwargs):
-        k = self.rate**(self.step_counter / self.max_steps)
-        return self.decay_rate * k * (self.max_steps - self.step_counter) + self.final_value
-
-    def restart(self):
-        super().restart()
-
-        if self.should_decay_on_restart:
-            self.decay_rate = (self.initial_value - self.final_value) / self.max_steps
-
-
-class StepParameter(DynamicParameter):
-    """Step-Parameter"""
-    def __init__(self, value: float, *args, **kwargs):
-        super().__init__(*args, initial=value, final=value, **kwargs)
-
-    def __repr__(self) -> str:
-        return f'StepParameter(value={self.value}, steps={self.max_steps}, ' \
-               f'restart={self.should_restart}, decay_on_restart={self.restart_decay_rate})'
-
-    def compute_value(self):
-        return self.value
-
-
-class ConstantParameter(StepParameter):
-    """Constant parameter"""
+class ConstantParameter(DynamicParameter):
+    """A constant learning rate schedule that wraps a constant float learning rate value"""
     def __init__(self, value: float):
-        super().__init__(value=value, steps=1, restart=False)
+        super().__init__()
+        self.value = value
 
     def __call__(self, *args, **kwargs):
         return self.value
+
+    def serialize(self) -> dict:
+        return {}
+
+
+class StepDecay(ParameterWrapper):
+    def __init__(self, initial_learning_rate: float, decay_steps: int, decay_rate: float):
+        super().__init__(schedule=ExponentialDecay(initial_learning_rate, decay_steps, decay_rate, staircase=True))
