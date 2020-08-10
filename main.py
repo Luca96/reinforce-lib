@@ -70,10 +70,30 @@ def ppo_pendulum(e: int, t: int, b: int, load=False):
     pass
 
 
-def ppo_lunar_lander(e: int, t: int, b: int, load=False):
+def ppo_acrobot(e: int, t: int, b: int, load=False):
+    env = gym.make('Acrobot-v1')
+    utils.print_info(env)
+
+    agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3,
+                     clip_ratio=0.10, lambda_=0.95, entropy_regularization=0.0,
+                     name='ppo-acrobot',
+                     optimization_steps=(1, 2), batch_size=b, target_kl=None,
+                     log_mode='summary', load=load, seed=123)
+
+    agent.learn(episodes=e, timesteps=t, render_every=10, save_every='end')
+
+
+def ppo_lunar_lander(e: int, t: int, b: int, load=False, save_every='end'):
     env = gym.make('LunarLanderContinuous-v2')
     utils.print_info(env)
-    pass
+
+    agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.15,
+                     lambda_=0.95, entropy_regularization=0.0,
+                     name='ppo-LunarLander', clip_norm=0.5,
+                     optimization_steps=(1, 2), batch_size=b,
+                     log_mode='summary', load=load, seed=123)
+
+    agent.learn(episodes=e, timesteps=t, render_every=10, save_every=save_every)
 
 
 def ppo_mountain_car(e: int, t: int, b: int, load=False):
@@ -106,10 +126,11 @@ def ppo_car_racing_discrete(e: int, t: int, b: int, load=False):
 
 
 if __name__ == '__main__':
-    ppo_cartpole_test()
+    # ppo_cartpole_test()
+    # ppo_acrobot(e=200, t=200, b=32)
     # ppo_lunar_lander_discrete(e=500, t=200, b=40, load=False)
     # ppo_pendulum(e=200, t=200, b=64, load=False)
-    # ppo_lunar_lander(e=500, t=200, b=32, load=False)
+    ppo_lunar_lander(e=500, t=200, b=32, load=False, save_every=100)
     # ppo_mountain_car(e=400, t=1000, b=100, load=False)
     # ppo_car_racing_discrete(e=200, t=200, b=50, load=False)
     pass

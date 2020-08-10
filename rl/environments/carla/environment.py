@@ -41,7 +41,8 @@ class CARLABaseEnvironment(gym.Env):
 
     def __init__(self, address='localhost', port=2000, timeout=5.0, image_shape=(150, 200, 3), window_size=(800, 600),
                  vehicle_filter='vehicle.tesla.model3', fps=30.0, render=True, debug=True, spawn: dict = None,
-                 path: dict = None, town: str = None, weather=carla.WeatherParameters.ClearNoon, skip_frames=30):
+                 ignore_traffic_light=True, path: dict = None, town: str = None,
+                 weather=carla.WeatherParameters.ClearNoon, skip_frames=30):
         """Arguments:
             - spawn: dict(vehicle_filter: str, pedestrian_filter: str, pedestrians: int, vehicles: int, running: float,
                           crossing: float, hybrid: bool)
@@ -65,6 +66,9 @@ class CARLABaseEnvironment(gym.Env):
                                                   synchronous_mode=False,
                                                   fixed_delta_seconds=1.0 / fps)
         self.world.apply_settings(self.world_settings)
+
+        # Law compliance
+        self.ignore_traffic_light = ignore_traffic_light
 
         # Map
         if isinstance(town, str):
@@ -390,7 +394,9 @@ class CARLABaseEnvironment(gym.Env):
 
     def before_world_step(self):
         """Callback: called before world.tick()"""
-        pass
+        if self.ignore_traffic_light and self.vehicle.is_at_traffic_light():
+            traffic_light = self.vehicle.get_traffic_light()
+            traffic_light.set_state(carla.TrafficLightState.Green)
 
     def after_world_step(self, sensors_data: dict):
         """Callback: called after world.tick()."""
@@ -813,11 +819,17 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
     # High-level routing command (aka RoadOption)
     COMMAND_SPACE = spaces.Box(low=0.0, high=1.0, shape=(len(RoadOption),))
 
-    def __init__(self, *args, disable_reverse=False, camera='segmentation', **kwargs):
+    def __init__(self, *args, disable_reverse=False, min_throttle=0.0, camera='segmentation',
+                 hard_control_threshold: Union[float, None] = None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.disable_reverse = disable_reverse
         self.image_space = spaces.Box(low=-1.0, high=1.0, shape=self.image_shape)
         self.camera_type = camera
+
+        # control hack
+        self.disable_reverse = disable_reverse
+        self.min_throttle = min_throttle
+        self.should_harden_controls = isinstance(hard_control_threshold, float)
+        self.hard_control_threshold = hard_control_threshold
 
         # reward computation
         self.collision_penalty = 0.0
@@ -950,6 +962,11 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         else:
             speed_text = 'Speed %.1f km/h' % speed
 
+        if self.similarity >= 0.75:
+            similarity_text = 'Similarity %.2f' % self.similarity
+        else:
+            similarity_text = dict(text='Similarity %.2f' % self.similarity, color=(255, 0, 0))
+
         return ['%d FPS' % self.clock.get_fps(),
                 '',
                 'Throttle: %.2f' % self.control.throttle,
@@ -961,7 +978,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
                 'Speed limit %.1f km/h' % speed_limit,
                 'Distance travelled %.2f %s' % ((distance / 1000.0, 'km') if distance > 1000.0 else (distance, 'm')),
                 '',
-                'Similarity %.2f' % self.similarity,
+                similarity_text,
                 'Waypoint\'s Distance %.2f' % self.route.distance_to_next_waypoint(),
                 'Route Option: %s' % self.next_command.name,
                 'OP: %s' % self.next_command.to_one_hot(),
@@ -995,11 +1012,15 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         self._update_env_state()
 
     def actions_to_control(self, actions):
-        self.control.throttle = float(actions[0]) if actions[0] > 0 else 0.0
+        self.control.throttle = max(self.min_throttle, float(actions[0]) if actions[0] > 0 else 0.0)
         self.control.brake = float(-actions[0]) if actions[0] < 0 else 0.0
         self.control.steer = float(actions[1])
         self.control.reverse = bool(actions[2] > 0)
         self.control.hand_brake = False
+
+        if self.should_harden_controls and (utils.speed(self.vehicle) <= self.hard_control_threshold):
+            self.control.throttle = float(round(self.control.throttle))
+            self.control.brake = float(round(self.control.brake))
 
         if self.disable_reverse:
             self.control.reverse = False
@@ -1124,17 +1145,17 @@ class OneCameraCARLAEnvironmentDiscrete(OneCameraCARLAEnvironment):
         super().__init__(*args, **kwargs)
 
     def actions_to_control(self, actions):
-        super().actions_to_control(actions=self.interpolate(actions))
+        super().actions_to_control(actions=self.to_continuous(actions))
 
-    def interpolate(self, discrete_actions: list):
+    def to_continuous(self, discrete_actions: list):
         """Maps a discrete array of bins into their corresponding continuous values"""
         return self._delta * np.asarray(discrete_actions) + self._low
 
     def control_to_actions(self, control: carla.VehicleControl):
         actions = super().control_to_actions(control)
-        return self.interpolate_inverse(actions)
+        return self.to_discrete(actions)
 
-    def interpolate_inverse(self, continuous_actions: list):
+    def to_discrete(self, continuous_actions: list):
         """Maps a continuous array of values into their corresponding bins (i.e. inverse of `interpolate`)"""
         return ((np.asarray(continuous_actions) - self._low) / self._delta).astype('int')
 
@@ -1212,17 +1233,19 @@ class ThreeCameraCARLAEnvironmentDiscrete(ThreeCameraCARLAEnvironment):
         super().__init__(*args, **kwargs)
 
     def actions_to_control(self, actions):
-        super().actions_to_control(actions=self.interpolate(actions))
+        print(f'actions_to_control: d{actions} -> c{self.to_continuous(actions)}')
+        super().actions_to_control(actions=self.to_continuous(actions))
 
-    def interpolate(self, discrete_actions: list):
+    def to_continuous(self, discrete_actions: list):
         """Maps a discrete array of bins into their corresponding continuous values"""
         return self._delta * np.asarray(discrete_actions) + self._low
 
     def control_to_actions(self, control: carla.VehicleControl):
         actions = super().control_to_actions(control)
-        return self.interpolate_inverse(actions)
+        print(f'control_to_actions: {control} -> c{actions} -> d{self.to_discrete(actions)}')
+        return self.to_discrete(actions)
 
-    def interpolate_inverse(self, continuous_actions: list):
+    def to_discrete(self, continuous_actions: list):
         """Maps a continuous array of values into their corresponding bins (i.e. inverse of `interpolate`)"""
         return ((np.asarray(continuous_actions) - self._low) / self._delta).astype('int')
 

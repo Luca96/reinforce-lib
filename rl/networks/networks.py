@@ -173,12 +173,10 @@ class PPONetwork(Network):
 
             if self.mixture_components == 1:
                 # make a, b > 1, so that the Beta distribution is concave and unimodal (see paper above)
-                # alpha = Dense(units=self.num_actions, activation=utils.softplus_one, name='alpha')(layer)
-                # beta = Dense(units=self.num_actions, activation=utils.softplus_one, name='beta')(layer)
-
-                # TODO: seems more stable than above, but still not enough...
-                alpha = Dense(units=num_actions, activation='softplus', name='alpha')(layer)
-                beta = Dense(units=num_actions, activation='softplus', name='beta')(layer)
+                # TODO: set `use_bias=False` to both 'alpha' and 'beta' to improve performance?
+                # TODO: or constrain `biases` to have 0.1 or 0.001 norm...
+                alpha = Dense(units=num_actions, activation=utils.softplus(1.0 + utils.EPSILON), name='alpha')(layer)
+                beta = Dense(units=num_actions, activation=utils.softplus(1.0 + utils.EPSILON), name='beta')(layer)
 
                 return tfp.layers.DistributionLambda(
                     make_distribution_fn=lambda t: tfp.distributions.Beta(t[0], t[1]))([alpha, beta])

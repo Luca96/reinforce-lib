@@ -239,7 +239,8 @@ def to_tensor(x, expand_axis=0):
 # TODO: @tf.function
 def tf_normalize(x):
     """Normalizes some tensor x to 0-mean 1-stddev"""
-    return (x - tf.math.reduce_mean(x)) / tf.math.reduce_std(x)
+    x = tf.cast(x, dtype=tf.float32)
+    return (x - tf.math.reduce_mean(x)) / (tf.math.reduce_std(x) + EPSILON)
 
 
 def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batches=False, seed=None,
@@ -288,9 +289,12 @@ def tf_01_scaling(x):
     return x
 
 
-@tf.function
-def softplus_one(x):
-    return 1.0 + tf.nn.softplus(x)
+def softplus(value=1.0):
+    @tf.function
+    def activation(x):
+        return tf.nn.softplus(x) + value
+
+    return activation
 
 
 @tf.function
@@ -464,6 +468,8 @@ class Statistics:
                 # clear value_list, update step
                 self.stats[summary_name]['step'] += len(values)
                 self.stats[summary_name]['list'].clear()
+
+            self.tf_summary_writer.flush()
 
     def plot(self, colormap='Set3'):  # Pastel1, Set3, tab20b, tab20c
         """Colormaps: https://matplotlib.org/tutorials/colors/colormaps.html"""

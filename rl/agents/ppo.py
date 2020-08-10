@@ -73,19 +73,22 @@ class PPOAgent(Agent):
         if isinstance(network, dict):
             network_class = network.pop('network', PPONetwork)
 
-            # policy/value-specific arguments
-            policy_args = network.pop('policy', {})
-            value_args = network.pop('value', policy_args)
+            if network_class is PPONetwork:
+                # policy/value-specific arguments
+                policy_args = network.pop('policy', {})
+                value_args = network.pop('value', policy_args)
 
-            # common arguments
-            for k, v in network.items():
-                if k not in policy_args:
-                    policy_args[k] = v
+                # common arguments
+                for k, v in network.items():
+                    if k not in policy_args:
+                        policy_args[k] = v
 
-                if k not in value_args:
-                    value_args[k] = v
+                    if k not in value_args:
+                        value_args[k] = v
 
-            self.network = network_class(agent=self, policy=policy_args, value=value_args)
+                self.network = network_class(agent=self, policy=policy_args, value=value_args)
+            else:
+                self.network = network_class(agent=self, **network)
         else:
             self.network = PPONetwork(agent=self, policy={}, value={})
 
@@ -330,7 +333,6 @@ class PPOAgent(Agent):
         try:
             for episode in range(1, episodes + 1):
                 self.reset()
-                # TODO: `returns_stats` are computed independently for each episode!!
                 self.memory = PPOMemory(state_spec=self.state_spec, num_actions=self.num_actions)
 
                 state = self.env.reset()
@@ -404,7 +406,6 @@ class PPOAgent(Agent):
 
     def save_config(self):
         print('save config')
-        # self.update_config(returns=self.returns.as_dict(), advantages=self.advantages.as_dict())
         self.update_config(policy_lr=self.policy_lr.serialize(), value_lr=self.value_lr.serialize(),
                            entropy_strength=self.entropy_strength.serialize(), clip_ratio=self.clip_ratio.serialize())
         super().save_config()
@@ -412,9 +413,6 @@ class PPOAgent(Agent):
     def load_config(self):
         print('load config')
         super().load_config()
-
-        # self.returns.set(**self.config['returns'])
-        # self.advantages.set(**self.config['advantages'])
 
         self.entropy_strength.load(config=self.config.get('entropy_strength', 0))
         self.clip_ratio.load(config=self.config.get('clip_ratio', 0))
@@ -449,7 +447,6 @@ class PPOMemory:
         self.returns = None
         self.advantages = None
         self.returns_stats = utils.IncrementalStatistics()
-        # self.adv_stats = utils.IncrementalStatistics()
 
     def clear(self):
         pass
@@ -476,17 +473,8 @@ class PPOMemory:
 
     def compute_returns(self, discount: float):
         """Computes the returns, also called rewards-to-go"""
-        returns = utils.rewards_to_go(self.rewards, discount=discount, normalize=False)
-        # returns = tf.cast(returns, dtype=tf.float32)
-
-        # Normalize returns to reduce variance in `value_objective`. Keep its `mean` and `std` to
-        # de-normalize estimated values to the returns' original scale when computing advantages.
+        returns = utils.rewards_to_go(self.rewards, discount=discount)
         self.returns = self.returns_stats.update(returns, normalize=True)
-
-        # self.returns_mean = tf.reduce_mean(returns)
-        # self.returns_std = tf.math.reduce_std(returns) + utils.EPSILON
-        # self.returns = (returns - self.returns_mean) / self.returns_std
-
         return returns
 
     def compute_advantages(self, gamma: float, lambda_: float):
@@ -495,7 +483,6 @@ class PPOMemory:
         std = tf.cast(self.returns_stats.std, dtype=tf.float32)
         denormalized_values = mean + self.values * std
 
-        # denormalized_values = self.returns_std * self.values + self.returns_mean
         advantages = utils.gae(self.rewards, values=denormalized_values, gamma=gamma, lambda_=lambda_, normalize=True)
         self.advantages = tf.cast(advantages, dtype=tf.float32)
 
