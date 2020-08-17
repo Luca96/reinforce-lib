@@ -44,6 +44,15 @@ class CARLABaseEnvironment(gym.Env):
                  ignore_traffic_light=True, path: dict = None, town: str = None,
                  weather=carla.WeatherParameters.ClearNoon, skip_frames=30):
         """Arguments:
+            - path: dict =
+                - origin: dict(carla.Transform or 'point' or 'points', 'type': [fixed, route, map] or [random,
+                               sequential])
+                - destination: dict(carla.Transform or 'point' or 'points', 'type': [fixed, map] or [random,
+                               sequential]))
+                - length: int
+                - use_planner: bool
+                - sampling_resolution: float
+
             - spawn: dict(vehicle_filter: str, pedestrian_filter: str, pedestrians: int, vehicles: int, running: float,
                           crossing: float, hybrid: bool)
         """
@@ -679,7 +688,7 @@ class CARLACollectWrapper(CARLAWrapper):
         else:
             self.should_terminate = False
 
-    def collect(self, episodes: int, timesteps: int, agent_debug=False, episode_reward_threshold=0.0):
+    def collect(self, episodes: int, timesteps: int, agent_debug=False, episode_reward_threshold=0.0, close=True):
         self.init_buffer(num_timesteps=timesteps)
         env = self.env
         env.register_event(event=CARLAEvent.ON_COLLISION, callback=self.on_collision)
@@ -723,7 +732,8 @@ class CARLACollectWrapper(CARLAWrapper):
                     print(f'Trace-{episode} discarded because reward={round(episode_reward, 2)} below threshold!')
         finally:
             env.unregister_event(event=CARLAEvent.ON_COLLISION, callback=self.on_collision)
-            env.close()
+            if close:
+                env.close()
 
     def init_buffer(self, num_timesteps: int):
         # partial buffer: misses 'state' and 'action'
@@ -1013,6 +1023,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
 
     def actions_to_control(self, actions):
         self.control.throttle = max(self.min_throttle, float(actions[0]) if actions[0] > 0 else 0.0)
+        # self.control.throttle = float(actions[0]) if actions[0] > 0 else 0.0
         self.control.brake = float(-actions[0]) if actions[0] < 0 else 0.0
         self.control.steer = float(actions[1])
         self.control.reverse = bool(actions[2] > 0)

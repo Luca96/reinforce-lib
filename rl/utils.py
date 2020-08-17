@@ -9,6 +9,7 @@ import tensorflow_probability as tfp
 import random
 
 from typing import Union, List, Dict, Tuple, Optional
+from distutils import dir_util
 from datetime import datetime
 
 from gym import spaces
@@ -95,6 +96,42 @@ def is_vector(x) -> bool:
 
 def depth_concat(*arrays):
     return np.concatenate(*arrays, axis=-1)
+
+
+def clip(value, min_value, max_value):
+    return min(max_value, max(value, min_value))
+
+
+def polyak_averaging(model: tf.keras.Model, old_weights: list, alpha=0.99):
+    """Source: Deep Learning Book (section 8.7.3)
+        - the original implementation is: `w = alpha * w_old + (1.0 - alpha) * w_new`,
+          here we use `w = alpha * w_new + (1.0 - alpha) * w_old` because it performs better for RL
+    """
+    new_weights = model.get_weights()
+    weights = []
+
+    for w_old, w_new in zip(old_weights, new_weights):
+        # w = alpha * w_old + (1.0 - alpha) * w_new
+        w = alpha * w_new + (1.0 - alpha) * w_old
+        weights.append(w)
+
+    model.set_weights(weights)
+
+
+def accumulate_gradients(grads1: list, grads2: Optional[list] = None) -> list:
+    if grads2 is None:
+        return grads1
+
+    return [g1 + g2 for g1, g2 in zip(grads1, grads2)]
+
+
+def average_gradients(gradients: list, n: int) -> list:
+    assert n > 0
+    if n == 1:
+        return gradients
+
+    n = float(n)
+    return [g / n for g in gradients]
 
 
 # -------------------------------------------------------------------------------------------------
@@ -243,6 +280,22 @@ def tf_normalize(x):
     return (x - tf.math.reduce_mean(x)) / (tf.math.reduce_std(x) + EPSILON)
 
 
+# def tf_linear_normalization(x, scale=1.0):
+#     x = tf.cast(x, dtype=tf.float32)
+#     min_x = tf.reduce_min(x)
+#     max_x = tf.reduce_max(x)
+#
+#     if min_x <= 0.0 <= max_x:
+#         mask_pos = tf.cast(x > 0.0, dtype=tf.float32)
+#         mask_neg = tf.cast(x < 0.0, dtype=tf.float32)
+#         return scale * ((mask_neg * x / -(min_x - EPSILON)) + (mask_pos * x / (max_x + EPSILON)))
+#
+#     elif min_x <= 0.0 and max_x <= 0.0:
+#         return scale * ((x - max_x) / (tf.math.abs(min_x - max_x) + EPSILON))
+#     else:
+#         return scale * ((x - min_x) / (max_x - min_x + EPSILON))
+
+
 def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batches=False, seed=None,
                     drop_remainder=False, map_fn=None, prefetch_size=2, num_shards=1, skip=0, shuffle=False):
     """Transform some tensors data into a dataset of mini-batches"""
@@ -295,6 +348,19 @@ def softplus(value=1.0):
         return tf.nn.softplus(x) + value
 
     return activation
+
+
+# @tf.function
+def swish6(x):
+    return tf.minimum(tf.nn.swish(x), 6.0)
+
+
+def dsilu(x):
+    """dSiLu activation function (i.e. the derivative of SiLU/Swish).
+       Paper: Sigmoid-Weighted Linear Units for Neural Network Function Approximation in Reinforcement Learning
+    """
+    sigma_x = tf.nn.sigmoid(x)
+    return sigma_x * (1.0 + x * (1.0 - sigma_x))
 
 
 @tf.function
@@ -408,6 +474,11 @@ def unpack_trace(trace: dict) -> tuple:
         trace['done'] = None
 
     return trace['state'], trace['action'], tf.cast(trace['reward'], dtype=tf.float32), trace['done']
+
+
+def copy_folder(src: str, dst: str):
+    """Source: https://stackoverflow.com/a/31039095"""
+    dir_util.copy_tree(src, dst)
 
 
 # -------------------------------------------------------------------------------------------------
@@ -531,112 +602,3 @@ class IncrementalStatistics:
     def as_dict(self) -> dict:
         return dict(mean=np.float(self.mean), variance=np.float(self.variance),
                     std=np.float(self.std), count=np.int(self.count))
-
-
-# -------------------------------------------------------------------------------------------------
-# -- Distributions utils
-# -------------------------------------------------------------------------------------------------
-
-class MixtureDistribution(tfp.distributions.Mixture):
-
-    def entropy(self, name='entropy', **kwargs):
-        return super().entropy_lower_bound()
-
-    def kl_divergence(self, other, name='kl_divergence'):
-        """Roughly approximated KL-divergence"""
-        approx_kl = 0.0
-
-        for i, component in enumerate(self.components):
-            approx_kl += self.cat.prob(i) * component.kl_divergence(other)
-
-        return approx_kl
-
-
-def get_mixture_of_categorical(layer: tf.keras.layers.Layer, num_actions: int,
-                               num_components: int) -> tfp.layers.DistributionLambda:
-    layers = []
-
-    # define the layers that weights the mixture's components
-    weights = tf.keras.layers.Dense(units=num_components)(layer)
-    weights = tf.expand_dims(weights, axis=0, name='mixture-weights')
-    layers.append(weights)
-
-    # create a logits (dense) layer for each component
-    for i in range(num_components):
-        logits = tf.keras.layers.Dense(units=num_actions, activation='linear')(layer)
-        logits = tf.expand_dims(logits, axis=0, name=f'logits-{i + 1}')
-        layers.append(logits)
-
-    # make the distribution lambda layer that wraps the mixture
-    return tfp.layers.DistributionLambda(
-        make_distribution_fn=lambda t: MixtureDistribution(
-            cat=tfp.distributions.Categorical(logits=t[0]),
-            components=[tfp.distributions.Categorical(logits=t[j + 1]) for j in range(num_components)]
-        )
-    )(layers)
-
-
-def get_mixture_of_beta(layer: tf.keras.layers.Layer, num_actions: int,
-                        num_components: int) -> tfp.layers.DistributionLambda:
-    layers = []
-
-    # define the layers that weights the mixture's components
-    weights = tf.keras.layers.Dense(units=num_components, name='mixture-weights')(layer)
-    layers.append(weights)
-
-    # create a dense layer for alpha and beta parameters for each component
-    for i in range(num_components):
-        alpha = tf.keras.layers.Dense(units=num_actions, activation='softplus')(layer)
-        alpha = tf.keras.layers.Add(name=f'alpha-{i}')([alpha, tf.ones_like(alpha)])
-
-        beta = tf.keras.layers.Dense(units=num_actions, activation='softplus')(layer)
-        beta = tf.keras.layers.Add(name=f'beta-{i}')([beta, tf.ones_like(beta)])
-
-        layers.append([alpha, beta])
-
-    # make the distribution lambda layer that wraps the mixture
-    return tfp.layers.DistributionLambda(
-        make_distribution_fn=lambda t: MixtureDistribution(
-            cat=tfp.distributions.Categorical(logits=t[0]),
-            components=[tfp.distributions.Beta(t[j + 1][0], t[j + 1][1]) for j in range(num_components)]
-        )
-    )(layers)
-
-
-def get_mixture_of_gaussian(layer: tf.keras.layers.Layer, num_actions: int,
-                            num_components: int) -> tfp.layers.DistributionLambda:
-    layers = []
-
-    # define the layers that weights the mixture's components
-    weights = tf.keras.layers.Dense(units=num_components, name='mixture-weights')(layer)
-    layers.append(weights)
-
-    # create a dense layer for alpha and beta parameters for each component
-    for i in range(num_components):
-        mu = tf.keras.layers.Dense(units=num_actions, activation='linear', name=f'mu-{i}')(layer)
-        sigma = tf.keras.layers.Dense(units=num_actions, activation='softplus', name=f'sigma-{i}')(layer)
-
-        layers.append([mu, sigma])
-
-    # make the distribution lambda layer that wraps the mixture
-    return tfp.layers.DistributionLambda(
-        make_distribution_fn=lambda t: MixtureDistribution(
-            cat=tfp.distributions.Categorical(logits=t[0]),
-            components=[tfp.distributions.MultivariateNormalDiag(
-                loc=t[j + 1][0], scale_diag=t[j + 1][1]) for j in range(num_components)]
-        )
-    )(layers)
-
-
-def sample_and_scale01(d: tfp.distributions.Distribution):
-    # be sure `d` is a  multivariate Gaussian distribution
-    assert isinstance(d, tfp.distributions.MultivariateNormalDiag)
-
-    # distribution's support (3-sigma rule)
-    min_value = -3.0 * d.stddev()
-    max_value = +3.0 * d.stddev()
-
-    # sample and scale it in 0-1 interval:
-    sample = tf.clip_by_value(d.sample(), min_value, max_value)
-
-    return (sample - min_value) / (max_value - min_value)

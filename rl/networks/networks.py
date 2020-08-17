@@ -25,11 +25,15 @@ class PPONetwork(Network):
 
         # policy and value networks
         self.policy = self.policy_network(**policy)
+        self.old_policy = self.policy_network(**policy)
+        self.update_old_policy()
+
         self.value = self.value_network(**value)
 
     @tf.function
     def predict(self, inputs: Union[tf.Tensor, List[tf.Tensor], Dict[str, tf.Tensor]]):
-        policy = self.policy_predict(inputs)
+        # policy = self.policy_predict(inputs)
+        policy = self.old_policy(inputs, training=False)
         value = self.value_predict(inputs)
 
         if self.distribution != 'categorical':
@@ -61,31 +65,31 @@ class PPONetwork(Network):
         action = self.policy(inputs, training=False)
         return action
 
-    def update_step_policy(self, batch):
-        with tf.GradientTape() as tape:
-            loss, kl = self.agent.policy_objective(batch)
-
-        gradients = tape.gradient(loss, self.policy.trainable_variables)
-
-        if self.agent.should_clip_policy_grads:
-            gradients = [tf.clip_by_norm(grad, clip_norm=self.agent.grad_norm_policy) for grad in gradients]
-
-        self.agent.policy_optimizer.apply_gradients(zip(gradients, self.policy.trainable_variables))
-
-        return loss, kl, gradients
-
-    def update_step_value(self, batch):
-        with tf.GradientTape() as tape:
-            loss = self.agent.value_objective(batch)
-
-        gradients = tape.gradient(loss, self.value.trainable_variables)
-
-        if self.agent.should_clip_value_grads:
-            gradients = [tf.clip_by_norm(grad, clip_norm=self.agent.grad_norm_value) for grad in gradients]
-
-        self.agent.value_optimizer.apply_gradients(zip(gradients, self.value.trainable_variables))
-
-        return loss, gradients
+    # def update_step_policy(self, batch):
+    #     with tf.GradientTape() as tape:
+    #         loss, kl = self.agent.policy_objective(batch)
+    #
+    #     gradients = tape.gradient(loss, self.policy.trainable_variables)
+    #
+    #     if self.agent.should_clip_policy_grads:
+    #         gradients = [tf.clip_by_norm(grad, clip_norm=self.agent.grad_norm_policy) for grad in gradients]
+    #
+    #     self.agent.policy_optimizer.apply_gradients(zip(gradients, self.policy.trainable_variables))
+    #
+    #     return loss, kl, gradients
+    #
+    # def update_step_value(self, batch):
+    #     with tf.GradientTape() as tape:
+    #         loss = self.agent.value_objective(batch)
+    #
+    #     gradients = tape.gradient(loss, self.value.trainable_variables)
+    #
+    #     if self.agent.should_clip_value_grads:
+    #         gradients = [tf.clip_by_norm(grad, clip_norm=self.agent.grad_norm_value) for grad in gradients]
+    #
+    #     self.agent.value_optimizer.apply_gradients(zip(gradients, self.value.trainable_variables))
+    #
+    #     return loss, gradients
 
     def policy_layers(self, inputs: Dict[str, Input], **kwargs):
         """Defines the architecture of the policy-network"""
@@ -130,7 +134,6 @@ class PPONetwork(Network):
     def value_network(self, mixture_components=3, **kwargs):
         inputs = self._get_input_layers()
         last_layer = self.value_layers(inputs, **kwargs)
-        # value = Dense(units=1, activation=None, dtype=tf.float32, name='value_head')(last_layer)
 
         # Gaussian value-head
         value = self.value_head(last_layer, mixture_components=mixture_components)
@@ -153,35 +156,27 @@ class PPONetwork(Network):
             num_actions = self.agent.num_actions
             num_classes = self.agent.num_classes
 
-            if self.mixture_components == 1:
-                logits = Dense(units=num_actions * num_classes, activation='linear', name='logits')(layer)
+            logits = Dense(units=num_actions * num_classes, activation='linear', name='logits')(layer)
 
-                if num_actions > 1:
-                    logits = Reshape((num_actions, num_classes))(logits)
-                else:
-                    logits = tf.expand_dims(logits, axis=0)
-
-                return tfp.layers.DistributionLambda(
-                    make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t))(logits)
+            if num_actions > 1:
+                logits = Reshape((num_actions, num_classes))(logits)
             else:
-                return utils.get_mixture_of_categorical(layer, num_actions=num_classes,
-                                                        num_components=self.mixture_components)
+                logits = tf.expand_dims(logits, axis=0)
+
+            return tfp.layers.DistributionLambda(
+                make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t))(logits)
+
         # Bounded continuous 1-dimensional actions:
         # for activations choice refer to chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
         if self.distribution == 'beta':
             num_actions = self.agent.num_actions
 
-            if self.mixture_components == 1:
-                # make a, b > 1, so that the Beta distribution is concave and unimodal (see paper above)
-                # TODO: set `use_bias=False` to both 'alpha' and 'beta' to improve performance?
-                # TODO: or constrain `biases` to have 0.1 or 0.001 norm...
-                alpha = Dense(units=num_actions, activation=utils.softplus(1.0 + utils.EPSILON), name='alpha')(layer)
-                beta = Dense(units=num_actions, activation=utils.softplus(1.0 + utils.EPSILON), name='beta')(layer)
+            # make a, b > 1, so that the Beta distribution is concave and unimodal (see paper above)
+            alpha = Dense(units=num_actions, activation=utils.softplus(1.0 + 1e-2), name='alpha')(layer)
+            beta = Dense(units=num_actions, activation=utils.softplus(1.0 + 1e-2), name='beta')(layer)
 
-                return tfp.layers.DistributionLambda(
-                    make_distribution_fn=lambda t: tfp.distributions.Beta(t[0], t[1]))([alpha, beta])
-            else:
-                return utils.get_mixture_of_beta(layer, num_actions, num_components=self.mixture_components)
+            return tfp.layers.DistributionLambda(
+                make_distribution_fn=lambda t: tfp.distributions.Beta(t[0], t[1]))([alpha, beta])
 
         # Unbounded continuous actions)
         # for activations choice see chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
@@ -211,11 +206,18 @@ class PPONetwork(Network):
 
     def load_weights(self):
         self.policy.load_weights(filepath=self.agent.weights_path['policy'], by_name=False)
+        self.old_policy.set_weights(self.policy.get_weights())
         self.value.load_weights(filepath=self.agent.weights_path['value'], by_name=False)
 
     def save_weights(self):
         self.policy.save_weights(filepath=self.agent.weights_path['policy'])
         self.value.save_weights(filepath=self.agent.weights_path['value'])
+
+    def update_old_policy(self, weights=None):
+        if weights:
+            self.old_policy.set_weights(weights)
+        else:
+            self.old_policy.set_weights(self.policy.get_weights())
 
     def summary(self):
         print('==== Policy Network ====')

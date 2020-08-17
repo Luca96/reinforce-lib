@@ -19,13 +19,14 @@ class DynamicParameter:
 # TODO: decay on new episode (optional)
 class ParameterWrapper(LearningRateSchedule, DynamicParameter):
     """A wrapper for built-in tf.keras' learning rate schedules"""
-    def __init__(self, schedule: LearningRateSchedule):
+    def __init__(self, schedule: LearningRateSchedule, min_value=1e-4):
         super().__init__()
         self.schedule = schedule
+        self.min_value = min_value
 
     def __call__(self, *args, **kwargs):
         self.step += 1
-        self.value = self.schedule.__call__(self.step)
+        self.value = max(self.min_value, self.schedule.__call__(self.step))
         return self.value
 
     def get_config(self) -> dict:
@@ -46,5 +47,6 @@ class ConstantParameter(DynamicParameter):
 
 
 class StepDecay(ParameterWrapper):
-    def __init__(self, initial_learning_rate: float, decay_steps: int, decay_rate: float):
-        super().__init__(schedule=ExponentialDecay(initial_learning_rate, decay_steps, decay_rate, staircase=True))
+    def __init__(self, initial_value: float, decay_steps: int, decay_rate: float, min_value=1e-4):
+        super().__init__(schedule=ExponentialDecay(initial_value, decay_steps, decay_rate, staircase=True),
+                         min_value=min_value)

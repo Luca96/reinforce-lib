@@ -17,7 +17,7 @@ class Agent:
     """Agent abstract class"""
     def __init__(self, env: Union[gym.Env, str], batch_size: int, seed=None, weights_dir='weights', name='agent',
                  log_mode='summary', drop_batch_reminder=False, skip_data=0, consider_obs_every=1,
-                 shuffle_batches=False, traces_dir: str = None):
+                 shuffle_batches=False, shuffle_data=False, traces_dir: str = None):
 
         if isinstance(env, str):
             self.env = gym.make(env)
@@ -44,6 +44,7 @@ class Agent:
         self.skip_count = skip_data
         self.obs_skipping = consider_obs_every
         self.shuffle_batches = shuffle_batches
+        self.shuffle_data = shuffle_data
 
         # Saving stuff:
         self.base_path = os.path.join(weights_dir, name)
@@ -121,8 +122,8 @@ class Agent:
 
     def preprocess(self):
         @tf.function
-        def preprocess_fn(*args):
-            return args
+        def preprocess_fn(_):
+            return _
 
         return preprocess_fn
 

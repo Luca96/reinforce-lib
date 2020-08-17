@@ -21,18 +21,21 @@ class PPOAgent(Agent):
     # TODO: 'value_loss' a parameter that selects the loss (either 'mse' or 'huber') for the value network
     # TODO: implement value function clipping?
     # TODO: dynamic-parameters: kl, noise, clip_norm...
+    # TODO: polyak factor to 0.99 or 0.95
     def __init__(self, *args, policy_lr: Union[float, LearningRateSchedule] = 1e-3, gamma=0.99, lambda_=0.95,
                  value_lr: Union[float, LearningRateSchedule] = 3e-4, optimization_steps=(1, 1), target_kl=False,
                  clip_ratio: Union[float, LearningRateSchedule, DynamicParameter] = 0.2, load=False, name='ppo-agent',
                  entropy_regularization: Union[float, LearningRateSchedule, DynamicParameter] = 0.0, optimizer='adam',
-                 clip_norm=(1.0, 1.0), mixture_components=1, network: Union[dict, PPONetwork] = None, **kwargs):
+                 clip_norm=(1.0, 1.0), mixture_components=1, network: Union[dict, PPONetwork] = None,
+                 accumulate_gradients_over_batches=False, update_frequency=1, polyak=1.0, **kwargs):
+        assert 0.0 < polyak <= 1.0
+
         super().__init__(*args, name=name, **kwargs)
 
         self.memory: PPOMemory = None
         self.gamma = gamma
         self.lambda_ = lambda_
         self.mixture_components = mixture_components
-        self.min_float = tf.constant(np.finfo(np.float32).eps, dtype=tf.float32)
 
         # Entropy regularization
         if isinstance(entropy_regularization, float):
@@ -86,7 +89,7 @@ class PPOAgent(Agent):
                     if k not in value_args:
                         value_args[k] = v
 
-                self.network = network_class(agent=self, policy=policy_args, value=value_args)
+                self.network = network_class(agent=self, policy=policy_args, value=value_args, **network)
             else:
                 self.network = network_class(agent=self, **network)
         else:
@@ -96,12 +99,24 @@ class PPOAgent(Agent):
             self.load()
 
         # Optimization
+        self.accumulate_gradients_over_batches = accumulate_gradients_over_batches
+        self.update_frequency = update_frequency
+        self.episode_count = 0
+        self.episodic_policy_gradients = None
+        self.episodic_value_gradients = None
+
+        if self.update_frequency > 1:
+            self.accumulate_gradients_over_batches = True
+
         self.policy_lr = self._init_lr_schedule(policy_lr, config=self.config.get('policy_lr', {}))
         self.value_lr = self._init_lr_schedule(value_lr, config=self.config.get('value_lr', {}))
 
         self.policy_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=self.policy_lr)
         self.value_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=self.value_lr)
         self.optimization_steps = dict(policy=optimization_steps[0], value=optimization_steps[1])
+
+        self.should_polyak_average = polyak < 1.0
+        self.polyak_coeff = polyak
 
     @staticmethod
     def _init_lr_schedule(lr: Union[float, LearningRateSchedule], config: dict):
@@ -191,13 +206,14 @@ class PPOAgent(Agent):
 
     def update(self):
         t0 = time.time()
+        self.episode_count += 1
 
         # Compute advantages and returns:
-        dernorm_returns = self.memory.compute_returns(discount=self.gamma)
+        denorm_returns = self.memory.compute_returns(discount=self.gamma)
         denorm_values = self.memory.compute_advantages(self.gamma, self.lambda_)
 
         self.log(returns=self.memory.returns, advantages=self.memory.advantages, values=self.memory.values,
-                 returns_denorm=dernorm_returns, values_denorm=denorm_values)
+                 returns_denorm=denorm_returns, values_denorm=denorm_values)
 
         # Prepare data:
         value_batches = self.get_value_batches()
@@ -205,50 +221,158 @@ class PPOAgent(Agent):
 
         # Policy network optimization:
         for opt_step in range(self.optimization_steps['policy']):
-            for data_batch in policy_batches:
-                total_loss, kl, policy_grads = self.network.update_step_policy(data_batch)
+            gradients = None
+            num_batches = 0
 
-                self.log(loss_total=total_loss.numpy(), lr_policy=self.policy_lr.lr,
+            for data_batch in policy_batches:
+                total_loss, kl, policy_grads = self.get_policy_gradients(data_batch)
+
+                if self.accumulate_gradients_over_batches:
+                    num_batches += 1
+                    gradients = utils.accumulate_gradients(policy_grads, gradients)
+                else:
+                    self.update_policy(policy_grads)
+                    self.log(lr_policy=self.policy_lr.lr)
+
+                self.log(loss_total=total_loss.numpy(),
                          gradients_norm_policy=[tf.norm(gradient) for gradient in policy_grads])
 
-                if self.distribution_type == 'categorical':
-                    logits = self.network.policy.get_layer(name='logits')
+            if self.accumulate_gradients_over_batches:
+                batch_gradients = utils.average_gradients(gradients, n=num_batches)
+                batch_gradients, updated = self.update_policy(batch_gradients)
+
+                if updated:
+                    self.log(gradients_norm_policy_update=[tf.norm(g) for g in batch_gradients],
+                             lr_policy=self.policy_lr.lr)
+                else:
+                    self.log(gradients_norm_policy_batch=[tf.norm(g) for g in batch_gradients])
+
+            # # Stop early if target_kl is reached:
+            # if self.early_stop and (kl > self.target_kl):
+            #     self.log(early_stop=opt_step)
+            #     print(f'early stop at step {opt_step}.')
+            #     break
+
+            if self.distribution_type == 'categorical':
+                logits = self.network.policy.get_layer(name='logits')
+
+                if isinstance(logits, tf.keras.layers.Dense):
                     weights, bias = logits.trainable_variables
 
                     self.log(weights_logits=tf.norm(weights), bias_logits=tf.norm(weights))
 
-                elif self.distribution_type == 'beta':
-                    alpha = self.network.policy.get_layer(name='alpha')
-                    beta = self.network.policy.get_layer(name='beta')
+            elif self.distribution_type == 'beta':
+                alpha = self.network.policy.get_layer(name='alpha')
+                beta = self.network.policy.get_layer(name='beta')
 
+                if isinstance(alpha, tf.keras.layers.Dense) and isinstance(beta, tf.keras.layers.Dense):
                     weights_a, bias_a = alpha.trainable_variables
                     weights_b, bias_b = beta.trainable_variables
 
                     self.log(weights_alpha=tf.norm(weights_a), bias_alpha=tf.norm(bias_a),
                              weights_beta=tf.norm(weights_b), bias_beta=tf.norm(bias_b))
 
-            # Stop early if target_kl is reached:
-            if self.early_stop and (kl > self.target_kl):
-                self.log(early_stop=opt_step)
-                print(f'early stop at step {opt_step}.')
-                break
-
         # Value network optimization:
         for _ in range(self.optimization_steps['value']):
-            for data_batch in value_batches:
-                value_loss, value_grads = self.network.update_step_value(data_batch)
+            gradients = None
+            num_batches = 0
 
-                self.log(loss_value=value_loss.numpy(), lr_value=self.value_lr.lr,
+            for data_batch in value_batches:
+                value_loss, value_grads = self.get_value_gradients(data_batch)
+
+                if self.accumulate_gradients_over_batches:
+                    num_batches += 1
+                    gradients = utils.accumulate_gradients(value_grads, gradients)
+                else:
+                    self.update_value(value_grads)
+                    self.log(lr_value=self.value_lr.lr)
+
+                self.log(loss_value=value_loss.numpy(),
                          gradients_norm_value=[tf.norm(gradient) for gradient in value_grads])
+
+            if self.accumulate_gradients_over_batches:
+                batch_gradients = utils.average_gradients(gradients, n=num_batches)
+                batch_gradients, updated = self.update_value(batch_gradients)
+
+                if updated:
+                    self.log(gradients_norm_value_update=[tf.norm(g) for g in batch_gradients],
+                             lr_value=self.value_lr.lr)
+                else:
+                    self.log(gradients_norm_value_batch=[tf.norm(g) for g in batch_gradients])
 
         print(f'Update took {round(time.time() - t0, 3)}s')
 
+    def get_policy_gradients(self, batch):
+        with tf.GradientTape() as tape:
+            loss, kl = self.policy_objective(batch)
+
+        gradients = tape.gradient(loss, self.network.policy.trainable_variables)
+        return loss, kl, gradients
+
+    def update_policy(self, gradients) -> (list, bool):
+        if self.update_frequency > 1:
+            self.episodic_policy_gradients = utils.accumulate_gradients(gradients, self.episodic_policy_gradients)
+
+            if self.episode_count % self.update_frequency == 0:
+                gradients = utils.average_gradients(self.episodic_policy_gradients, n=self.update_frequency)
+                self.episodic_policy_gradients = None
+            else:
+                # prevents the following code to update the policy network
+                return gradients, False
+
+        # update policy network
+        if self.should_clip_policy_grads:
+            gradients = [tf.clip_by_norm(grad, clip_norm=self.grad_norm_policy) for grad in gradients]
+
+        if self.should_polyak_average:
+            old_weights = self.network.policy.get_weights()
+            self.network.update_old_policy(old_weights)
+
+            self.policy_optimizer.apply_gradients(zip(gradients, self.network.policy.trainable_variables))
+            utils.polyak_averaging(self.network.policy, old_weights, alpha=self.polyak_coeff)
+        else:
+            self.network.update_old_policy()
+            self.policy_optimizer.apply_gradients(zip(gradients, self.network.policy.trainable_variables))
+
+        return gradients, True
+
+    def get_value_gradients(self, batch):
+        with tf.GradientTape() as tape:
+            loss = self.value_objective(batch)
+
+        gradients = tape.gradient(loss, self.network.value.trainable_variables)
+        return loss, gradients
+
+    def update_value(self, gradients) -> (list, bool):
+        if self.update_frequency > 1:
+            self.episodic_value_gradients = utils.accumulate_gradients(gradients, self.episodic_value_gradients)
+
+            if self.episode_count % self.update_frequency == 0:
+                gradients = utils.average_gradients(self.episodic_value_gradients, n=self.update_frequency)
+                self.episodic_value_gradients = None
+            else:
+                # prevents the following code to update the value network
+                return gradients, False
+
+        # update value network
+        if self.should_clip_value_grads:
+            gradients = [tf.clip_by_norm(grad, clip_norm=self.grad_norm_value) for grad in gradients]
+
+        if self.should_polyak_average:
+            old_weights = self.network.value.get_weights()
+            self.value_optimizer.apply_gradients(zip(gradients, self.network.value.trainable_variables))
+            utils.polyak_averaging(self.network.value, old_weights, alpha=self.polyak_coeff)
+        else:
+            self.value_optimizer.apply_gradients(zip(gradients, self.network.value.trainable_variables))
+
+        return gradients, True
+
     def get_value_batches(self):
         """Computes batches of data for updating the value network"""
-        # TODO: does sharding makes sense for "supervised" value estimation?
         return utils.data_to_batches(tensors=self.value_batch_tensors(), batch_size=self.batch_size,
                                      drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
-                                     map_fn=self.preprocess(), shuffle=True, shuffle_batches=False,
+                                     # map_fn=self.preprocess(),
+                                     shuffle=True, shuffle_batches=False,
                                      num_shards=self.obs_skipping)
 
     def value_batch_tensors(self) -> Union[tuple, dict]:
@@ -259,8 +383,9 @@ class PPOAgent(Agent):
         """Computes batches of data for updating the policy network"""
         return utils.data_to_batches(tensors=self.policy_batch_tensors(), batch_size=self.batch_size,
                                      drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
-                                     num_shards=self.obs_skipping,
-                                     shuffle_batches=self.shuffle_batches, map_fn=self.preprocess())
+                                     num_shards=self.obs_skipping, shuffle=self.shuffle_data,
+                                     # map_fn=self.preprocess(),
+                                     shuffle_batches=self.shuffle_batches)
 
     def policy_batch_tensors(self) -> Union[tuple, dict]:
         """Defines which data to use in `get_policy_batches()`"""
@@ -282,21 +407,19 @@ class PPOAgent(Agent):
             batch_size = tf.shape(actions)[0]
             actions = tf.reshape(actions, shape=batch_size)
 
-            # new_log_prob = new_policy.log_prob(tf.reshape(actions, shape=batch_size))
             new_log_prob = new_policy.log_prob(actions)
             new_log_prob = tf.reshape(new_log_prob, shape=(batch_size, self.num_actions))
         else:
             # round samples (actions) before computing density:
             # motivation: https://www.tensorflow.org/probability/api_docs/python/tfp/distributions/Beta
-            actions = tf.clip_by_value(actions, self.min_float, 1.0 - self.min_float)
+            actions = tf.clip_by_value(actions, utils.EPSILON, 1.0 - utils.EPSILON)
             new_log_prob = new_policy.log_prob(actions)
 
         kl_divergence = utils.kl_divergence(old_log_probabilities, new_log_prob)
 
         # Entropy
         entropy = new_policy.entropy()
-        entropy_coeff = self.entropy_strength()
-        entropy_penalty = -entropy_coeff * tf.reduce_mean(entropy)
+        entropy_penalty = -self.entropy_strength() * tf.reduce_mean(entropy)
 
         # Compute the probability ratio between the current and old policy
         ratio = tf.math.exp(new_log_prob - old_log_probabilities)
@@ -310,7 +433,7 @@ class PPOAgent(Agent):
         total_loss = policy_loss + entropy_penalty
 
         # Log stuff
-        self.log(ratio=ratio, log_prob=new_log_prob, entropy=entropy, entropy_coeff=entropy_coeff,
+        self.log(ratio=ratio, log_prob=new_log_prob, entropy=entropy, entropy_coeff=self.entropy_strength.value,
                  ratio_clip=clip_value, kl_divergence=kl_divergence, loss_policy=policy_loss.numpy(),
                  loss_entropy=entropy_penalty.numpy())
 
@@ -330,6 +453,9 @@ class PPOAgent(Agent):
         elif render_every is True:
             render_every = 1
 
+        preprocess_fn = self.preprocess()
+        self.episode_count = 0
+
         try:
             for episode in range(1, episodes + 1):
                 self.reset()
@@ -337,6 +463,7 @@ class PPOAgent(Agent):
 
                 state = self.env.reset()
                 state = utils.to_tensor(state)
+                state = preprocess_fn(state)
 
                 # TODO: temporary fix (shouldn't work for deeper nesting...)
                 if isinstance(state, dict):
@@ -363,6 +490,7 @@ class PPOAgent(Agent):
 
                     self.memory.append(state, action, reward, value, log_prob)
                     state = utils.to_tensor(next_state)
+                    state = preprocess_fn(state)
 
                     if isinstance(state, dict):
                         state = {f'state_{k}': v for k, v in state.items()}

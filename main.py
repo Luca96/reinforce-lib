@@ -6,35 +6,26 @@ from rl import utils
 from rl.agents import PPOAgent
 
 from tensorflow.keras.optimizers.schedules import ExponentialDecay
-from tensorflow.keras import layers
 
 
 def ppo_cartpole_test():
     env = gym.make('CartPole-v0')
     utils.print_info(env)
 
-    # best: norm value -> denorm with inc.stat -> norm adv
-    # agent = PPOAgent(env,
-    #                  policy_lr=schedules.ExponentialSchedule(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True),
-    #                  value_lr=schedules.ExponentialSchedule(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True),
-    #                  clip_ratio=0.15,
-    #                  lambda_=0.95, entropy_regularization=0.0, name='ppo-cartPole-baseline',
-    #                  optimization_steps=(2, 2), batch_size=20, target_kl=None,
-    #                  log_mode='summary', load=False, seed=42)
-
     lr_schedule = ExponentialDecay(
         initial_learning_rate=1e-3, decay_steps=2000, decay_rate=0.95, staircase=True)
 
-    # equally good
+    # good seeds:  42, 31, 91
     agent = PPOAgent(env,
                      policy_lr=lr_schedule,
                      value_lr=lr_schedule,
                      clip_ratio=0.10, lambda_=0.95, entropy_regularization=0.0,
-                     name='ppo-cartPole-baseline',
+                     name='ppo-cartPole-baseline2',
                      optimization_steps=(1, 2), batch_size=20, target_kl=None,
-                     log_mode='summary', load=True, seed=42)
+                     accumulate_gradients_over_batches=False, polyak=0.95,
+                     log_mode='summary', load=False, seed=42)
 
-    agent.learn(episodes=200//5, timesteps=200, render_every=10, save_every='end')
+    agent.learn(episodes=200, timesteps=200, render_every=10, save_every='end')
 
 
 def ppo_lunar_lander_discrete(e=200, t=200, b=20, load=False):
@@ -87,10 +78,17 @@ def ppo_lunar_lander(e: int, t: int, b: int, load=False, save_every='end'):
     env = gym.make('LunarLanderContinuous-v2')
     utils.print_info(env)
 
+    # best: 300 episodes
+    # agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.15,
+    #                  lambda_=0.95, entropy_regularization=0.0,
+    #                  name='ppo-LunarLander', clip_norm=0.5,
+    #                  optimization_steps=(1, 2), batch_size=b,
+    #                  log_mode='summary', load=load, seed=123)
+
     agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.15,
                      lambda_=0.95, entropy_regularization=0.0,
                      name='ppo-LunarLander', clip_norm=0.5,
-                     optimization_steps=(1, 2), batch_size=b,
+                     optimization_steps=(1, 2), batch_size=b, polyak=0.95,
                      log_mode='summary', load=load, seed=123)
 
     agent.learn(episodes=e, timesteps=t, render_every=10, save_every=save_every)
@@ -100,6 +98,22 @@ def ppo_mountain_car(e: int, t: int, b: int, load=False):
     env = gym.make('MountainCar-v0')
     utils.print_info(env)
     pass
+
+
+def ppo_walker(e: int, t: int, b: int, load=False, save_every='end'):
+    env = gym.make('BipedalWalker-v3')
+    utils.print_info(env)
+
+    agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.15,
+                     lambda_=0.95, entropy_regularization=0.0,
+                     name='ppo-walker', clip_norm=0.5,
+                     optimization_steps=(1, 1), batch_size=b,
+                     # consider_obs_every=4, accumulate_gradients_over_batches=True,
+                     network=dict(units=128, num_layers=2, activation=tf.nn.relu6),
+                     polyak=0.95, update_frequency=4,
+                     log_mode='summary', load=load, seed=42)
+
+    agent.learn(episodes=e, timesteps=t, render_every=10, save_every=save_every)
 
 
 def ppo_car_racing_discrete(e: int, t: int, b: int, load=False):
@@ -130,7 +144,8 @@ if __name__ == '__main__':
     # ppo_acrobot(e=200, t=200, b=32)
     # ppo_lunar_lander_discrete(e=500, t=200, b=40, load=False)
     # ppo_pendulum(e=200, t=200, b=64, load=False)
-    ppo_lunar_lander(e=500, t=200, b=32, load=False, save_every=100)
+    # ppo_lunar_lander(e=500, t=200, b=32, load=False, save_every=100)
     # ppo_mountain_car(e=400, t=1000, b=100, load=False)
     # ppo_car_racing_discrete(e=200, t=200, b=50, load=False)
+    # ppo_walker(e=400, t=200, b=50, load=False)
     pass
