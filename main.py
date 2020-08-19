@@ -8,7 +8,7 @@ from rl.agents import PPOAgent
 from tensorflow.keras.optimizers.schedules import ExponentialDecay
 
 
-def ppo_cartpole_test():
+def ppo_cartpole_test(b=20, seed=42):
     env = gym.make('CartPole-v0')
     utils.print_info(env)
 
@@ -16,43 +16,50 @@ def ppo_cartpole_test():
         initial_learning_rate=1e-3, decay_steps=2000, decay_rate=0.95, staircase=True)
 
     # good seeds:  42, 31, 91
-    agent = PPOAgent(env,
-                     policy_lr=lr_schedule,
-                     value_lr=lr_schedule,
-                     clip_ratio=0.10, lambda_=0.95, entropy_regularization=0.0,
-                     name='ppo-cartPole-baseline2',
-                     optimization_steps=(1, 2), batch_size=20, target_kl=None,
-                     accumulate_gradients_over_batches=False, polyak=0.95,
-                     log_mode='summary', load=False, seed=42)
+    # agent = PPOAgent(env,
+    #                  policy_lr=lr_schedule,
+    #                  value_lr=lr_schedule,
+    #                  clip_ratio=0.10, lambda_=0.95, entropy_regularization=0.0,
+    #                  name='ppo-cartPole-baseline2',
+    #                  optimization_steps=(1, 2), batch_size=b, target_kl=None,
+    #                  accumulate_gradients_over_batches=False, polyak=0.95,
+    #                  log_mode='summary', load=False, seed=seed)
 
-    agent.learn(episodes=200, timesteps=200, render_every=10, save_every='end')
+    for seed in [42, 31, 91]:
+        agent = PPOAgent(env, name='ppo-cartPole-baseline2',
+                         policy_lr=1e-3, value_lr=3e-4, clip_ratio=0.20,
+                         optimization_steps=(1, 2), batch_size=b,
+                         log_mode='summary', load=False, seed=seed)
+
+        agent.learn(episodes=200, timesteps=200, render_every=10, save_every='end')
+
+
+def cartpole_test(e: int, t: int):
+    agent = PPOAgent(env='CartPole-v0', name='ppo-cartPole-baseline', batch_size=20,
+
+                     log_mode='summary', load=False, seed=42, traces_dir='traces')
+
+    # agent.evaluate(episodes=e, timesteps=t)
+    # agent.collect(episodes=e, timesteps=t, record_threshold=200.0)
+    agent.imitate(epochs=1)
+    agent.evaluate(episodes=50, timesteps=t)
 
 
 def ppo_lunar_lander_discrete(e=200, t=200, b=20, load=False):
     env = gym.make('LunarLander-v2')
     utils.print_info(env)
 
-    # best: (batch: 50) 500 epochs 1e-3/3e-4 + 500 epochs half lr [value_objective 2]
     agent = PPOAgent(env,
                      policy_lr=ExponentialDecay(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True),
                      value_lr=ExponentialDecay(3e-4, decay_steps=2000, decay_rate=0.95, staircase=True),
-                     clip_ratio=0.05 + 0.15,
-                     lambda_=0.95, entropy_regularization=0.01, name='ppo-LunarLander-discrete',
-                     optimization_steps=(1 + 1, 1 + 1), batch_size=b, clip_norm=(0.5, 0.5),
-                     log_mode='summary', load=load, seed=42)
-    agent.drop_batch_reminder = True
-
-    # agent = PPOAgent(env,
-    #                  policy_lr=ExponentialDecay(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True),
-    #                  value_lr=ExponentialDecay(3e-4, decay_steps=2000, decay_rate=0.95, staircase=True),
-    #                  clip_ratio=0.05,
-    #                  lambda_=0.95, entropy_regularization=0.001, name='ppo-LunarLander-discrete',
-    #                  optimization_steps=(1, 2 - 1), batch_size=b, clip_norm=(0.5, 0.5),
-    #                  network=dict(units=64, num_layers=2, activation=utils.lisht),
-    #                  log_mode='summary', load=load, seed=42)
+                     clip_ratio=0.20, entropy_regularization=0.01, name='ppo-LunarLander-discrete',
+                     optimization_steps=(2, 2), batch_size=b, clip_norm=(0.5, 0.5),
+                     network=dict(value=dict(components=3)),
+                     log_mode=None, load=load, seed=42)
     # agent.drop_batch_reminder = True
 
-    agent.learn(episodes=e, timesteps=t, render_every=10, save_every='end')
+    # agent.learn(episodes=e, timesteps=t, render_every=10, save_every='end')
+    agent.evaluate(e, t)
 
 
 def ppo_pendulum(e: int, t: int, b: int, load=False):
@@ -85,11 +92,17 @@ def ppo_lunar_lander(e: int, t: int, b: int, load=False, save_every='end'):
     #                  optimization_steps=(1, 2), batch_size=b,
     #                  log_mode='summary', load=load, seed=123)
 
-    agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.15,
+    # agent = PPOAgent(env, policy_lr=1e-3, value_lr=1e-3, clip_ratio=0.15,
+    #                  lambda_=0.95, entropy_regularization=0.0,
+    #                  name='ppo-LunarLander', clip_norm=0.5,
+    #                  optimization_steps=(1, 2), batch_size=b, polyak=0.95,
+    #                  log_mode='summary', load=load, seed=123)
+
+    agent = PPOAgent(env, policy_lr=1e-3, value_lr=3e-4, clip_ratio=0.2,
                      lambda_=0.95, entropy_regularization=0.0,
                      name='ppo-LunarLander', clip_norm=0.5,
                      optimization_steps=(1, 2), batch_size=b, polyak=0.95,
-                     log_mode='summary', load=load, seed=123)
+                     log_mode='summary', load=load, seed=42)
 
     agent.learn(episodes=e, timesteps=t, render_every=10, save_every=save_every)
 
@@ -140,12 +153,14 @@ def ppo_car_racing_discrete(e: int, t: int, b: int, load=False):
 
 
 if __name__ == '__main__':
-    # ppo_cartpole_test()
+    # ppo_cartpole_test(b=200, seed=None)
     # ppo_acrobot(e=200, t=200, b=32)
-    # ppo_lunar_lander_discrete(e=500, t=200, b=40, load=False)
+    # ppo_lunar_lander_discrete(e=500, t=200, b=50, load=True)
     # ppo_pendulum(e=200, t=200, b=64, load=False)
     # ppo_lunar_lander(e=500, t=200, b=32, load=False, save_every=100)
     # ppo_mountain_car(e=400, t=1000, b=100, load=False)
     # ppo_car_racing_discrete(e=200, t=200, b=50, load=False)
     # ppo_walker(e=400, t=200, b=50, load=False)
+
+    # cartpole_test(e=300, t=200)
     pass

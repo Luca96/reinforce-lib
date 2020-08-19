@@ -16,7 +16,7 @@ from tensorflow.keras import layers
 class Agent:
     """Agent abstract class"""
     def __init__(self, env: Union[gym.Env, str], batch_size: int, seed=None, weights_dir='weights', name='agent',
-                 log_mode='summary', drop_batch_reminder=False, skip_data=0, consider_obs_every=1,
+                 log_mode='summary', drop_batch_remainder=False, skip_data=0, consider_obs_every=1,
                  shuffle_batches=False, shuffle_data=False, traces_dir: str = None):
 
         if isinstance(env, str):
@@ -30,7 +30,6 @@ class Agent:
         self.batch_size = batch_size
         self.state_spec = utils.space_to_flat_spec(space=self.env.observation_space, name='state')
         self.action_spec = utils.space_to_flat_spec(space=self.env.action_space, name='action')
-        self.last_value = tf.zeros((1, 1), dtype=tf.float32)
 
         # Record:
         if isinstance(traces_dir, str):
@@ -40,7 +39,7 @@ class Agent:
             self.should_record = False
 
         # Data options
-        self.drop_batch_reminder = drop_batch_reminder
+        self.drop_batch_remainder = drop_batch_remainder
         self.skip_count = skip_data
         self.obs_skipping = consider_obs_every
         self.shuffle_batches = shuffle_batches
@@ -69,17 +68,20 @@ class Agent:
             self.seed = seed
             print(f'Random seed {seed} set.')
 
-    def act(self, state):
-        pass
+    def act(self, state, *args, **kwargs):
+        raise NotImplementedError
+
+    def predict(self, state, *args, **kwargs):
+        raise NotImplementedError
 
     def record(self, *args, **kwargs):
-        pass
+        raise NotImplementedError
 
     def update(self):
-        pass
+        raise NotImplementedError
 
     def learn(self, *args, **kwargs):
-        pass
+        raise NotImplementedError
 
     def evaluate(self, episodes: int, timesteps: int, render=True, seeds=None) -> list:
         rewards = []
@@ -94,18 +96,30 @@ class Agent:
             if sample_seed:
                 self.set_random_seed(seed=random.choice(seeds))
 
-            state = self.env.reset()
+            self.reset()
             episode_reward = 0.0
+
+            state = self.env.reset()
+            state = utils.to_tensor(state)
+
+            # TODO: temporary fix (shouldn't work for deeper nesting...)
+            if isinstance(state, dict):
+                state = {f'state_{k}': v for k, v in state.items()}
 
             for t in range(1, timesteps + 1):
                 if render:
                     self.env.render()
 
                 action = self.act(state)
-                state, reward, done, _ = self.env.step(action)
+                next_state, reward, done, _ = self.env.step(action)
                 episode_reward += reward
 
                 self.log(actions=action, rewards=reward)
+
+                state = utils.to_tensor(next_state)
+
+                if isinstance(state, dict):
+                    state = {f'state_{k}': v for k, v in state.items()}
 
                 if done or (t == timesteps):
                     print(f'Episode {episode} terminated after {t} timesteps with reward {episode_reward}.')
@@ -120,6 +134,7 @@ class Agent:
         print(f'Mean reward: {round(np.mean(rewards), 2)}, std: {round(np.std(rewards), 2)}')
         return rewards
 
+    # TODO: one fn for training and another for evaluation?
     def preprocess(self):
         @tf.function
         def preprocess_fn(_):
@@ -127,9 +142,9 @@ class Agent:
 
         return preprocess_fn
 
-    def pretrain(self):
-        # TODO: use ImitationWrapper here?
-        pass
+    # def pretrain(self):
+    #     # TODO: use ImitationWrapper here?
+    #     pass
 
     def log(self, **kwargs):
         self.statistics.log(**kwargs)

@@ -64,9 +64,6 @@ def gae(rewards, values, gamma: float, lambda_: float, normalize=False):
     advantages = discount_cumsum(deltas, discount=gamma * lambda_)
 
     if normalize:
-        # advantages = tf.cast(advantages, tf.float32)
-        # advantages -= tf.reduce_min(advantages)
-        # advantages /= tf.reduce_max(advantages) + EPSILON
         advantages = tf_normalize(advantages)
 
     return advantages
@@ -76,7 +73,7 @@ def rewards_to_go(rewards, discount: float, normalize=False):
     returns = discount_cumsum(rewards, discount=discount)[:-1]
 
     if normalize:
-        returns = tf.cast(returns, tf.float32)
+        returns = to_float(returns)
         returns -= tf.reduce_min(returns)
         returns /= tf.reduce_max(returns) + EPSILON
         # returns = np_normalize(returns)
@@ -132,6 +129,20 @@ def average_gradients(gradients: list, n: int) -> list:
 
     n = float(n)
     return [g / n for g in gradients]
+
+
+def decompose_number(num: float) -> (float, float):
+    """Decomposes a given number [n] in a scientific-like notation:
+       - n = fractional_part * 10^exponent
+       - e.g. 2.34 could be represented as (0.234, 1) such that 0.234 * 10^1 = 2.34
+    """
+    exponent = 0
+
+    while abs(num) > 1.0:
+        num /= 10.0
+        exponent += 1
+
+    return num, float(exponent)
 
 
 # -------------------------------------------------------------------------------------------------
@@ -264,10 +275,10 @@ def space_to_spec(space: gym.Space) -> Union[tuple, Dict[str, Union[tuple, dict]
 def to_tensor(x, expand_axis=0):
     if isinstance(x, dict):
         for k, v in x.items():
-            v = tf.cast(v, dtype=tf.float32)
+            v = to_float(v)
             x[k] = tf.expand_dims(tf.convert_to_tensor(v), axis=expand_axis)
     else:
-        x = tf.cast(x, dtype=tf.float32)
+        x = to_float(x)
         x = tf.convert_to_tensor(x)
         x = tf.expand_dims(x, axis=expand_axis)
     return x
@@ -276,24 +287,58 @@ def to_tensor(x, expand_axis=0):
 # TODO: @tf.function
 def tf_normalize(x):
     """Normalizes some tensor x to 0-mean 1-stddev"""
-    x = tf.cast(x, dtype=tf.float32)
+    x = to_float(x)
     return (x - tf.math.reduce_mean(x)) / (tf.math.reduce_std(x) + EPSILON)
 
 
 # def tf_linear_normalization(x, scale=1.0):
-#     x = tf.cast(x, dtype=tf.float32)
+#     x = to_float(x)
 #     min_x = tf.reduce_min(x)
 #     max_x = tf.reduce_max(x)
 #
 #     if min_x <= 0.0 <= max_x:
-#         mask_pos = tf.cast(x > 0.0, dtype=tf.float32)
-#         mask_neg = tf.cast(x < 0.0, dtype=tf.float32)
+#         mask_pos = to_float(x > 0.0)
+#         mask_neg = to_float(x < 0.0)
 #         return scale * ((mask_neg * x / -(min_x - EPSILON)) + (mask_pos * x / (max_x + EPSILON)))
 #
 #     elif min_x <= 0.0 and max_x <= 0.0:
 #         return scale * ((x - max_x) / (tf.math.abs(min_x - max_x) + EPSILON))
 #     else:
 #         return scale * ((x - min_x) / (max_x - min_x + EPSILON))
+
+
+def tf_sign_preserving_normalization(x):
+    """Unlike 0-mean 1-std normalization, this 'sign-preserving normalization' normalizes a value `x` such that:
+        - if x > 0: then x-scaled is still positive, and
+        - if x < 0: then x-scaled is still negative.
+    """
+    x = to_float(x)
+    mean = tf.reduce_mean(x)
+    std = tf.math.reduce_std(x)
+
+    positives = x * to_float(x > 0.0)
+    negatives = x * to_float(x < 0.0)
+    return (positives / (mean + std + EPSILON)) + (negatives / tf.abs(mean - std + EPSILON))
+
+
+# def tf_sign_preserving_normalization(x, scale=1.0, use_quantile=False, use_std=False, quantile=0.8):
+#     x = to_float(x)
+#
+#     if not use_quantile:
+#         max_x = tf.reduce_max(x) + EPSILON
+#         min_x = tf.reduce_min(x) + EPSILON
+#     elif not use_std:
+#         max_x = to_float(np.quantile(x, q=quantile))
+#         min_x = to_float(np.quantile(x, q=1.0 - quantile))
+#     else:
+#         mean = tf.reduce_mean(x)
+#         std = tf.math.reduce_std(x)
+#         max_x = mean + std + EPSILON
+#         min_x = mean - std + EPSILON
+#
+#     positives = x * to_float(x > 0.0)
+#     negatives = x * to_float(x < 0.0)
+#     return scale * (positives / max_x + negatives / tf.abs(min_x))
 
 
 def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batches=False, seed=None,
@@ -413,8 +458,8 @@ def to_float(tensor):
     return tf.cast(tensor, dtype=tf.float32)
 
 
-def tf_dot_product(x, y):
-    return tf.reduce_sum(tf.multiply(x, y))
+def tf_dot_product(x, y, axis=0, keepdims=False):
+    return tf.reduce_sum(tf.multiply(x, y), axis=axis, keepdims=keepdims)
 
 
 # -------------------------------------------------------------------------------------------------
@@ -454,9 +499,10 @@ def load_traces(traces_dir: str, max_amount: Optional[int] = None, shuffle=False
         yield np.load(file=os.path.join(traces_dir, name))
 
 
-def unpack_trace(trace: dict) -> tuple:
+def unpack_trace(trace: dict, unpack=True) -> Union[tuple, dict]:
     """Reads a trace (i.e. a dict-like object created by np.load()) and unpacks it as a tuple
        (state, action, reward, done).
+       - When `unpack is False` the (processed) trace dict is returned.
     """
     trace_keys = trace.keys()
     trace = {k: trace[k] for k in trace_keys}  # copy
@@ -473,7 +519,16 @@ def unpack_trace(trace: dict) -> tuple:
     if 'done' not in trace:
         trace['done'] = None
 
-    return trace['state'], trace['action'], tf.cast(trace['reward'], dtype=tf.float32), trace['done']
+    if unpack:
+        return trace['state'], trace['action'], to_float(trace['reward']), trace['done']
+
+    # remove fields of the form `state_x`, `action_y`, ...
+    for key in trace_keys:
+        if 'state' in key or 'action' in key:
+            if key != 'state' and key != 'action':
+                trace.pop(key)
+
+    return trace
 
 
 def copy_folder(src: str, dst: str):
@@ -493,6 +548,7 @@ class Statistics:
             self.should_log = True
             self.use_summary = True
 
+        # TODO: review the usefulness of the "log" mode
         elif mode == 'log':
             self.should_log = True
             self.use_summary = False
@@ -591,7 +647,7 @@ class IncrementalStatistics:
             return self.normalize(x)
 
     def normalize(self, values, eps=NP_EPS):
-        return tf.cast((values - self.mean) / (self.std + eps), dtype=tf.float32)
+        return to_float((values - self.mean) / (self.std + eps))
 
     def set(self, mean: float, variance: float, std: float, count: int):
         self.mean = mean

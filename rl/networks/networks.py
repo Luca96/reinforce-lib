@@ -29,10 +29,10 @@ class PPONetwork(Network):
         self.update_old_policy()
 
         self.value = self.value_network(**value)
+        self.last_value = tf.zeros((1, 2), dtype=tf.float32)  # (base, exp)
 
     @tf.function
     def predict(self, inputs: Union[tf.Tensor, List[tf.Tensor], Dict[str, tf.Tensor]]):
-        # policy = self.policy_predict(inputs)
         policy = self.old_policy(inputs, training=False)
         value = self.value_predict(inputs)
 
@@ -57,39 +57,28 @@ class PPONetwork(Network):
     def value_predict(self, inputs):
         return self.value(inputs, training=False)
 
-    def predict_last_value(self, terminal_state):
-        return self.value_predict(terminal_state)
+    def predict_last_value(self, state, is_terminal: bool):
+        if is_terminal:
+            return self.last_value
+
+        return self.value_predict(state)
 
     @tf.function
     def act(self, inputs: Union[tf.Tensor, List[tf.Tensor], Dict[str, tf.Tensor]]):
         action = self.policy(inputs, training=False)
         return action
 
-    # def update_step_policy(self, batch):
-    #     with tf.GradientTape() as tape:
-    #         loss, kl = self.agent.policy_objective(batch)
-    #
-    #     gradients = tape.gradient(loss, self.policy.trainable_variables)
-    #
-    #     if self.agent.should_clip_policy_grads:
-    #         gradients = [tf.clip_by_norm(grad, clip_norm=self.agent.grad_norm_policy) for grad in gradients]
-    #
-    #     self.agent.policy_optimizer.apply_gradients(zip(gradients, self.policy.trainable_variables))
-    #
-    #     return loss, kl, gradients
-    #
-    # def update_step_value(self, batch):
-    #     with tf.GradientTape() as tape:
-    #         loss = self.agent.value_objective(batch)
-    #
-    #     gradients = tape.gradient(loss, self.value.trainable_variables)
-    #
-    #     if self.agent.should_clip_value_grads:
-    #         gradients = [tf.clip_by_norm(grad, clip_norm=self.agent.grad_norm_value) for grad in gradients]
-    #
-    #     self.agent.value_optimizer.apply_gradients(zip(gradients, self.value.trainable_variables))
-    #
-    #     return loss, gradients
+    @tf.function
+    def act2(self, inputs: Union[tf.Tensor, List[tf.Tensor], Dict[str, tf.Tensor]]):
+        policy = self.policy(inputs, training=False)
+        value = self.value_predict(inputs)
+
+        if self.distribution != 'categorical':
+            log_prob = policy.log_prob(tf.clip_by_value(policy, utils.EPSILON, 1.0 - utils.EPSILON))
+        else:
+            log_prob = policy.log_prob(policy)
+
+        return policy, log_prob, value
 
     def policy_layers(self, inputs: Dict[str, Input], **kwargs):
         """Defines the architecture of the policy-network"""
@@ -131,20 +120,37 @@ class PPONetwork(Network):
 
         return Model(list(inputs.values()), outputs=action, name='Policy-Network')
 
-    def value_network(self, mixture_components=3, **kwargs):
+    def value_network(self, **kwargs):
         inputs = self._get_input_layers()
         last_layer = self.value_layers(inputs, **kwargs)
 
         # Gaussian value-head
-        value = self.value_head(last_layer, mixture_components=mixture_components)
+        # value = self.gaussian_value_head(last_layer, **kwargs)
+
+        value = self.value_head(last_layer, **kwargs)
 
         return Model(list(inputs.values()), outputs=value, name='Value-Network')
 
-    def value_head(self, last_layer: Layer, **kwargs):
-        mixture_components = kwargs.get('mixture_components', 3)
-        activation = kwargs.get('activation', tf.nn.swish)
+    def value_head(self, layer: Layer, exponent_scale=6.0, components=1, **kwargs):
+        assert components >= 1
+        assert exponent_scale > 0.0
 
-        # Gaussian value-head
+        if components == 1:
+            base = Dense(units=1, activation=tf.nn.tanh, name='v-base')(layer)
+            exp = Dense(units=1, activation=lambda x: exponent_scale * tf.nn.sigmoid(x), name='v-exp')(layer)
+        else:
+            weights_base = Dense(units=components, activation='softmax', name='w-base')(layer)
+            weights_exp = Dense(units=components, activation='softmax', name='w-exp')(layer)
+
+            base = Dense(units=components, activation=tf.nn.tanh, name='v-base')(layer)
+            base = utils.tf_dot_product(base, weights_base, axis=1, keepdims=True)
+
+            exp = Dense(units=components, activation=lambda x: exponent_scale * tf.nn.sigmoid(x), name='v-exp')(layer)
+            exp = utils.tf_dot_product(exp, weights_exp, axis=1, keepdims=True)
+
+        return concatenate([base, exp], axis=1)
+
+    def gaussian_value_head(self, last_layer: Layer, mixture_components=3, activation=tf.nn.swish, **kwargs):
         num_params = tfp.layers.MixtureNormal.params_size(mixture_components, event_shape=(1,))
         params = Dense(units=num_params, activation=activation, name='value-parameters')(last_layer)
 
@@ -246,7 +252,7 @@ class PPONetwork(Network):
         input_layers = dict()
 
         for name, shape in self.agent.state_spec.items():
-            if self.agent.drop_batch_reminder:
+            if self.agent.drop_batch_remainder:
                 layer = Input(shape=shape, batch_size=self.agent.batch_size, dtype=tf.float32, name=name)
             else:
                 layer = Input(shape=shape, dtype=tf.float32, name=name)

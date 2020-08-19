@@ -197,11 +197,11 @@ class PPOAgent(Agent):
                 self.num_classes = action_space.n
                 self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
-    def act(self, state):
-        action = self.network.act(inputs=utils.to_tensor(state))
+    def act(self, state, *args, **kwargs):
+        action = self.network.act(inputs=state)
         return self.convert_action(action)
 
-    def predict(self, state):
+    def predict(self, state, *args, **kwargs):
         return self.network.predict(inputs=state)
 
     def update(self):
@@ -209,11 +209,14 @@ class PPOAgent(Agent):
         self.episode_count += 1
 
         # Compute advantages and returns:
-        denorm_returns = self.memory.compute_returns(discount=self.gamma)
-        denorm_values = self.memory.compute_advantages(self.gamma, self.lambda_)
+        returns = self.memory.compute_returns(discount=self.gamma)
+        values, advantages = self.memory.compute_advantages(self.gamma, self.lambda_)
 
-        self.log(returns=self.memory.returns, advantages=self.memory.advantages, values=self.memory.values,
-                 returns_denorm=denorm_returns, values_denorm=denorm_values)
+        self.log(returns=returns, advantages=advantages, values=values,
+                 returns_base=self.memory.returns[:, 0], returns_exp=self.memory.returns[:, 1],
+                 values_base=self.memory.values[:, 0], values_exp=self.memory.values[:, 1],
+                 returns_minus_values=returns - values[:-1], advantages_normalized=self.memory.advantages,
+                 advantages_diff_norm=utils.tf_normalize(advantages) - self.memory.advantages)
 
         # Prepare data:
         value_batches = self.get_value_batches()
@@ -320,7 +323,9 @@ class PPOAgent(Agent):
                 # prevents the following code to update the policy network
                 return gradients, False
 
-        # update policy network
+        return self.apply_policy_gradients(gradients), True
+
+    def apply_policy_gradients(self, gradients):
         if self.should_clip_policy_grads:
             gradients = [tf.clip_by_norm(grad, clip_norm=self.grad_norm_policy) for grad in gradients]
 
@@ -334,7 +339,7 @@ class PPOAgent(Agent):
             self.network.update_old_policy()
             self.policy_optimizer.apply_gradients(zip(gradients, self.network.policy.trainable_variables))
 
-        return gradients, True
+        return gradients
 
     def get_value_gradients(self, batch):
         with tf.GradientTape() as tape:
@@ -354,7 +359,9 @@ class PPOAgent(Agent):
                 # prevents the following code to update the value network
                 return gradients, False
 
-        # update value network
+        return self.apply_value_gradients(gradients), True
+
+    def apply_value_gradients(self, gradients):
         if self.should_clip_value_grads:
             gradients = [tf.clip_by_norm(grad, clip_norm=self.grad_norm_value) for grad in gradients]
 
@@ -365,15 +372,13 @@ class PPOAgent(Agent):
         else:
             self.value_optimizer.apply_gradients(zip(gradients, self.network.value.trainable_variables))
 
-        return gradients, True
+        return gradients
 
     def get_value_batches(self):
         """Computes batches of data for updating the value network"""
         return utils.data_to_batches(tensors=self.value_batch_tensors(), batch_size=self.batch_size,
-                                     drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
-                                     # map_fn=self.preprocess(),
-                                     shuffle=True, shuffle_batches=False,
-                                     num_shards=self.obs_skipping)
+                                     drop_remainder=self.drop_batch_remainder, skip=self.skip_count,
+                                     shuffle=True, shuffle_batches=False, num_shards=self.obs_skipping)
 
     def value_batch_tensors(self) -> Union[tuple, dict]:
         """Defines which data to use in `get_value_batches()`"""
@@ -382,9 +387,8 @@ class PPOAgent(Agent):
     def get_policy_batches(self):
         """Computes batches of data for updating the policy network"""
         return utils.data_to_batches(tensors=self.policy_batch_tensors(), batch_size=self.batch_size,
-                                     drop_remainder=self.drop_batch_reminder, skip=self.skip_count,
+                                     drop_remainder=self.drop_batch_remainder, skip=self.skip_count,
                                      num_shards=self.obs_skipping, shuffle=self.shuffle_data,
-                                     # map_fn=self.preprocess(),
                                      shuffle_batches=self.shuffle_batches)
 
     def policy_batch_tensors(self) -> Union[tuple, dict]:
@@ -416,10 +420,11 @@ class PPOAgent(Agent):
             new_log_prob = new_policy.log_prob(actions)
 
         kl_divergence = utils.kl_divergence(old_log_probabilities, new_log_prob)
+        kl_divergence = tf.reduce_mean(kl_divergence)
 
         # Entropy
-        entropy = new_policy.entropy()
-        entropy_penalty = -self.entropy_strength() * tf.reduce_mean(entropy)
+        entropy = tf.reduce_mean(new_policy.entropy())
+        entropy_penalty = -self.entropy_strength() * entropy
 
         # Compute the probability ratio between the current and old policy
         ratio = tf.math.exp(new_log_prob - old_log_probabilities)
@@ -433,11 +438,118 @@ class PPOAgent(Agent):
         total_loss = policy_loss + entropy_penalty
 
         # Log stuff
-        self.log(ratio=ratio, log_prob=new_log_prob, entropy=entropy, entropy_coeff=self.entropy_strength.value,
-                 ratio_clip=clip_value, kl_divergence=kl_divergence, loss_policy=policy_loss.numpy(),
-                 loss_entropy=entropy_penalty.numpy())
+        # self.log(ratio=ratio, log_prob=new_log_prob, entropy=entropy, entropy_coeff=self.entropy_strength.value,
+        #          ratio_clip=clip_value, kl_divergence=kl_divergence, loss_policy=policy_loss.numpy(),
+        #          loss_entropy=entropy_penalty.numpy())
 
-        return total_loss, tf.reduce_mean(kl_divergence)
+        self.log(ratio=tf.reduce_mean(ratio), log_prob=tf.reduce_mean(new_log_prob), entropy=entropy,
+                 entropy_coeff=self.entropy_strength.value, ratio_clip=clip_value, kl_divergence=kl_divergence,
+                 loss_policy=policy_loss.numpy(), loss_entropy=entropy_penalty.numpy())
+
+        return total_loss, kl_divergence
+
+    def collect(self, episodes: int, timesteps: int, render=True, record_threshold=0.0, seeds=None, close=True):
+        import random
+        sample_seed = False
+
+        if isinstance(seeds, int):
+            self.set_random_seed(seed=seeds)
+        elif isinstance(seeds, list):
+            sample_seed = True
+
+        for episode in range(1, episodes + 1):
+            if sample_seed:
+                self.set_random_seed(seed=random.choice(seeds))
+
+            self.reset()
+            episode_reward = 0.0
+            memory = PPOMemory(state_spec=self.state_spec, num_actions=self.num_actions)
+
+            state = self.env.reset()
+            state = utils.to_tensor(state)
+
+            if isinstance(state, dict):
+                state = {f'state_{k}': v for k, v in state.items()}
+
+            for t in range(1, timesteps + 1):
+                if render:
+                    self.env.render()
+
+                action, log_prob, value = self.network.act2(state)
+                next_state, reward, done, _ = self.env.step(self.convert_action(action))
+                episode_reward += reward
+
+                self.log(actions=action, rewards=reward, values=value, log_probs=log_prob)
+
+                memory.append(state, action, reward, value, log_prob)
+                state = utils.to_tensor(next_state)
+
+                if isinstance(state, dict):
+                    state = {f'state_{k}': v for k, v in state.items()}
+
+                if done or (t == timesteps):
+                    print(f'Episode {episode} terminated after {t} timesteps with reward {episode_reward}.')
+
+                    last_value = self.network.predict_last_value(state, is_terminal=done)
+                    memory.end_trajectory(last_value)
+                    break
+
+            self.log(evaluation_reward=episode_reward)
+            self.write_summaries()
+
+            if episode_reward >= record_threshold:
+                memory.serialize(episode, save_path=self.traces_dir)
+
+        if close:
+            self.env.close()
+
+    def imitate(self, epochs=1, batch_size: Union[None, int] = None, shuffle_batches=False, shuffle_data=False,
+                close=True, seed=None):
+        batch_size = self.batch_size if batch_size is None else batch_size
+        self.set_random_seed(seed)
+
+        for epoch in range(1, epochs + 1):
+            for i, trace in enumerate(utils.load_traces(self.traces_dir, shuffle=True)):
+                t0 = time.time()
+                self.reset()
+                trace = utils.unpack_trace(trace, unpack=False)
+
+                states = utils.to_tensor(trace['state'])[0]
+                actions = utils.to_float(trace['action'])
+                log_probs = utils.to_float(trace['log_prob'])
+                rewards = utils.to_float(trace['reward'])
+                values = utils.to_float(trace['value'])
+
+                data = utils.data_to_batches((states, actions, log_probs, rewards, values), batch_size=batch_size,
+                                             shuffle_batches=shuffle_batches, shuffle=shuffle_data, seed=seed,
+                                             skip=self.skip_count, num_shards=self.obs_skipping,
+                                             drop_remainder=self.drop_batch_remainder)
+                for batch in data:
+                    states, actions, log_probs, rewards, values = batch
+
+                    # TODO: refactor
+                    memory = PPOMemory(state_spec=self.state_spec, num_actions=self.num_actions)
+                    memory.rewards = rewards
+                    memory.values = values
+                    memory.compute_returns(discount=self.gamma)
+                    memory.compute_advantages(self.gamma, self.lambda_)
+
+                    # update policy:
+                    loss_policy, _, policy_grads = self.get_policy_gradients(batch=(states, memory.advantages,
+                                                                                    actions, log_probs))
+                    self.apply_policy_gradients(policy_grads)
+
+                    # update value:
+                    loss_value, value_grads = self.get_value_gradients(batch=(states, memory.returns))
+                    self.apply_value_gradients(value_grads)
+
+                    self.log(loss_policy=loss_policy, loss_value=loss_value, advantages=memory.advantages)
+
+                self.write_summaries()
+                print(f'[{epoch}] Trace-{i} took {round(time.time() - t0, 3)}s.')
+
+        if close:
+            self.env.close()
 
     def learn(self, episodes: int, timesteps: int, save_every: Union[bool, str, int] = False,
               render_every: Union[bool, str, int] = False, close=True):
@@ -500,7 +612,7 @@ class PPOAgent(Agent):
                         print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
                               f'with reward {round(episode_reward, 3)}.')
 
-                        last_value = self.last_value if done else self.network.predict_last_value(state)
+                        last_value = self.network.predict_last_value(state, is_terminal=done)
                         self.memory.end_trajectory(last_value)
                         break
 
@@ -568,7 +680,8 @@ class PPOMemory:
                 self.states[name] = tf.zeros(shape=(0,) + shape, dtype=tf.float32)
 
         self.rewards = tf.zeros(shape=(0,), dtype=tf.float32)
-        self.values = tf.zeros(shape=(0, 1), dtype=tf.float32)
+        # self.values = tf.zeros(shape=(0, 1), dtype=tf.float32)
+        self.values = tf.zeros(shape=(0, 2), dtype=tf.float32)
         self.actions = tf.zeros(shape=(0, num_actions), dtype=tf.float32)
         self.log_probabilities = tf.zeros(shape=(0, num_actions), dtype=tf.float32)
 
@@ -579,7 +692,7 @@ class PPOMemory:
     def clear(self):
         pass
 
-    # TODO: use kwargs to define what to append and where to store
+    # TODO: use kwargs to define what to append and where to store?
     def append(self, state, action, reward, value, log_prob):
         if self.simple_state:
             self.states = tf.concat([self.states, state], axis=0)
@@ -594,36 +707,57 @@ class PPOMemory:
         self.values = tf.concat([self.values, value], axis=0)
         self.log_probabilities = tf.concat([self.log_probabilities, log_prob], axis=0)
 
-    def end_trajectory(self, last_value):
+    def end_trajectory(self, last_value: tf.Tensor):
         """Terminates the current trajectory by adding the value of the terminal state"""
-        self.rewards = tf.concat([self.rewards, last_value[0]], axis=0)
+        value = last_value[:, 0] * tf.pow(10.0, last_value[:, 1])
+
+        self.rewards = tf.concat([self.rewards, value], axis=0)
         self.values = tf.concat([self.values, last_value], axis=0)
 
     def compute_returns(self, discount: float):
         """Computes the returns, also called rewards-to-go"""
         returns = utils.rewards_to_go(self.rewards, discount=discount)
-        self.returns = self.returns_stats.update(returns, normalize=True)
+        returns = utils.to_float(returns)
+        # self.returns = self.returns_stats.update(returns, normalize=True)
+
+        self.returns = tf.map_fn(fn=utils.decompose_number, elems=returns, dtype=(tf.float32, tf.float32))
+        self.returns = tf.stack(self.returns, axis=1)
         return returns
+
+    # def compute_advantages(self, gamma: float, lambda_: float):
+    #     """Computes the advantages using generalized-advantage estimation"""
+    #     mean = tf.cast(self.returns_stats.mean, dtype=tf.float32)
+    #     std = tf.cast(self.returns_stats.std, dtype=tf.float32)
+    #     denormalized_values = mean + self.values * std
+    #
+    #     advantages = utils.gae(self.rewards, values=denormalized_values, gamma=gamma, lambda_=lambda_, normalize=True)
+    #     self.advantages = tf.cast(advantages, dtype=tf.float32)
+    #
+    #     return denormalized_values
 
     def compute_advantages(self, gamma: float, lambda_: float):
         """Computes the advantages using generalized-advantage estimation"""
-        mean = tf.cast(self.returns_stats.mean, dtype=tf.float32)
-        std = tf.cast(self.returns_stats.std, dtype=tf.float32)
-        denormalized_values = mean + self.values * std
+        # value = base * 10^exponent
+        values = self.values[:, 0] * tf.pow(10.0, self.values[:, 1])
 
-        advantages = utils.gae(self.rewards, values=denormalized_values, gamma=gamma, lambda_=lambda_, normalize=True)
-        self.advantages = tf.cast(advantages, dtype=tf.float32)
+        # advantages = utils.gae(self.rewards, values=values, gamma=gamma, lambda_=lambda_, normalize=True)
+        advantages = utils.gae(self.rewards, values=values, gamma=gamma, lambda_=lambda_, normalize=False)
+        # self.advantages = tf.cast(advantages, dtype=tf.float32)
+        # self.advantages = utils.tf_normalize(advantages)
+        self.advantages = utils.tf_sign_preserving_normalization(advantages)
 
-        return denormalized_values
+        return values, advantages
 
     def serialize(self, episode: int, save_path: str):
-        """Writes to file (npz - numpy compressed format) all the transitions collected so far"""
+        """Writes to file (npz - numpy compressed format) all the transitions (state, reward, action) collected so
+           far.
+        """
         # Trace's file path:
         filename = f'trace-{episode}-{time.strftime("%Y%m%d-%H%M%S")}.npz'
         trace_path = os.path.join(save_path, filename)
 
         # Select data to save
-        buffer = dict(reward=self.rewards, action=self.actions)
+        buffer = dict(reward=self.rewards, action=self.actions, value=self.values, log_prob=self.log_probabilities)
 
         if self.simple_state:
             buffer['state'] = self.states
