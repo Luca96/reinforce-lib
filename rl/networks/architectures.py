@@ -14,7 +14,11 @@ def shufflenet_v2(input_image: Input, g=1.0, leak=0.0, last_channels=1024, linea
     channels = {0.5: [48, 96, 192],
                 1.0: [116, 232, 464],
                 1.5: [176, 352, 704],
-                2.0: [244, 488, 976]}
+                2.0: [244, 488, 976],
+                #
+                0.75: [82, 164, 328],
+                1.25: [146, 292, 584],
+                1.75: [210, 420, 840]}
 
     def activation(layer: Layer):
         """Activation: BatchNormalization + ReLU6"""

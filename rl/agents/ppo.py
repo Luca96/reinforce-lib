@@ -21,12 +21,13 @@ class PPOAgent(Agent):
     # TODO: 'value_loss' a parameter that selects the loss (either 'mse' or 'huber') for the value network
     # TODO: implement value function clipping?
     # TODO: dynamic-parameters: kl, noise, clip_norm...
-    # TODO: polyak factor to 0.99 or 0.95
-    def __init__(self, *args, policy_lr: Union[float, LearningRateSchedule] = 1e-3, gamma=0.99, lambda_=0.95,
-                 value_lr: Union[float, LearningRateSchedule] = 3e-4, optimization_steps=(1, 1), target_kl=False,
-                 clip_ratio: Union[float, LearningRateSchedule, DynamicParameter] = 0.2, load=False, name='ppo-agent',
-                 entropy_regularization: Union[float, LearningRateSchedule, DynamicParameter] = 0.0, optimizer='adam',
-                 clip_norm=(1.0, 1.0), mixture_components=1, network: Union[dict, PPONetwork] = None,
+    # TODO: debug each action separately
+    def __init__(self, *args, policy_lr: Union[float, LearningRateSchedule, DynamicParameter] = 1e-3, gamma=0.99,
+                 lambda_=0.95, value_lr: Union[float, LearningRateSchedule, DynamicParameter] = 3e-4, load=False,
+                 optimization_steps=(1, 1), target_kl=False, name='ppo-agent', optimizer='adam', clip_norm=(1.0, 1.0),
+                 clip_ratio: Union[float, LearningRateSchedule, DynamicParameter] = 0.2, mixture_components=1,
+                 entropy_regularization: Union[float, LearningRateSchedule, DynamicParameter] = 0.0,
+                 network: Union[dict, PPONetwork] = None, advantage_scale: Union[float, DynamicParameter] = 2.0,
                  accumulate_gradients_over_batches=False, update_frequency=1, polyak=1.0, **kwargs):
         assert 0.0 < polyak <= 1.0
 
@@ -36,6 +37,11 @@ class PPOAgent(Agent):
         self.gamma = gamma
         self.lambda_ = lambda_
         self.mixture_components = mixture_components
+
+        if isinstance(advantage_scale, float):
+            self.adv_scale = ConstantParameter(value=advantage_scale)
+        else:
+            self.adv_scale = advantage_scale
 
         # Entropy regularization
         if isinstance(entropy_regularization, float):
@@ -95,9 +101,6 @@ class PPOAgent(Agent):
         else:
             self.network = PPONetwork(agent=self, policy={}, value={})
 
-        if load:
-            self.load()
-
         # Optimization
         self.accumulate_gradients_over_batches = accumulate_gradients_over_batches
         self.update_frequency = update_frequency
@@ -108,8 +111,8 @@ class PPOAgent(Agent):
         if self.update_frequency > 1:
             self.accumulate_gradients_over_batches = True
 
-        self.policy_lr = self._init_lr_schedule(policy_lr, config=self.config.get('policy_lr', {}))
-        self.value_lr = self._init_lr_schedule(value_lr, config=self.config.get('value_lr', {}))
+        self.policy_lr = self._init_lr_schedule(policy_lr)
+        self.value_lr = self._init_lr_schedule(value_lr)
 
         self.policy_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=self.policy_lr)
         self.value_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=self.value_lr)
@@ -118,15 +121,18 @@ class PPOAgent(Agent):
         self.should_polyak_average = polyak < 1.0
         self.polyak_coeff = polyak
 
+        if load:
+            self.load()
+
     @staticmethod
-    def _init_lr_schedule(lr: Union[float, LearningRateSchedule], config: dict):
+    def _init_lr_schedule(lr: Union[float, LearningRateSchedule]):
         if isinstance(lr, float):
-            return schedules.ConstantSchedule(lr)
+            return ConstantParameter(lr)
 
-        elif not isinstance(lr, schedules.Schedule) and isinstance(lr, LearningRateSchedule):
-            return schedules.ScheduleWrapper(lr_schedule=lr, offset=config.get('step_offset', 0))
+        if isinstance(lr, ParameterWrapper) or isinstance(lr, DynamicParameter):
+            return lr
 
-        return lr
+        return ParameterWrapper(schedule=lr)
 
     def _init_gradient_clipping(self, clip_norm: Union[tuple, float, None]):
         if clip_norm is None:
@@ -210,13 +216,12 @@ class PPOAgent(Agent):
 
         # Compute advantages and returns:
         returns = self.memory.compute_returns(discount=self.gamma)
-        values, advantages = self.memory.compute_advantages(self.gamma, self.lambda_)
+        values, advantages = self.memory.compute_advantages(self.gamma, self.lambda_, scale=self.adv_scale())
 
-        self.log(returns=returns, advantages=advantages, values=values,
+        self.log(returns=returns, advantages=advantages, values=values,  advantage_scale=self.adv_scale.value,
                  returns_base=self.memory.returns[:, 0], returns_exp=self.memory.returns[:, 1],
                  values_base=self.memory.values[:, 0], values_exp=self.memory.values[:, 1],
-                 returns_minus_values=returns - values[:-1], advantages_normalized=self.memory.advantages,
-                 advantages_diff_norm=utils.tf_normalize(advantages) - self.memory.advantages)
+                 returns_minus_values=returns - values[:-1], advantages_normalized=self.memory.advantages)
 
         # Prepare data:
         value_batches = self.get_value_batches()
@@ -235,7 +240,7 @@ class PPOAgent(Agent):
                     gradients = utils.accumulate_gradients(policy_grads, gradients)
                 else:
                     self.update_policy(policy_grads)
-                    self.log(lr_policy=self.policy_lr.lr)
+                    self.log(lr_policy=self.policy_lr.value)
 
                 self.log(loss_total=total_loss.numpy(),
                          gradients_norm_policy=[tf.norm(gradient) for gradient in policy_grads])
@@ -246,7 +251,7 @@ class PPOAgent(Agent):
 
                 if updated:
                     self.log(gradients_norm_policy_update=[tf.norm(g) for g in batch_gradients],
-                             lr_policy=self.policy_lr.lr)
+                             lr_policy=self.policy_lr.value)
                 else:
                     self.log(gradients_norm_policy_batch=[tf.norm(g) for g in batch_gradients])
 
@@ -288,7 +293,7 @@ class PPOAgent(Agent):
                     gradients = utils.accumulate_gradients(value_grads, gradients)
                 else:
                     self.update_value(value_grads)
-                    self.log(lr_value=self.value_lr.lr)
+                    self.log(lr_value=self.value_lr.value)
 
                 self.log(loss_value=value_loss.numpy(),
                          gradients_norm_value=[tf.norm(gradient) for gradient in value_grads])
@@ -299,7 +304,7 @@ class PPOAgent(Agent):
 
                 if updated:
                     self.log(gradients_norm_value_update=[tf.norm(g) for g in batch_gradients],
-                             lr_value=self.value_lr.lr)
+                             lr_value=self.value_lr.value)
                 else:
                     self.log(gradients_norm_value_batch=[tf.norm(g) for g in batch_gradients])
 
@@ -327,7 +332,8 @@ class PPOAgent(Agent):
 
     def apply_policy_gradients(self, gradients):
         if self.should_clip_policy_grads:
-            gradients = [tf.clip_by_norm(grad, clip_norm=self.grad_norm_policy) for grad in gradients]
+            gradients = utils.clip_gradients(gradients, norm=self.grad_norm_policy)
+            # gradients = [tf.clip_by_norm(grad, clip_norm=self.grad_norm_policy) for grad in gradients]
 
         if self.should_polyak_average:
             old_weights = self.network.policy.get_weights()
@@ -363,7 +369,8 @@ class PPOAgent(Agent):
 
     def apply_value_gradients(self, gradients):
         if self.should_clip_value_grads:
-            gradients = [tf.clip_by_norm(grad, clip_norm=self.grad_norm_value) for grad in gradients]
+            gradients = utils.clip_gradients(gradients, norm=self.grad_norm_value)
+            # gradients = [tf.clip_by_norm(grad, clip_norm=self.grad_norm_value) for grad in gradients]
 
         if self.should_polyak_average:
             old_weights = self.network.value.get_weights()
@@ -374,26 +381,26 @@ class PPOAgent(Agent):
 
         return gradients
 
+    def value_batch_tensors(self) -> Union[tuple, dict]:
+        """Defines which data to use in `get_value_batches()`"""
+        return self.memory.states, self.memory.returns
+
+    def policy_batch_tensors(self) -> Union[tuple, dict]:
+        """Defines which data to use in `get_policy_batches()`"""
+        return self.memory.states, self.memory.advantages, self.memory.actions, self.memory.log_probabilities
+
     def get_value_batches(self):
         """Computes batches of data for updating the value network"""
         return utils.data_to_batches(tensors=self.value_batch_tensors(), batch_size=self.batch_size,
                                      drop_remainder=self.drop_batch_remainder, skip=self.skip_count,
                                      shuffle=True, shuffle_batches=False, num_shards=self.obs_skipping)
 
-    def value_batch_tensors(self) -> Union[tuple, dict]:
-        """Defines which data to use in `get_value_batches()`"""
-        return self.memory.states, self.memory.returns
-
     def get_policy_batches(self):
         """Computes batches of data for updating the policy network"""
         return utils.data_to_batches(tensors=self.policy_batch_tensors(), batch_size=self.batch_size,
                                      drop_remainder=self.drop_batch_remainder, skip=self.skip_count,
-                                     num_shards=self.obs_skipping, shuffle=self.shuffle_data,
+                                     num_shards=self.obs_skipping, shuffle=self.shuffle,
                                      shuffle_batches=self.shuffle_batches)
-
-    def policy_batch_tensors(self) -> Union[tuple, dict]:
-        """Defines which data to use in `get_policy_batches()`"""
-        return self.memory.states, self.memory.advantages, self.memory.actions, self.memory.log_probabilities
 
     @tf.function
     def value_objective(self, batch):
@@ -424,27 +431,30 @@ class PPOAgent(Agent):
 
         # Entropy
         entropy = tf.reduce_mean(new_policy.entropy())
-        entropy_penalty = -self.entropy_strength() * entropy
+        entropy_penalty = self.entropy_strength() * entropy
 
         # Compute the probability ratio between the current and old policy
         ratio = tf.math.exp(new_log_prob - old_log_probabilities)
+        ratio = tf.reduce_mean(ratio, axis=1)  # mean over per-action ratio
 
         # Compute the clipped ratio times advantage
         clip_value = self.clip_ratio()
         clipped_ratio = tf.clip_by_value(ratio, clip_value_min=1.0 - clip_value, clip_value_max=1.0 + clip_value)
 
+        # Source: https://github.com/openai/spinningup/blob/master/spinup/algos/tf1/ppo/ppo.py#L201
+        min_adv = tf.where(advantages > 0.0, x=(1.0 + clip_value) * advantages, y=(1.0 - clip_value) * advantages)
+
         # Loss = min { ratio * A, clipped_ratio * A } + entropy_term
-        policy_loss = -tf.reduce_mean(tf.minimum(ratio * advantages, clipped_ratio * advantages))
-        total_loss = policy_loss + entropy_penalty
+        policy_loss = -tf.reduce_mean(tf.minimum(ratio * advantages, min_adv))
+        # policy_loss = -tf.reduce_mean(tf.minimum(ratio * advantages, clipped_ratio * advantages))
+        total_loss = policy_loss - entropy_penalty
 
         # Log stuff
-        # self.log(ratio=ratio, log_prob=new_log_prob, entropy=entropy, entropy_coeff=self.entropy_strength.value,
-        #          ratio_clip=clip_value, kl_divergence=kl_divergence, loss_policy=policy_loss.numpy(),
-        #          loss_entropy=entropy_penalty.numpy())
-
         self.log(ratio=tf.reduce_mean(ratio), log_prob=tf.reduce_mean(new_log_prob), entropy=entropy,
                  entropy_coeff=self.entropy_strength.value, ratio_clip=clip_value, kl_divergence=kl_divergence,
-                 loss_policy=policy_loss.numpy(), loss_entropy=entropy_penalty.numpy())
+                 loss_policy=policy_loss.numpy(), loss_entropy=entropy_penalty.numpy(),
+                 adv_diff=clipped_ratio - min_adv, adv_ratio=ratio * advantages, adv_min=min_adv,
+                 adv_minimum=tf.minimum(ratio * advantages, min_adv), adv_min_diff=ratio * advantages - min_adv)
 
         return total_loss, kl_divergence
 
@@ -505,6 +515,7 @@ class PPOAgent(Agent):
 
     def imitate(self, epochs=1, batch_size: Union[None, int] = None, shuffle_batches=False, shuffle_data=False,
                 close=True, seed=None):
+        """Learn from experience traces collected by 'collect'"""
         batch_size = self.batch_size if batch_size is None else batch_size
         self.set_random_seed(seed)
 
@@ -565,22 +576,15 @@ class PPOAgent(Agent):
         elif render_every is True:
             render_every = 1
 
-        preprocess_fn = self.preprocess()
         self.episode_count = 0
 
         try:
             for episode in range(1, episodes + 1):
+                preprocess_fn = self.preprocess()
                 self.reset()
                 self.memory = PPOMemory(state_spec=self.state_spec, num_actions=self.num_actions)
 
                 state = self.env.reset()
-                state = utils.to_tensor(state)
-                state = preprocess_fn(state)
-
-                # TODO: temporary fix (shouldn't work for deeper nesting...)
-                if isinstance(state, dict):
-                    state = {f'state_{k}': v for k, v in state.items()}
-
                 episode_reward = 0.0
                 t0 = time.time()
                 render = episode % render_every == 0
@@ -588,6 +592,12 @@ class PPOAgent(Agent):
                 for t in range(1, timesteps + 1):
                     if render:
                         self.env.render()
+
+                    if isinstance(state, dict):
+                        state = {f'state_{k}': v for k, v in state.items()}
+
+                    state = preprocess_fn(state)
+                    state = utils.to_tensor(state)
 
                     # Agent prediction
                     action, mean, std, log_prob, value = self.predict(state)
@@ -600,19 +610,19 @@ class PPOAgent(Agent):
                     self.log(actions=action, action_env=action_env, rewards=reward,
                              distribution_mean=mean, distribution_std=std)
 
-                    self.memory.append(state, action, reward, value, log_prob)
-                    state = utils.to_tensor(next_state)
-                    state = preprocess_fn(state)
-
-                    if isinstance(state, dict):
-                        state = {f'state_{k}': v for k, v in state.items()}
+                    self.memory.append(state, action, reward, value, log_prob, timestep=t / timesteps)
+                    state = next_state
 
                     # check whether a termination (terminal state or end of a transition) is reached:
                     if done or (t == timesteps):
                         print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
                               f'with reward {round(episode_reward, 3)}.')
 
-                        last_value = self.network.predict_last_value(state, is_terminal=done)
+                        state = preprocess_fn(state)
+                        state = utils.to_tensor(state)
+
+                        last_value = self.network.predict_last_value(state, timestep=(t + 1) / timesteps,
+                                                                     is_terminal=done)
                         self.memory.end_trajectory(last_value)
                         break
 
@@ -622,6 +632,8 @@ class PPOAgent(Agent):
 
                 if self.should_record:
                     self.record(episode)
+
+                self.on_episode_end()
 
                 if episode % save_every == 0:
                     self.save()
@@ -647,6 +659,7 @@ class PPOAgent(Agent):
     def save_config(self):
         print('save config')
         self.update_config(policy_lr=self.policy_lr.serialize(), value_lr=self.value_lr.serialize(),
+                           adv_scale=self.adv_scale.serialize(),
                            entropy_strength=self.entropy_strength.serialize(), clip_ratio=self.clip_ratio.serialize())
         super().save_config()
 
@@ -654,12 +667,21 @@ class PPOAgent(Agent):
         print('load config')
         super().load_config()
 
-        self.entropy_strength.load(config=self.config.get('entropy_strength', 0))
-        self.clip_ratio.load(config=self.config.get('clip_ratio', 0))
+        self.policy_lr.load(config=self.config.get('policy_lr', {}))
+        self.value_lr.load(config=self.config.get('value_lr', {}))
+        self.adv_scale.load(config=self.config.get('adv_scale', {}))
+        self.entropy_strength.load(config=self.config.get('entropy_strength', {}))
+        self.clip_ratio.load(config=self.config.get('clip_ratio', {}))
 
     def reset(self):
         super().reset()
         self.network.reset()
+
+    def on_episode_end(self):
+        super().on_episode_end()
+        self.policy_lr.on_episode()
+        self.value_lr.on_episode()
+        self.adv_scale.on_episode()
 
 
 class PPOMemory:
@@ -680,10 +702,10 @@ class PPOMemory:
                 self.states[name] = tf.zeros(shape=(0,) + shape, dtype=tf.float32)
 
         self.rewards = tf.zeros(shape=(0,), dtype=tf.float32)
-        # self.values = tf.zeros(shape=(0, 1), dtype=tf.float32)
         self.values = tf.zeros(shape=(0, 2), dtype=tf.float32)
         self.actions = tf.zeros(shape=(0, num_actions), dtype=tf.float32)
         self.log_probabilities = tf.zeros(shape=(0, num_actions), dtype=tf.float32)
+        self.timesteps = tf.zeros(shape=(0,), dtype=tf.float32)
 
         self.returns = None
         self.advantages = None
@@ -693,7 +715,7 @@ class PPOMemory:
         pass
 
     # TODO: use kwargs to define what to append and where to store?
-    def append(self, state, action, reward, value, log_prob):
+    def append(self, state, action, reward, value, log_prob, timestep):
         if self.simple_state:
             self.states = tf.concat([self.states, state], axis=0)
         else:
@@ -706,6 +728,7 @@ class PPOMemory:
         self.rewards = tf.concat([self.rewards, [reward]], axis=0)
         self.values = tf.concat([self.values, value], axis=0)
         self.log_probabilities = tf.concat([self.log_probabilities, log_prob], axis=0)
+        # self.timesteps = tf.concat([self.timesteps, [timestep]], axis=0)
 
     def end_trajectory(self, last_value: tf.Tensor):
         """Terminates the current trajectory by adding the value of the terminal state"""
@@ -718,33 +741,25 @@ class PPOMemory:
         """Computes the returns, also called rewards-to-go"""
         returns = utils.rewards_to_go(self.rewards, discount=discount)
         returns = utils.to_float(returns)
-        # self.returns = self.returns_stats.update(returns, normalize=True)
 
         self.returns = tf.map_fn(fn=utils.decompose_number, elems=returns, dtype=(tf.float32, tf.float32))
         self.returns = tf.stack(self.returns, axis=1)
         return returns
 
-    # def compute_advantages(self, gamma: float, lambda_: float):
-    #     """Computes the advantages using generalized-advantage estimation"""
-    #     mean = tf.cast(self.returns_stats.mean, dtype=tf.float32)
-    #     std = tf.cast(self.returns_stats.std, dtype=tf.float32)
-    #     denormalized_values = mean + self.values * std
-    #
-    #     advantages = utils.gae(self.rewards, values=denormalized_values, gamma=gamma, lambda_=lambda_, normalize=True)
-    #     self.advantages = tf.cast(advantages, dtype=tf.float32)
-    #
-    #     return denormalized_values
-
-    def compute_advantages(self, gamma: float, lambda_: float):
+    def compute_advantages(self, gamma: float, lambda_: float, scale=2.0):
         """Computes the advantages using generalized-advantage estimation"""
         # value = base * 10^exponent
         values = self.values[:, 0] * tf.pow(10.0, self.values[:, 1])
 
-        # advantages = utils.gae(self.rewards, values=values, gamma=gamma, lambda_=lambda_, normalize=True)
         advantages = utils.gae(self.rewards, values=values, gamma=gamma, lambda_=lambda_, normalize=False)
-        # self.advantages = tf.cast(advantages, dtype=tf.float32)
-        # self.advantages = utils.tf_normalize(advantages)
-        self.advantages = utils.tf_sign_preserving_normalization(advantages)
+        # self.advantages = utils.tf_sign_preserving_normalization(advantages)
+        # self.advantages = utils.truncate(advantages)
+        self.advantages = utils.tf_sign_preserving_normalization(advantages) * scale
+
+        # works well (with lr decay) for cart-pole
+        # self.advantages = utils.to_float(advantages)
+
+        # self.advantages = utils.to_float(tf.clip_by_value(advantages, -10.0, 10.0))
 
         return values, advantages
 

@@ -36,6 +36,7 @@ class CARLAEvent(enum.Enum):
 # -- Base Class and Wrappers
 # -------------------------------------------------------------------------------------------------
 
+# TODO: use gym register API to make these environments available to gym.make(...)
 class CARLABaseEnvironment(gym.Env):
     """Base extendable environment for the CARLA driving simulator"""
 
@@ -208,6 +209,10 @@ class CARLABaseEnvironment(gym.Env):
         raise NotImplementedError
 
     @property
+    def info_space(self) -> spaces.Space:
+        raise NotImplementedError
+
+    @property
     def reward_range(self) -> tuple:
         raise NotImplementedError
 
@@ -322,7 +327,7 @@ class CARLABaseEnvironment(gym.Env):
         terminal = self.terminal_condition()
         next_state = env_utils.replace_nans(self.get_observation(sensors_data))
 
-        return next_state, reward, terminal, {}
+        return next_state, reward, terminal, self.get_info()
 
     def terminal_condition(self, **kwargs) -> Union[bool, int]:
         """Tells whether the episode is terminated or not."""
@@ -519,6 +524,9 @@ class CARLABaseEnvironment(gym.Env):
     def get_observation(self, sensors_data: dict) -> dict:
         raise NotImplementedError
 
+    def get_info(self) -> dict:
+        return {}
+
     def elapsed_time(self):
         """Returns the total elapsed time in seconds, computed from the last reset() call."""
         return self.current_timestamp.elapsed_seconds - self.initial_timestamp.elapsed_seconds
@@ -708,7 +716,7 @@ class CARLACollectWrapper(CARLAWrapper):
                     action = env.control_to_actions(control)
 
                     # step
-                    next_state, reward, done, _ = env.step(action)
+                    next_state, reward, done, info = env.step(action)
                     episode_reward += reward
 
                     if self.have_collided:
@@ -719,7 +727,7 @@ class CARLACollectWrapper(CARLAWrapper):
                             break
 
                     # record
-                    self.store_transition(state=state, action=action, reward=reward, done=done)
+                    self.store_transition(state=state, action=action, reward=reward, done=done, info=info)
                     state = next_state
 
                     if done or (t == timesteps - 1):
@@ -736,30 +744,33 @@ class CARLACollectWrapper(CARLAWrapper):
                 env.close()
 
     def init_buffer(self, num_timesteps: int):
-        # partial buffer: misses 'state' and 'action'
+        # partial buffer: misses 'state', 'action', and 'info'
         self.buffer = dict(reward=np.zeros(shape=num_timesteps),
                            done=np.zeros(shape=num_timesteps))
 
         obs_spec = rl_utils.space_to_spec(space=self.env.observation_space)
         act_spec = rl_utils.space_to_spec(space=self.env.action_space)
+        info_spec = rl_utils.space_to_spec(space=self.env.info_space)
 
         print('obs_spec\n', obs_spec)
         print('action_spec\n', act_spec)
+        print('info_spec\n', info_spec)
 
         # include in buffer 'state' and 'action'
         self._apply_space_spec(spec=obs_spec, size=num_timesteps, name='state')
         self._apply_space_spec(spec=act_spec, size=num_timesteps, name='action')
+        self._apply_space_spec(spec=info_spec, size=num_timesteps, name='info')
         self.timestep = 0
 
     def store_transition(self, **kwargs):
-        """Collects one transition (s, a, r, d)"""
+        """Collects one transition (s, a, r, d, i)"""
         for name, value in kwargs.items():
             self._store_item(item=value, index=self.timestep, name=name)
 
         self.timestep += 1
 
     def end_trajectory(self) -> dict:
-        """Ends a sequence of transitions {(s, a, r, d)_t}"""
+        """Ends a sequence of transitions {(s, a, r, d, i)_t}"""
         # Add the reward for the terminal/final state:
         self.buffer['reward'] = np.concatenate([self.buffer['reward'], np.array([0.0])])
 
@@ -780,6 +791,7 @@ class CARLACollectWrapper(CARLAWrapper):
 
         # Save buffer
         np.savez_compressed(file=trace_path, **buffer)
+        print(f'Trace {filename} saved.')
 
     def _apply_space_spec(self, spec: Union[tuple, dict], size: int, name: str):
         if not isinstance(spec, dict):
@@ -827,7 +839,12 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
                          default=np.zeros(shape=9, dtype=np.float32))
 
     # High-level routing command (aka RoadOption)
-    COMMAND_SPACE = spaces.Box(low=0.0, high=1.0, shape=(len(RoadOption),))
+    COMMAND_SPACE = spaces.Box(low=0.0, high=1.0, shape=RoadOption.shape)
+
+    INFO_SPACE = spaces.Dict(speed=spaces.Box(low=0.0, high=150.0, shape=(1,)),
+                             speed_limit=spaces.Box(low=0.0, high=90.0, shape=(1,)),
+                             similarity=spaces.Box(low=-1.0, high=1.0, shape=(1,)),
+                             distance_to_next_waypoint=spaces.Box(low=0.0, high=np.inf, shape=(1,)))
 
     def __init__(self, *args, disable_reverse=False, min_throttle=0.0, camera='segmentation',
                  hard_control_threshold: Union[float, None] = None, **kwargs):
@@ -847,9 +864,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         self.similarity = 0.0
         self.forward_vector = None
 
-        # TODO: use 'next_command' to compute "action penalty"?
         self.next_command = RoadOption.VOID
-
         self.last_actions = self.ACTION['default']
         self.last_location = None
         self.last_travelled_distance = 0.0
@@ -866,6 +881,10 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
     def observation_space(self) -> spaces.Space:
         return spaces.Dict(road=self.ROAD_FEATURES['space'], vehicle=self.VEHICLE_FEATURES['space'],
                            past_control=self.CONTROL['space'], command=self.COMMAND_SPACE, image=self.image_space)
+
+    @property
+    def info_space(self) -> spaces.Space:
+        return self.INFO_SPACE
 
     @property
     def reward_range(self) -> tuple:
@@ -912,11 +931,11 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         # self.last_location = self.origin.location
         return observation
 
-    def terminal_condition(self, **kwargs) -> Union[bool, int]:
+    def terminal_condition(self, **kwargs) -> bool:
         if self.should_terminate:
-            return 2
+            return True
 
-        return self.route.distance_to_destination(self.vehicle.get_location()) < 2.0
+        return self.route.distance_to_destination(self.vehicle.get_location()) <= 2.0
 
     def define_sensors(self) -> dict:
         if self.camera_type == 'rgb':
@@ -1059,6 +1078,11 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
 
         return dict(image=image, vehicle=vehicle_obs, road=road_obs, past_control=control_obs,
                     command=self.next_command.to_one_hot())
+
+    def get_info(self) -> dict:
+        """Returns a dict with additional information either for debugging or learning"""
+        return dict(speed=utils.speed(self.vehicle), speed_limit=self.vehicle.get_speed_limit(),
+                    similarity=self.similarity, distance_to_next_waypoint=self.route.distance_to_next_waypoint())
 
     def _control_as_vector(self) -> list:
         return [self.control.throttle, self.control.brake, self.control.steer, float(self.control.reverse)]

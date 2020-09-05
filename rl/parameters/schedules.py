@@ -3,6 +3,8 @@
 from tensorflow.keras.optimizers import schedules
 
 
+# TODO: remove file
+
 class Schedule:
     """Interface for learning rate schedule wrappers"""
     def serialize(self) -> dict:

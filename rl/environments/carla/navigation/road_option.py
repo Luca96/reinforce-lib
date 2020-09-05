@@ -17,12 +17,13 @@ class RoadOption(Enum):
     CHANGE_LANE_LEFT = 5
     CHANGE_LANE_RIGHT = 6
 
-    def __len__(self) -> int:
-        return 7
+    @property
+    def shape(self) -> tuple:
+        return 6,
 
     def to_one_hot(self):
         """Returns a one-hot encoded route-option as np.array"""
-        encoded = np.zeros(shape=7, dtype=np.float32)
+        encoded = np.zeros(shape=self.shape, dtype=np.float32)
 
         if self.value == -1:
             return encoded

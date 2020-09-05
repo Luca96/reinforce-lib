@@ -59,7 +59,7 @@ def discount_cumsum(x, discount: float):
 
 
 def gae(rewards, values, gamma: float, lambda_: float, normalize=False):
-    rewards = tf.expand_dims(rewards, axis=-1)
+    # rewards = tf.expand_dims(rewards, axis=-1)
     deltas = rewards[:-1] + gamma * values[1:] - values[:-1]
     advantages = discount_cumsum(deltas, discount=gamma * lambda_)
 
@@ -69,14 +69,14 @@ def gae(rewards, values, gamma: float, lambda_: float, normalize=False):
     return advantages
 
 
-def rewards_to_go(rewards, discount: float, normalize=False):
+def rewards_to_go(rewards, discount: float, decompose=False):
     returns = discount_cumsum(rewards, discount=discount)[:-1]
 
-    if normalize:
-        returns = to_float(returns)
-        returns -= tf.reduce_min(returns)
-        returns /= tf.reduce_max(returns) + EPSILON
-        # returns = np_normalize(returns)
+    if decompose:
+        returns_base, returns_exp = tf.map_fn(fn=decompose_number, elems=to_float(returns),
+                                              dtype=(tf.float32, tf.float32))
+
+        return tf.stack([returns_base, returns_exp], axis=1), returns
 
     return returns
 
@@ -113,6 +113,10 @@ def polyak_averaging(model: tf.keras.Model, old_weights: list, alpha=0.99):
         weights.append(w)
 
     model.set_weights(weights)
+
+
+def clip_gradients(gradients: list, norm: float) -> list:
+    return [tf.clip_by_norm(grad, clip_norm=norm) for grad in gradients]
 
 
 def accumulate_gradients(grads1: list, grads2: Optional[list] = None) -> list:
@@ -284,6 +288,11 @@ def to_tensor(x, expand_axis=0):
     return x
 
 
+def num_dims(tensor) -> tf.int32:
+    """Returns the dimensionality (number of dimensions/axis) of the given tensor"""
+    return tf.rank(tf.shape(tensor))
+
+
 # TODO: @tf.function
 def tf_normalize(x):
     """Normalizes some tensor x to 0-mean 1-stddev"""
@@ -291,20 +300,13 @@ def tf_normalize(x):
     return (x - tf.math.reduce_mean(x)) / (tf.math.reduce_std(x) + EPSILON)
 
 
-# def tf_linear_normalization(x, scale=1.0):
-#     x = to_float(x)
-#     min_x = tf.reduce_min(x)
-#     max_x = tf.reduce_max(x)
-#
-#     if min_x <= 0.0 <= max_x:
-#         mask_pos = to_float(x > 0.0)
-#         mask_neg = to_float(x < 0.0)
-#         return scale * ((mask_neg * x / -(min_x - EPSILON)) + (mask_pos * x / (max_x + EPSILON)))
-#
-#     elif min_x <= 0.0 and max_x <= 0.0:
-#         return scale * ((x - max_x) / (tf.math.abs(min_x - max_x) + EPSILON))
-#     else:
-#         return scale * ((x - min_x) / (max_x - min_x + EPSILON))
+def truncate(x):
+    x = to_float(x)
+    mean = tf.reduce_mean(x)
+    std = tf.math.reduce_std(x)
+    high = tf.maximum(mean + std, std)
+    low = tf.minimum(mean - std, -std)
+    return tf.clip_by_value(x, clip_value_min=low, clip_value_max=high)
 
 
 def tf_sign_preserving_normalization(x):
@@ -319,26 +321,6 @@ def tf_sign_preserving_normalization(x):
     positives = x * to_float(x > 0.0)
     negatives = x * to_float(x < 0.0)
     return (positives / (mean + std + EPSILON)) + (negatives / tf.abs(mean - std + EPSILON))
-
-
-# def tf_sign_preserving_normalization(x, scale=1.0, use_quantile=False, use_std=False, quantile=0.8):
-#     x = to_float(x)
-#
-#     if not use_quantile:
-#         max_x = tf.reduce_max(x) + EPSILON
-#         min_x = tf.reduce_min(x) + EPSILON
-#     elif not use_std:
-#         max_x = to_float(np.quantile(x, q=quantile))
-#         min_x = to_float(np.quantile(x, q=1.0 - quantile))
-#     else:
-#         mean = tf.reduce_mean(x)
-#         std = tf.math.reduce_std(x)
-#         max_x = mean + std + EPSILON
-#         min_x = mean - std + EPSILON
-#
-#     positives = x * to_float(x > 0.0)
-#     negatives = x * to_float(x < 0.0)
-#     return scale * (positives / max_x + negatives / tf.abs(min_x))
 
 
 def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batches=False, seed=None,
@@ -460,6 +442,11 @@ def to_float(tensor):
 
 def tf_dot_product(x, y, axis=0, keepdims=False):
     return tf.reduce_sum(tf.multiply(x, y), axis=axis, keepdims=keepdims)
+
+
+def tf_flatten(x):
+    """Reshapes the given input as a 1-D array"""
+    return tf.reshape(x, shape=[-1])
 
 
 # -------------------------------------------------------------------------------------------------

@@ -12,11 +12,18 @@ class DynamicParameter:
     def serialize(self) -> dict:
         return dict(step=int(self.step))
 
+    def on_episode(self):
+        self.step += 1
+
     def load(self, config: dict):
         self.step = config.get('step', 0)
 
+    def get_config(self) -> dict:
+        return {}
+
 
 # TODO: decay on new episode (optional)
+# TODO: change name to ScheduleWrapper
 class ParameterWrapper(LearningRateSchedule, DynamicParameter):
     """A wrapper for built-in tf.keras' learning rate schedules"""
     def __init__(self, schedule: LearningRateSchedule, min_value=1e-4):
@@ -25,7 +32,7 @@ class ParameterWrapper(LearningRateSchedule, DynamicParameter):
         self.min_value = min_value
 
     def __call__(self, *args, **kwargs):
-        self.step += 1
+        # self.step += 1
         self.value = max(self.min_value, self.schedule.__call__(self.step))
         return self.value
 

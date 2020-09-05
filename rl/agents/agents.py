@@ -17,7 +17,7 @@ class Agent:
     """Agent abstract class"""
     def __init__(self, env: Union[gym.Env, str], batch_size: int, seed=None, weights_dir='weights', name='agent',
                  log_mode='summary', drop_batch_remainder=False, skip_data=0, consider_obs_every=1,
-                 shuffle_batches=False, shuffle_data=False, traces_dir: str = None):
+                 shuffle_batches=False, shuffle=True, traces_dir: str = None):
 
         if isinstance(env, str):
             self.env = gym.make(env)
@@ -43,7 +43,7 @@ class Agent:
         self.skip_count = skip_data
         self.obs_skipping = consider_obs_every
         self.shuffle_batches = shuffle_batches
-        self.shuffle_data = shuffle_data
+        self.shuffle = shuffle
 
         # Saving stuff:
         self.base_path = os.path.join(weights_dir, name)
@@ -142,10 +142,6 @@ class Agent:
 
         return preprocess_fn
 
-    # def pretrain(self):
-    #     # TODO: use ImitationWrapper here?
-    #     pass
-
     def log(self, **kwargs):
         self.statistics.log(**kwargs)
 
@@ -190,3 +186,9 @@ class Agent:
 
     def save_weights(self):
         raise NotImplementedError
+
+    def on_episode_start(self):
+        pass
+
+    def on_episode_end(self):
+        pass

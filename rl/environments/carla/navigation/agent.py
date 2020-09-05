@@ -173,6 +173,10 @@ class Agent(object):
             if target_wpt.road_id != ego_wpt.road_id or \
                     target_wpt.lane_id != ego_wpt.lane_id + lane_offset:
                 next_wpt = self._local_planner.get_incoming_waypoint_and_direction(steps=5)[0]
+
+                if next_wpt is None:
+                    continue
+
                 if target_wpt.road_id != next_wpt.road_id or \
                         target_wpt.lane_id != next_wpt.lane_id + lane_offset:
                     continue

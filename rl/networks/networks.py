@@ -57,9 +57,14 @@ class PPONetwork(Network):
     def value_predict(self, inputs):
         return self.value(inputs, training=False)
 
-    def predict_last_value(self, state, is_terminal: bool):
+    def predict_last_value(self, state, timestep: float, is_terminal: bool):
         if is_terminal:
             return self.last_value
+
+        # if isinstance(state, dict):
+        #     state['timestep'] = tf.expand_dims(timestep, axis=0)
+        # else:
+        #     state = dict(state=state, timestep=tf.expand_dims(timestep, axis=0))
 
         return self.value_predict(state)
 
