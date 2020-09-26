@@ -1,3 +1,5 @@
+"""Proximal Policy Optimization Agent"""
+
 import os
 import gym
 import time
@@ -28,8 +30,9 @@ class PPOAgent(Agent):
                  clip_ratio: Union[float, LearningRateSchedule, DynamicParameter] = 0.2, mixture_components=1,
                  entropy_regularization: Union[float, LearningRateSchedule, DynamicParameter] = 0.0,
                  network: Union[dict, PPONetwork] = None, advantage_scale: Union[float, DynamicParameter] = 2.0,
-                 accumulate_gradients_over_batches=False, update_frequency=1, polyak=1.0, **kwargs):
+                 accumulate_gradients_over_batches=False, update_frequency=1, polyak=1.0, repeat_action=1, **kwargs):
         assert 0.0 < polyak <= 1.0
+        assert repeat_action >= 1
 
         super().__init__(*args, name=name, **kwargs)
 
@@ -37,6 +40,7 @@ class PPOAgent(Agent):
         self.gamma = gamma
         self.lambda_ = lambda_
         self.mixture_components = mixture_components
+        self.repeat_action = repeat_action
 
         if isinstance(advantage_scale, float):
             self.adv_scale = ConstantParameter(value=advantage_scale)
@@ -242,7 +246,7 @@ class PPOAgent(Agent):
                     self.update_policy(policy_grads)
                     self.log(lr_policy=self.policy_lr.value)
 
-                self.log(loss_total=total_loss.numpy(),
+                self.log(loss_total=total_loss,
                          gradients_norm_policy=[tf.norm(gradient) for gradient in policy_grads])
 
             if self.accumulate_gradients_over_batches:
@@ -261,24 +265,26 @@ class PPOAgent(Agent):
             #     print(f'early stop at step {opt_step}.')
             #     break
 
-            if self.distribution_type == 'categorical':
-                logits = self.network.policy.get_layer(name='logits')
-
-                if isinstance(logits, tf.keras.layers.Dense):
-                    weights, bias = logits.trainable_variables
-
-                    self.log(weights_logits=tf.norm(weights), bias_logits=tf.norm(weights))
-
-            elif self.distribution_type == 'beta':
-                alpha = self.network.policy.get_layer(name='alpha')
-                beta = self.network.policy.get_layer(name='beta')
-
-                if isinstance(alpha, tf.keras.layers.Dense) and isinstance(beta, tf.keras.layers.Dense):
-                    weights_a, bias_a = alpha.trainable_variables
-                    weights_b, bias_b = beta.trainable_variables
-
-                    self.log(weights_alpha=tf.norm(weights_a), bias_alpha=tf.norm(bias_a),
-                             weights_beta=tf.norm(weights_b), bias_beta=tf.norm(bias_b))
+            # TODO: provide a flag to enable tracking of the distribution's parameters. If so, save the layers
+            #  corresponding to the parameters, for to get their weights later for logging.
+            # if self.distribution_type == 'categorical':
+            #     logits = self.network.policy.get_layer(name='logits')
+            #
+            #     if isinstance(logits, tf.keras.layers.Dense):
+            #         weights, bias = logits.trainable_variables
+            #
+            #         self.log(weights_logits=tf.norm(weights), bias_logits=tf.norm(weights))
+            #
+            # elif self.distribution_type == 'beta':
+            #     alpha = self.network.policy.get_layer(name='alpha')
+            #     beta = self.network.policy.get_layer(name='beta')
+            #
+            #     if isinstance(alpha, tf.keras.layers.Dense) and isinstance(beta, tf.keras.layers.Dense):
+            #         weights_a, bias_a = alpha.trainable_variables
+            #         weights_b, bias_b = beta.trainable_variables
+            #
+            #         self.log(weights_alpha=tf.norm(weights_a), bias_alpha=tf.norm(bias_a),
+            #                  weights_beta=tf.norm(weights_b), bias_beta=tf.norm(bias_b))
 
         # Value network optimization:
         for _ in range(self.optimization_steps['value']):
@@ -295,7 +301,7 @@ class PPOAgent(Agent):
                     self.update_value(value_grads)
                     self.log(lr_value=self.value_lr.value)
 
-                self.log(loss_value=value_loss.numpy(),
+                self.log(loss_value=value_loss,
                          gradients_norm_value=[tf.norm(gradient) for gradient in value_grads])
 
             if self.accumulate_gradients_over_batches:
@@ -414,6 +420,7 @@ class PPOAgent(Agent):
         states, advantages, actions, old_log_probabilities = batch[:4]
         new_policy: tfp.distributions.Distribution = self.network.policy(states, training=True)
 
+        # TODO: probable bug -> "self.num_actions == 1"??
         if self.distribution_type == 'categorical' and self.num_actions == 1:
             batch_size = tf.shape(actions)[0]
             actions = tf.reshape(actions, shape=batch_size)
@@ -604,8 +611,12 @@ class PPOAgent(Agent):
                     action_env = self.convert_action(action)
 
                     # Environment step
-                    next_state, reward, done, _ = self.env.step(action_env)
-                    episode_reward += reward
+                    for _ in range(self.repeat_action):
+                        next_state, reward, done, _ = self.env.step(action_env)
+                        episode_reward += reward
+
+                        if done:
+                            break
 
                     self.log(actions=action, action_env=action_env, rewards=reward,
                              distribution_mean=mean, distribution_std=std)
@@ -617,6 +628,9 @@ class PPOAgent(Agent):
                     if done or (t == timesteps):
                         print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
                               f'with reward {round(episode_reward, 3)}.')
+
+                        if isinstance(state, dict):
+                            state = {f'state_{k}': v for k, v in state.items()}
 
                         state = preprocess_fn(state)
                         state = utils.to_tensor(state)
@@ -705,6 +719,7 @@ class PPOMemory:
         self.values = tf.zeros(shape=(0, 2), dtype=tf.float32)
         self.actions = tf.zeros(shape=(0, num_actions), dtype=tf.float32)
         self.log_probabilities = tf.zeros(shape=(0, num_actions), dtype=tf.float32)
+        # self.log_probabilities = tf.zeros(shape=(0, 1), dtype=tf.float32)
         self.timesteps = tf.zeros(shape=(0,), dtype=tf.float32)
 
         self.returns = None
@@ -728,6 +743,7 @@ class PPOMemory:
         self.rewards = tf.concat([self.rewards, [reward]], axis=0)
         self.values = tf.concat([self.values, value], axis=0)
         self.log_probabilities = tf.concat([self.log_probabilities, log_prob], axis=0)
+        # self.log_probabilities = tf.concat([self.log_probabilities, [log_prob]], axis=0)
         # self.timesteps = tf.concat([self.timesteps, [timestep]], axis=0)
 
     def end_trajectory(self, last_value: tf.Tensor):
@@ -752,14 +768,9 @@ class PPOMemory:
         values = self.values[:, 0] * tf.pow(10.0, self.values[:, 1])
 
         advantages = utils.gae(self.rewards, values=values, gamma=gamma, lambda_=lambda_, normalize=False)
-        # self.advantages = utils.tf_sign_preserving_normalization(advantages)
-        # self.advantages = utils.truncate(advantages)
-        self.advantages = utils.tf_sign_preserving_normalization(advantages) * scale
 
-        # works well (with lr decay) for cart-pole
-        # self.advantages = utils.to_float(advantages)
-
-        # self.advantages = utils.to_float(tf.clip_by_value(advantages, -10.0, 10.0))
+        # self.advantages = utils.tf_sign_preserving_normalization(advantages) * scale
+        self.advantages = utils.tf_sp_norm(advantages) * scale
 
         return values, advantages
 

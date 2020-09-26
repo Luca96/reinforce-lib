@@ -6,11 +6,90 @@ from tensorflow.keras.layers import *
 from tensorflow.keras.models import Model
 
 from typing import List, Union, Dict
+
 from rl import utils
+from rl.agents import Agent
 
 
 class Network:
-    pass
+    def __init__(self, agent):
+        self.agent = agent
+
+    def predict(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def act(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def reset(self):
+        pass
+
+    def load_weights(self):
+        raise NotImplementedError
+
+    def save_weights(self):
+        raise NotImplementedError
+
+    def summary(self):
+        pass
+
+    def _get_input_layers(self) -> Dict[str, Input]:
+        """Handles arbitrary complex state-spaces"""
+        input_layers = dict()
+
+        for name, shape in self.agent.state_spec.items():
+            # if self.agent.drop_batch_remainder:
+            #     layer = Input(shape=shape, batch_size=self.agent.batch_size, dtype=tf.float32, name=name)
+            # else:
+            #     layer = Input(shape=shape, dtype=tf.float32, name=name)
+
+            layer = Input(shape=shape, dtype=tf.float32, name=name)
+            input_layers[name] = layer
+
+        return input_layers
+
+    @staticmethod
+    def _clip_actions(actions):
+        return tf.clip_by_value(actions, utils.EPSILON, 1.0 - utils.EPSILON)
+
+    def get_distribution_layer(self, distribution: str, layer: Layer) -> tfp.layers.DistributionLambda:
+        # Discrete actions:
+        if distribution == 'categorical':
+            num_actions = self.agent.num_actions
+            num_classes = self.agent.num_classes
+
+            logits = Dense(units=num_actions * num_classes, activation='linear', name='logits')(layer)
+
+            if num_actions > 1:
+                logits = Reshape((num_actions, num_classes))(logits)
+            else:
+                logits = tf.expand_dims(logits, axis=0)
+
+            return tfp.layers.DistributionLambda(
+                make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t))(logits)
+
+        # Bounded continuous 1-dimensional actions:
+        # for activations choice refer to chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
+        if distribution == 'beta':
+            num_actions = self.agent.num_actions
+
+            # make a, b > 1, so that the Beta distribution is concave and unimodal (see paper above)
+            alpha = Dense(units=num_actions, activation=utils.softplus(1.0 + 1e-2), name='alpha')(layer)
+            beta = Dense(units=num_actions, activation=utils.softplus(1.0 + 1e-2), name='beta')(layer)
+
+            return tfp.layers.DistributionLambda(
+                make_distribution_fn=lambda t: tfp.distributions.Beta(t[0], t[1]))([alpha, beta])
+
+        # Unbounded continuous actions)
+        # for activations choice see chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
+        if distribution == 'gaussian':
+            num_actions = self.agent.num_actions
+
+            mu = Dense(units=num_actions, activation='linear', name='mu')(layer)
+            sigma = Dense(units=num_actions, activation=utils.softplus(1.0 + 1e-2), name='sigma')(layer)
+
+            return tfp.layers.DistributionLambda(
+                make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[0], scale=t[1]))([mu, sigma])
 
 
 # TODO: disentangle policy-net from value-net, so that each of them can be arbitrary subclassed, moreover a
@@ -18,8 +97,9 @@ class Network:
 class PPONetwork(Network):
     def __init__(self, agent, policy: dict, value: dict):
         from rl.agents.ppo import PPOAgent
+        super().__init__(agent)
+        self.agent: PPOAgent
 
-        self.agent: PPOAgent = agent
         self.distribution = self.agent.distribution_type
         self.mixture_components = self.agent.mixture_components  # TODO: unused
 
@@ -121,7 +201,7 @@ class PPONetwork(Network):
     def policy_network(self, **kwargs):
         inputs = self._get_input_layers()
         last_layer = self.policy_layers(inputs, **kwargs)
-        action = self.get_distribution_layer(last_layer)
+        action = self.get_distribution_layer(distribution=self.distribution, layer=last_layer)
 
         return Model(list(inputs.values()), outputs=action, name='Policy-Network')
 
@@ -161,60 +241,6 @@ class PPONetwork(Network):
 
         return tfp.layers.MixtureNormal(mixture_components, event_shape=(1,))(params)
 
-    def get_distribution_layer(self, layer: Layer) -> tfp.layers.DistributionLambda:
-        # Discrete actions:
-        if self.distribution == 'categorical':
-            num_actions = self.agent.num_actions
-            num_classes = self.agent.num_classes
-
-            logits = Dense(units=num_actions * num_classes, activation='linear', name='logits')(layer)
-
-            if num_actions > 1:
-                logits = Reshape((num_actions, num_classes))(logits)
-            else:
-                logits = tf.expand_dims(logits, axis=0)
-
-            return tfp.layers.DistributionLambda(
-                make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t))(logits)
-
-        # Bounded continuous 1-dimensional actions:
-        # for activations choice refer to chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
-        if self.distribution == 'beta':
-            num_actions = self.agent.num_actions
-
-            # make a, b > 1, so that the Beta distribution is concave and unimodal (see paper above)
-            alpha = Dense(units=num_actions, activation=utils.softplus(1.0 + 1e-2), name='alpha')(layer)
-            beta = Dense(units=num_actions, activation=utils.softplus(1.0 + 1e-2), name='beta')(layer)
-
-            return tfp.layers.DistributionLambda(
-                make_distribution_fn=lambda t: tfp.distributions.Beta(t[0], t[1]))([alpha, beta])
-
-        # Unbounded continuous actions)
-        # for activations choice see chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
-        if self.distribution == 'gaussian':
-            num_actions = self.agent.num_actions
-
-            if self.mixture_components == 1:
-                mu = Dense(units=num_actions, activation='linear', name='mu')(layer)
-                sigma = Dense(units=num_actions, activation='softplus', name='sigma')(layer)
-
-                # ensure variance > 0, so that loss doesn't diverge or became NaN
-                sigma = tf.add(sigma, utils.EPSILON)
-
-                return tfp.layers.DistributionLambda(
-                    make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[0], scale=t[1])
-                )([mu, sigma])
-            else:
-                event_shape = [num_actions]
-                num_params = tfp.layers.MixtureNormal.params_size(num_components=self.mixture_components,
-                                                                  event_shape=event_shape)
-
-                layer = Dense(units=num_params, activation=None)(layer)
-                return tfp.layers.MixtureNormal(num_components=self.mixture_components, event_shape=event_shape)(layer)
-
-    def reset(self):
-        pass
-
     def load_weights(self):
         self.policy.load_weights(filepath=self.agent.weights_path['policy'], by_name=False)
         self.old_policy.set_weights(self.policy.get_weights())
@@ -251,17 +277,3 @@ class PPONetwork(Network):
     #         return self.inputs[names]
     #
     #     return [self.inputs[name] for name in names]
-
-    def _get_input_layers(self) -> Dict[str, Input]:
-        """Handles arbitrary complex state-spaces"""
-        input_layers = dict()
-
-        for name, shape in self.agent.state_spec.items():
-            if self.agent.drop_batch_remainder:
-                layer = Input(shape=shape, batch_size=self.agent.batch_size, dtype=tf.float32, name=name)
-            else:
-                layer = Input(shape=shape, dtype=tf.float32, name=name)
-
-            input_layers[name] = layer
-
-        return input_layers

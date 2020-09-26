@@ -45,7 +45,7 @@ class ImitationWrapper:
         self.value_optimizer = optimizers.Adam(learning_rate=value_lr)
 
         # Statistics
-        self.statistics = utils.Statistics(mode=log_mode, name=name)
+        self.statistics = utils.Summary(mode=log_mode, name=name)
 
     def imitate(self, discount=0.99, shuffle_traces=False, shuffle_batches=False,
                 repetitions=1, save_every=1, save_distinct=False, seed=None):

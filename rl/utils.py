@@ -25,6 +25,8 @@ from rl.parameters import ScheduleWrapper
 NP_EPS = np.finfo(np.float32).eps
 EPSILON = tf.constant(NP_EPS, dtype=tf.float32)
 
+TF_ZERO = tf.constant(0.0, dtype=tf.float32)
+
 OPTIMIZERS = dict(adadelta=tf.keras.optimizers.Adadelta,
                   adagrad=tf.keras.optimizers.Adagrad,
                   adam=tf.keras.optimizers.Adam,
@@ -59,9 +61,11 @@ def discount_cumsum(x, discount: float):
 
 
 def gae(rewards, values, gamma: float, lambda_: float, normalize=False):
-    # rewards = tf.expand_dims(rewards, axis=-1)
-    deltas = rewards[:-1] + gamma * values[1:] - values[:-1]
-    advantages = discount_cumsum(deltas, discount=gamma * lambda_)
+    if lambda_ == 0.0:
+        advantages = rewards[:-1] + gamma * values[1:] - values[:-1]
+    else:
+        deltas = rewards[:-1] + gamma * values[1:] - values[:-1]
+        advantages = discount_cumsum(deltas, discount=gamma * lambda_)
 
     if normalize:
         advantages = tf_normalize(advantages)
@@ -288,39 +292,52 @@ def to_tensor(x, expand_axis=0):
     return x
 
 
+def tf_replace_nan(tensor, value=0.0, dtype=tf.float32):
+    replacement = tf.constant(value, dtype=dtype, shape=tensor.shape)
+    return tf.where(tensor == tensor, x=tensor, y=replacement)
+
+
 def num_dims(tensor) -> tf.int32:
     """Returns the dimensionality (number of dimensions/axis) of the given tensor"""
     return tf.rank(tf.shape(tensor))
 
 
 # TODO: @tf.function
-def tf_normalize(x):
+def tf_normalize(x, eps=EPSILON):
     """Normalizes some tensor x to 0-mean 1-stddev"""
     x = to_float(x)
-    return (x - tf.math.reduce_mean(x)) / (tf.math.reduce_std(x) + EPSILON)
+    return (x - tf.math.reduce_mean(x)) / (tf.math.reduce_std(x) + eps)
 
 
-def truncate(x):
+# def truncate(x):
+#     x = to_float(x)
+#     mean = tf.reduce_mean(x)
+#     std = tf.math.reduce_std(x)
+#     high = tf.maximum(mean + std, std)
+#     low = tf.minimum(mean - std, -std)
+#     return tf.clip_by_value(x, clip_value_min=low, clip_value_max=high)
+
+
+# def tf_sign_preserving_normalization(x, eps=EPSILON):
+#     """Unlike 0-mean 1-std normalization, this 'sign-preserving normalization' normalizes a value `x` such that:
+#         - if x > 0: then x-scaled is still positive, and
+#         - if x < 0: then x-scaled is still negative.
+#     """
+#     x = to_float(x)
+#     mean = tf.reduce_mean(x)
+#     std = tf.math.reduce_std(x)
+#
+#     positives = x * to_float(x > 0.0)
+#     negatives = x * to_float(x < 0.0)
+#     return (positives / (mean + std + eps)) + (negatives / (tf.abs(mean - std) + eps))
+
+
+def tf_sp_norm(x, eps=1e-3):
     x = to_float(x)
-    mean = tf.reduce_mean(x)
-    std = tf.math.reduce_std(x)
-    high = tf.maximum(mean + std, std)
-    low = tf.minimum(mean - std, -std)
-    return tf.clip_by_value(x, clip_value_min=low, clip_value_max=high)
-
-
-def tf_sign_preserving_normalization(x):
-    """Unlike 0-mean 1-std normalization, this 'sign-preserving normalization' normalizes a value `x` such that:
-        - if x > 0: then x-scaled is still positive, and
-        - if x < 0: then x-scaled is still negative.
-    """
-    x = to_float(x)
-    mean = tf.reduce_mean(x)
-    std = tf.math.reduce_std(x)
 
     positives = x * to_float(x > 0.0)
     negatives = x * to_float(x < 0.0)
-    return (positives / (mean + std + EPSILON)) + (negatives / tf.abs(mean - std + EPSILON))
+    return (positives / (tf.reduce_max(x) + eps)) + (negatives / -(tf.reduce_min(x) - eps))
 
 
 def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batches=False, seed=None,
@@ -527,7 +544,7 @@ def copy_folder(src: str, dst: str):
 # -- Statistics utils
 # -------------------------------------------------------------------------------------------------
 
-class Statistics:
+class Summary:
     def __init__(self, mode='summary', name=None, summary_dir='logs'):
         self.stats = dict()
 
@@ -575,9 +592,13 @@ class Statistics:
                 step = data['step']
                 values = data['list']
 
-                for i, value in enumerate(values):
-                    # TODO: 'np.mean' is a temporary fix...
-                    tf.summary.scalar(name=summary_name, data=np.mean(value), step=step + i)
+                if 'weight-' in summary_name or 'bias-' in summary_name:
+                    tf.summary.histogram(name=summary_name, data=values, step=step)
+                else:
+                    for i, value in enumerate(values):
+                        # TODO: 'np.mean' is a temporary fix...
+                        tf.summary.scalar(name=summary_name, data=np.mean(value), step=step + i)
+                        # tf.summary.scalar(name=summary_name, data=tf.reduce_mean(value), step=step + i)
 
                 # clear value_list, update step
                 self.stats[summary_name]['step'] += len(values)

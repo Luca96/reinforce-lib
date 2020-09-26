@@ -9,6 +9,9 @@ class DynamicParameter:
         self.value = 0
         self.step = 0
 
+    def __call__(self, *args, **kwargs):
+        return self.value
+
     def serialize(self) -> dict:
         return dict(step=int(self.step))
 

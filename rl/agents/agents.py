@@ -55,7 +55,7 @@ class Agent:
         self.config = dict()
 
         # Statistics:
-        self.statistics = utils.Statistics(mode=log_mode, name=name)
+        self.statistics = utils.Summary(mode=log_mode, name=name)
 
     def set_random_seed(self, seed):
         """Sets the random seed for tensorflow, numpy, python's random, and the environment"""
@@ -75,7 +75,7 @@ class Agent:
         raise NotImplementedError
 
     def record(self, *args, **kwargs):
-        raise NotImplementedError
+        pass
 
     def update(self):
         raise NotImplementedError

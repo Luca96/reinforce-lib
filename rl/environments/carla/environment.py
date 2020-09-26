@@ -138,6 +138,12 @@ class CARLABaseEnvironment(gym.Env):
                     assert all(isinstance(x, carla.Transform) for x in self.origins)
                     assert self.origin_type in ['random', 'sequential']
 
+            elif isinstance(origin_spec, list):
+                self.origins = origin_spec
+                self.origin = None
+                self.origin_index = -1
+                self.origin_type = 'random'
+
             # Destination:
             if isinstance(destination_spec, carla.Location):
                 self.destination = destination_spec
@@ -736,6 +742,7 @@ class CARLACollectWrapper(CARLAWrapper):
 
                 if episode_reward > episode_reward_threshold:
                     self.serialize(buffer, episode)
+                    print(f'Trace-{episode} saved with reward={round(episode_reward, 2)}.')
                 else:
                     print(f'Trace-{episode} discarded because reward={round(episode_reward, 2)} below threshold!')
         finally:
@@ -839,7 +846,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
                          default=np.zeros(shape=9, dtype=np.float32))
 
     # High-level routing command (aka RoadOption)
-    COMMAND_SPACE = spaces.Box(low=0.0, high=1.0, shape=RoadOption.shape)
+    COMMAND_SPACE = spaces.Box(low=0.0, high=1.0, shape=RoadOption.VOID.shape)
 
     INFO_SPACE = spaces.Dict(speed=spaces.Box(low=0.0, high=150.0, shape=(1,)),
                              speed_limit=spaces.Box(low=0.0, high=90.0, shape=(1,)),
@@ -849,7 +856,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
     def __init__(self, *args, disable_reverse=False, min_throttle=0.0, camera='segmentation',
                  hard_control_threshold: Union[float, None] = None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.image_space = spaces.Box(low=-1.0, high=1.0, shape=self.image_shape)
+        self.image_space = spaces.Box(low=0.0, high=1.0, shape=self.image_shape)
         self.camera_type = camera
 
         # control hack
@@ -1069,7 +1076,7 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
             image = env_utils.resize(image, size=self.image_size)
 
         # -1, +1 scaling
-        image = (2 * image - 255.0) / 255.0
+        image /= 255.0
 
         # observations
         vehicle_obs = self._get_vehicle_features()
@@ -1289,6 +1296,7 @@ class ThreeCameraCARLAEnvironmentDiscrete(ThreeCameraCARLAEnvironment):
 # -- Benchmarks: CARLA + NoCrash
 # -------------------------------------------------------------------------------------------------
 
+# TODO: untested
 class CARLABenchmark(CARLAWrapper):
     """CARLA benchmark, as described in the paper: "End-to-end Driving via Conditional Imitation Learning"
          - https://arxiv.org/pdf/1710.02410
