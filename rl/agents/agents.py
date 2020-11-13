@@ -17,7 +17,7 @@ class Agent:
     """Agent abstract class"""
     def __init__(self, env: Union[gym.Env, str], batch_size: int, seed=None, weights_dir='weights', name='agent',
                  log_mode='summary', drop_batch_remainder=False, skip_data=0, consider_obs_every=1,
-                 shuffle_batches=False, shuffle=True, traces_dir: str = None):
+                 shuffle_batches=False, shuffle=True, traces_dir: str = None, summary_keys: List[str] = None):
 
         if isinstance(env, str):
             self.env = gym.make(env)
@@ -55,7 +55,7 @@ class Agent:
         self.config = dict()
 
         # Statistics:
-        self.statistics = utils.Summary(mode=log_mode, name=name)
+        self.statistics = utils.Summary(mode=log_mode, name=name, keys=summary_keys)
 
     def set_random_seed(self, seed):
         """Sets the random seed for tensorflow, numpy, python's random, and the environment"""

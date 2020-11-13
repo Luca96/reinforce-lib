@@ -101,13 +101,14 @@ class PPONetwork(Network):
         self.agent: PPOAgent
 
         self.distribution = self.agent.distribution_type
-        self.mixture_components = self.agent.mixture_components  # TODO: unused
 
-        # policy and value networks
+        # policy network
         self.policy = self.policy_network(**policy)
         self.old_policy = self.policy_network(**policy)
         self.update_old_policy()
 
+        # value network
+        self.exp_scale = 6.0
         self.value = self.value_network(**value)
         self.last_value = tf.zeros((1, 2), dtype=tf.float32)  # (base, exp)
 
@@ -213,6 +214,7 @@ class PPONetwork(Network):
         # value = self.gaussian_value_head(last_layer, **kwargs)
 
         value = self.value_head(last_layer, **kwargs)
+        self.exp_scale = kwargs.get('exponent_scale', self.exp_scale)
 
         return Model(list(inputs.values()), outputs=value, name='Value-Network')
 

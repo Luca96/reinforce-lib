@@ -15,7 +15,7 @@ from datetime import datetime
 from gym import spaces
 
 from tensorflow.keras.optimizers.schedules import LearningRateSchedule
-from rl.parameters import ScheduleWrapper
+from rl.parameters import DynamicParameter
 
 
 # -------------------------------------------------------------------------------------------------
@@ -172,12 +172,10 @@ def plot_images(images: list):
     plt.show()
 
 
-def plot_lr_schedule(lr_schedule: Union[ScheduleWrapper, LearningRateSchedule], iterations: int, initial_step=0,
+def plot_lr_schedule(lr_schedule: Union[DynamicParameter, LearningRateSchedule], iterations: int, initial_step=0,
                      show=True):
     assert iterations > 0
-
-    if isinstance(lr_schedule, LearningRateSchedule):
-        lr_schedule = ScheduleWrapper(lr_schedule)
+    lr_schedule = DynamicParameter.create(value=lr_schedule)
 
     data = [lr_schedule(step=i + initial_step) for i in range(iterations)]
     plt.plot(data)
@@ -302,34 +300,37 @@ def num_dims(tensor) -> tf.int32:
     return tf.rank(tf.shape(tensor))
 
 
+def mask_dict_tensor(tensor: dict, mask) -> dict:
+    return {k: v[mask] for k, v in tensor.items()}
+
+
+def concat_dict_tensor(*dicts: dict, axis=0) -> dict:
+    assert len(dicts) > 0
+    result = dicts[0]
+
+    for i in range(1, len(dicts)):
+        d = dicts[i]
+        # print(i)
+        # breakpoint()
+
+        for k, v in result.items():
+            # print(k)
+            # breakpoint()
+            # print(v)
+            # breakpoint()
+            tf.concat([v, d[k]], axis=0)
+            # breakpoint()
+
+        result = {k: tf.concat([v, d[k]], axis=axis) for k, v in result.items()}
+
+    return result
+
+
 # TODO: @tf.function
 def tf_normalize(x, eps=EPSILON):
     """Normalizes some tensor x to 0-mean 1-stddev"""
     x = to_float(x)
     return (x - tf.math.reduce_mean(x)) / (tf.math.reduce_std(x) + eps)
-
-
-# def truncate(x):
-#     x = to_float(x)
-#     mean = tf.reduce_mean(x)
-#     std = tf.math.reduce_std(x)
-#     high = tf.maximum(mean + std, std)
-#     low = tf.minimum(mean - std, -std)
-#     return tf.clip_by_value(x, clip_value_min=low, clip_value_max=high)
-
-
-# def tf_sign_preserving_normalization(x, eps=EPSILON):
-#     """Unlike 0-mean 1-std normalization, this 'sign-preserving normalization' normalizes a value `x` such that:
-#         - if x > 0: then x-scaled is still positive, and
-#         - if x < 0: then x-scaled is still negative.
-#     """
-#     x = to_float(x)
-#     mean = tf.reduce_mean(x)
-#     std = tf.math.reduce_std(x)
-#
-#     positives = x * to_float(x > 0.0)
-#     negatives = x * to_float(x < 0.0)
-#     return (positives / (mean + std + eps)) + (negatives / (tf.abs(mean - std) + eps))
 
 
 def tf_sp_norm(x, eps=1e-3):
@@ -338,6 +339,19 @@ def tf_sp_norm(x, eps=1e-3):
     positives = x * to_float(x > 0.0)
     negatives = x * to_float(x < 0.0)
     return (positives / (tf.reduce_max(x) + eps)) + (negatives / -(tf.reduce_min(x) - eps))
+
+
+def tf_shuffle_tensors(*tensors, indices=None):
+    """Shuffles all the given tensors in the SAME way.
+       Source: https://stackoverflow.com/questions/56575877/shuffling-two-tensors-in-the-same-order
+    """
+    assert len(*tensors) > 0
+
+    if indices is None:
+        indices = tf.range(start=0, limit=tf.shape(tensors[0])[0], dtype=tf.int32)
+        indices = tf.random.shuffle(indices)
+
+    return [tf.gather(t, indices) for t in tensors]
 
 
 def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batches=False, seed=None,
@@ -486,7 +500,9 @@ def file_names(dir_path: str, sort=True) -> list:
     return list(files)
 
 
-def load_traces(traces_dir: str, max_amount: Optional[int] = None, shuffle=False):
+def load_traces(traces_dir: str, max_amount: Optional[int] = None, shuffle=False, offset=0):
+    assert offset >= 0
+
     if shuffle:
         trace_names = file_names(traces_dir, sort=False)
         random.shuffle(trace_names)
@@ -496,11 +512,17 @@ def load_traces(traces_dir: str, max_amount: Optional[int] = None, shuffle=False
     if max_amount is None:
         max_amount = np.inf
 
-    for i, name in enumerate(trace_names):
+    for i in range(offset, len(trace_names)):
+        name = trace_names[i]
         if i >= max_amount:
             return
-
+        print(f'loading {name}...')
         yield np.load(file=os.path.join(traces_dir, name))
+
+
+def count_traces(traces_dir: str) -> int:
+    """Returns the number of traces available at the given folder."""
+    return len(file_names(traces_dir, sort=False))
 
 
 def unpack_trace(trace: dict, unpack=True) -> Union[tuple, dict]:
@@ -545,8 +567,14 @@ def copy_folder(src: str, dst: str):
 # -------------------------------------------------------------------------------------------------
 
 class Summary:
-    def __init__(self, mode='summary', name=None, summary_dir='logs'):
+    def __init__(self, mode='summary', name=None, summary_dir='logs', keys: List[str] = None):
         self.stats = dict()
+
+        # filters what to log
+        if isinstance(keys, list):
+            self.allowed_keys = {k: True for k in keys}
+        else:
+            self.allowed_keys = None
 
         if mode == 'summary':
             self.should_log = True
@@ -569,6 +597,9 @@ class Summary:
             return
 
         for key, value in kwargs.items():
+            if not self.should_log_key(key):
+                continue
+
             if key not in self.stats:
                 self.stats[key] = dict(step=0, list=[])
 
@@ -583,6 +614,12 @@ class Summary:
             else:
                 self.stats[key]['list'].append(value)
 
+    def should_log_key(self, key: str) -> bool:
+        if self.allowed_keys is None:
+            return True
+
+        return key in self.allowed_keys
+
     def write_summaries(self):
         if not self.use_summary:
             return
@@ -594,6 +631,10 @@ class Summary:
 
                 if 'weight-' in summary_name or 'bias-' in summary_name:
                     tf.summary.histogram(name=summary_name, data=values, step=step)
+
+                elif tf.is_tensor(data) and num_dims(data) == 4:
+                    # array of images
+                    tf.summary.image(name=summary_name, data=data, step=step)
                 else:
                     for i, value in enumerate(values):
                         # TODO: 'np.mean' is a temporary fix...

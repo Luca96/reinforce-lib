@@ -203,20 +203,61 @@ def test_aug_with_dataset(batch_size=25):
         utils.plot_images(list(batch))
 
 
+def augment_fn(image, seed=None, alpha=1.0):
+    # Color distortion
+    image = aug.simclr.color_distortion(image, strength=alpha, seed=seed)
+
+    # blur
+    if aug.tf_chance(seed=seed) < 0.33 * alpha:
+        image = aug.tf_gaussian_blur(image, size=5, seed=seed)
+
+    # noise
+    if aug.tf_chance(seed=seed) < 0.2 * alpha:
+        image = aug.tf_salt_and_pepper(image, amount=0.1)
+
+    if aug.tf_chance(seed=seed) < 0.33 * alpha:
+        image = aug.tf_gaussian_noise(image, amount=0.15, std=0.15, seed=seed)
+
+    image = aug.tf_normalize(image)
+
+    # cutout & dropout
+    if aug.tf_chance(seed=seed) < 0.15 * alpha:
+        image = aug.tf_cutout(image, size=6, seed=seed)
+
+    return image
+
+
 if __name__ == '__main__':
     # ia.seed(1)
 
+    image = cv2.imread('carla_test.png')
     # image = cv2.imread('carla.png')
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image = cv2.resize(image, (360+360, 90+90+45))
     # image = cv2.resize(image, (200, 150))
     #
     # print(image.shape)
+    image = aug.tf_normalize(utils.to_float(image / 255.0))
     # images = [image] * 4
     #
-    # seq = utils.AugmentationPipeline(strength=0.75)
-    # images_aug = seq.augment(images)
-    # utils.plot_images(images_aug)
-
     # utils.plot_images(tf_augmentations(image))
 
-    test_aug_with_dataset()
+    data = [
+        # image,
+        # aug.simclr.color_distortion(image, jitter_prob=1.0, drop_prob=-1.0),
+        # aug.simclr.color_distortion(image, jitter_prob=-1.0, drop_prob=1.0),
+        # aug.simclr.color_distortion(image, jitter_prob=1.0, drop_prob=1.0),
+        # aug.tf_normalize(aug.tf_gaussian_blur(image, size=5)),
+        # aug.tf_normalize(aug.tf_salt_and_pepper(image, amount=0.1)),
+        # aug.tf_normalize(aug.tf_gaussian_noise(image, amount=0.15, std=0.15)),
+        # aug.tf_cutout(image, size=6),
+        augment_fn(image),
+        augment_fn(image),
+        augment_fn(image),
+        augment_fn(image)
+    ]
+
+    utils.plot_images(data)
+
+    # test_aug_with_dataset()
     pass

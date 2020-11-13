@@ -1,5 +1,7 @@
 """Dynamic step-dependent parameters"""
 
+from typing import Union
+
 from tensorflow.keras.optimizers.schedules import LearningRateSchedule, ExponentialDecay
 
 
@@ -8,6 +10,19 @@ class DynamicParameter:
     def __init__(self):
         self.value = 0
         self.step = 0
+
+    @staticmethod
+    def create(value: Union[float, LearningRateSchedule], **kwargs):
+        """Converts a floating or LearningRateSchedule `value` into a DynamicParameter object"""
+        if isinstance(value, float):
+            return ConstantParameter(value)
+
+        if isinstance(value, LearningRateSchedule):
+            return ParameterWrapper(schedule=value, **kwargs)
+
+        # already DynamicParameter (or, DynamicParameter only!)
+        assert isinstance(value, DynamicParameter) or isinstance(value, ParameterWrapper)
+        return value
 
     def __call__(self, *args, **kwargs):
         return self.value

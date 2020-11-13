@@ -1,4 +1,4 @@
-"""Pre-defined network architectures readu to be used as part of Agent's networks"""
+"""Pre-defined network architectures ready to be used as part of Agent's networks"""
 
 import tensorflow as tf
 
