@@ -2,7 +2,8 @@
 
 from typing import Union
 
-from tensorflow.keras.optimizers.schedules import LearningRateSchedule, ExponentialDecay
+from tensorflow.keras.optimizers import schedules
+from tensorflow.keras.optimizers.schedules import LearningRateSchedule
 
 
 class DynamicParameter:
@@ -18,10 +19,10 @@ class DynamicParameter:
             return ConstantParameter(value)
 
         if isinstance(value, LearningRateSchedule):
-            return ParameterWrapper(schedule=value, **kwargs)
+            return ScheduleWrapper(schedule=value, **kwargs)
 
         # already DynamicParameter (or, DynamicParameter only!)
-        assert isinstance(value, DynamicParameter) or isinstance(value, ParameterWrapper)
+        assert isinstance(value, DynamicParameter) or isinstance(value, ScheduleWrapper)
         return value
 
     def __call__(self, *args, **kwargs):
@@ -41,8 +42,7 @@ class DynamicParameter:
 
 
 # TODO: decay on new episode (optional)
-# TODO: change name to ScheduleWrapper
-class ParameterWrapper(LearningRateSchedule, DynamicParameter):
+class ScheduleWrapper(LearningRateSchedule, DynamicParameter):
     """A wrapper for built-in tf.keras' learning rate schedules"""
     def __init__(self, schedule: LearningRateSchedule, min_value=1e-4):
         super().__init__()
@@ -71,7 +71,22 @@ class ConstantParameter(DynamicParameter):
         return {}
 
 
-class StepDecay(ParameterWrapper):
-    def __init__(self, initial_value: float, decay_steps: int, decay_rate: float, min_value=1e-4):
-        super().__init__(schedule=ExponentialDecay(initial_value, decay_steps, decay_rate, staircase=True),
+class ExponentialDecay(ScheduleWrapper):
+    def __init__(self, initial_value: float, decay_steps: int, decay_rate: float, staircase=False, min_value=0.0):
+        super().__init__(schedule=schedules.ExponentialDecay(initial_learning_rate=initial_value,
+                                                             decay_steps=decay_steps, decay_rate=decay_rate,
+                                                             staircase=staircase),
                          min_value=min_value)
+
+
+class StepDecay(ScheduleWrapper):
+    def __init__(self, initial_value: float, decay_steps: int, decay_rate: float, min_value=1e-4):
+        super().__init__(schedule=schedules.ExponentialDecay(initial_value, decay_steps, decay_rate, staircase=True),
+                         min_value=min_value)
+
+
+class PolynomialDecay(ScheduleWrapper):
+    def __init__(self, initial_value: float, end_value: float, decay_steps: int, power=1.0, cycle=False):
+        super().__init__(schedule=schedules.PolynomialDecay(initial_learning_rate=initial_value,
+                                                            decay_steps=decay_steps, end_learning_rate=end_value,
+                                                            power=power, cycle=cycle))

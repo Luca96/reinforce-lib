@@ -21,6 +21,7 @@ from tensorflow.keras.optimizers.schedules import LearningRateSchedule
 class PPOAgent(Agent):
     # TODO: dynamic-parameters: gamma, lambda, opt_steps, update_freq?, polyak?, clip_norm
     # TODO: debug each action separately
+    # TODO: RNN support
     def __init__(self, *args, policy_lr: Union[float, LearningRateSchedule, DynamicParameter] = 1e-3, gamma=0.99,
                  lambda_=0.95, value_lr: Union[float, LearningRateSchedule, DynamicParameter] = 3e-4, load=False,
                  optimization_steps=(1, 1), name='ppo-agent', optimizer='adam', clip_norm=(1.0, 1.0),

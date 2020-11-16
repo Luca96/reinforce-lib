@@ -112,7 +112,6 @@ def polyak_averaging(model: tf.keras.Model, old_weights: list, alpha=0.99):
     weights = []
 
     for w_old, w_new in zip(old_weights, new_weights):
-        # w = alpha * w_old + (1.0 - alpha) * w_new
         w = alpha * w_new + (1.0 - alpha) * w_old
         weights.append(w)
 
@@ -324,6 +323,11 @@ def concat_dict_tensor(*dicts: dict, axis=0) -> dict:
         result = {k: tf.concat([v, d[k]], axis=axis) for k, v in result.items()}
 
     return result
+
+
+def tf_chance(seed=None):
+    """Use to get a single random number between 0 and 1"""
+    return tf.random.uniform(shape=(1,), minval=0.0, maxval=1.0, seed=seed)
 
 
 # TODO: @tf.function

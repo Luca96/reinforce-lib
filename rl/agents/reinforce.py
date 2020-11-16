@@ -10,7 +10,7 @@ from typing import Union, List, Dict
 from rl import utils
 from rl.agents import Agent
 from rl.networks import Network
-from rl.parameters import DynamicParameter, ConstantParameter, ParameterWrapper
+from rl.parameters import DynamicParameter, ConstantParameter, ScheduleWrapper
 
 from tensorflow.keras import losses
 from tensorflow.keras.layers import *
@@ -51,7 +51,7 @@ class ReinforceAgent(Agent):
             self.entropy_strength = ConstantParameter(value=entropy_regularization)
 
         elif isinstance(entropy_regularization, LearningRateSchedule):
-            self.entropy_strength = ParameterWrapper(entropy_regularization)
+            self.entropy_strength = ScheduleWrapper(entropy_regularization)
 
         # Action space
         self._init_action_space()
@@ -108,10 +108,10 @@ class ReinforceAgent(Agent):
         if isinstance(lr, float):
             return ConstantParameter(lr)
 
-        if isinstance(lr, ParameterWrapper) or isinstance(lr, DynamicParameter):
+        if isinstance(lr, ScheduleWrapper) or isinstance(lr, DynamicParameter):
             return lr
 
-        return ParameterWrapper(schedule=lr)
+        return ScheduleWrapper(schedule=lr)
 
     def _init_gradient_clipping(self, clip_norm: Union[tuple, float, None]):
         if clip_norm is None:
