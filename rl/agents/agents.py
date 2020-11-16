@@ -134,6 +134,17 @@ class Agent:
         print(f'Mean reward: {round(np.mean(rewards), 2)}, std: {round(np.std(rewards), 2)}')
         return rewards
 
+    @classmethod
+    def test(cls, args: dict, network_summary=False, **kwargs):
+        """Rapid testing"""
+        agent = cls(**kwargs)
+
+        if network_summary:
+            agent.summary()
+            breakpoint()
+
+        agent.learn(**args)
+
     # TODO: one fn for training and another for evaluation?
     def preprocess(self):
         @tf.function

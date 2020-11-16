@@ -3,8 +3,8 @@ import numpy as np
 import tensorflow as tf
 
 from rl import utils
-from rl.agents import PPOAgent
-from rl.parameters import StepDecay, ExponentialDecay, PolynomialDecay
+from rl.agents import *
+from rl.parameters import StepDecay, ExponentialDecay
 
 
 def ppo_cartpole_test(b=20, seed=42, seeds=(42, 31, 91)):
@@ -223,11 +223,13 @@ if __name__ == '__main__':
     #                  policy_lr=3e-4, entropy_regularization=0.0, update_frequency=4, seed=42)
     # agent.learn(episodes=192+16, timesteps=200, render_every=10, save_every=False)
 
-    from rl.agents import DQNAgent
-    agent = DQNAgent(env='CartPole-v0', name='dqn-cartpole', batch_size=32,
-                     summary_keys=['episode_rewards', 'loss', 'q_values', 'targets',
-                                   'gradients_norm', 'epsilon'],
-                     epsilon=PolynomialDecay(initial_value=1.0, end_value=0.0, decay_steps=100**2),
-                     memory_size=2048, lr=3e-4, seed=42)
-    agent.learn(episodes=192 + 16, timesteps=200, render_every=10, save_every=False)
+    # DQNAgent.test(env='CartPole-v0', batch_size=32, memory_size=2048, lr=3e-4, seed=42,
+    #               epsilon=0.1,
+    #               summary_keys=['episode_rewards', 'loss', 'q_values', 'targets'],
+    #               args=dict(episodes=208, timesteps=200, render_every=10, save_every='end'))
+
+    DuelingDQNAgent.test(env='CartPole-v0', batch_size=32, memory_size=2048, lr=3e-4, seed=42,
+                         epsilon=0.1,
+                         summary_keys=['episode_rewards', 'loss', 'q_values', 'targets'],
+                         args=dict(episodes=208, timesteps=200, render_every=10, save_every='end'))
     pass

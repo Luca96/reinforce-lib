@@ -33,8 +33,8 @@ class Network:
     def summary(self):
         pass
 
-    def _get_input_layers(self) -> Dict[str, Input]:
-        """Handles arbitrary complex state-spaces"""
+    def _get_input_layers(self, include_actions=False) -> Dict[str, Input]:
+        """Transforms arbitrary complex state-spaces (and, optionally, action-spaces) as input layers"""
         input_layers = dict()
 
         for name, shape in self.agent.state_spec.items():
@@ -45,6 +45,11 @@ class Network:
 
             layer = Input(shape=shape, dtype=tf.float32, name=name)
             input_layers[name] = layer
+
+        if include_actions:
+            for name, shape in self.agent.action_spec.items():
+                layer = Input(shape=shape, dtype=tf.float32, name=name)
+                input_layers[name] = layer
 
         return input_layers
 

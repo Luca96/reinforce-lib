@@ -80,6 +80,7 @@ class DQNAgent(Agent):
         action_space = self.env.action_space
 
         if isinstance(action_space, gym.spaces.Box):
+            raise NotImplementedError('`gym.spaces.Box` not yet supported!')
             self.num_actions = action_space.shape[0]
 
             # continuous:
@@ -100,6 +101,7 @@ class DQNAgent(Agent):
             self.distribution_type = 'categorical'
 
             if isinstance(action_space, gym.spaces.MultiDiscrete):
+                raise NotImplementedError('`gym.spaces.MultiDiscrete` not yet supported!')
                 # make sure all discrete components of the space have the same number of classes
                 assert np.all(action_space.nvec == action_space.nvec[0])
 
@@ -269,6 +271,8 @@ class DQNAgent(Agent):
                 print('closing...')
                 self.env.close()
 
+    def summary(self):
+        self.dqn.summary()
 
 class DQNetwork(Network):
     def __init__(self, agent: DQNAgent):
@@ -405,4 +409,3 @@ class ReplayMemory:
             self.actions = self.actions[elements_to_remove:]
             self.rewards = self.rewards[elements_to_remove:]
             self.terminals = self.terminals[elements_to_remove:]
-
