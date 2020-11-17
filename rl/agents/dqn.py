@@ -9,7 +9,7 @@ import tensorflow as tf
 from typing import Union, List, Dict
 
 from rl import utils
-from rl.agents.agents import Agent
+from rl.agents import Agent
 from rl.parameters import DynamicParameter
 from rl.networks.networks import Network
 
@@ -24,8 +24,8 @@ class DQNAgent(Agent):
     # TODO: do not train on entire memory at each update
     # TODO: support for continuous actions?
     def __init__(self, *args, lr: Union[float, LearningRateSchedule, DynamicParameter] = 1e-3, name='dqn-agent',
-                 gamma=0.99, load=False, optimizer='adam', clip_norm=1.0, polyak=0.999, repeat_action=1, memory_size=1000,
-                 epsilon: Union[float, LearningRateSchedule, DynamicParameter] = 0.05, **kwargs):
+                 gamma=0.99, load=False, optimizer='adam', clip_norm=1.0, polyak=0.999, repeat_action=1,
+                 memory_size=1000, epsilon: Union[float, LearningRateSchedule, DynamicParameter] = 0.05, **kwargs):
         assert 0.0 < polyak <= 1.0
         assert repeat_action >= 1
 
@@ -51,7 +51,7 @@ class DQNAgent(Agent):
         # Gradient clipping
         self._init_gradient_clipping(clip_norm)
 
-        # Networks (DQN and target-network) & Loading
+        # Networks (DQN and target-network)
         self.weights_path = dict(dqn=os.path.join(self.base_path, 'dqn'))
         self.dqn = DQNetwork(agent=self)
         self.target = DQNetwork(agent=self)
@@ -121,16 +121,29 @@ class DQNAgent(Agent):
         return tf.argmax(q_values, axis=1)
 
     def update(self):
+        if len(self.memory) < self.batch_size:
+            print('Not updated: memory too small!')
+            return
+
         t0 = time.time()
 
-        for batch in self.training_batches():
-            loss, q_values, targets, gradients = self.get_gradients(batch)
-            applied_grads = self.apply_gradients(gradients)
-            self.update_target_network()
+        # for batch in self.training_batches():
+        #     loss, q_values, targets, gradients = self.get_gradients(batch)
+        #     applied_grads = self.apply_gradients(gradients)
+        #     self.update_target_network()
+        #
+        #     self.log(loss=loss, q_values=q_values, targets=targets, lr=self.lr.value,
+        #              gradients_norm=[tf.norm(gradient) for gradient in gradients],
+        #              gradients_applied_norm=[tf.norm(g) for g in applied_grads])
 
-            self.log(loss=loss, q_values=q_values, targets=targets, lr=self.lr.value,
-                     gradients_norm=[tf.norm(gradient) for gradient in gradients],
-                     gradients_applied_norm=[tf.norm(g) for g in applied_grads])
+        batch = self.memory.sample_batch(batch_size=self.batch_size, seed=self.seed)
+        loss, q_values, targets, gradients = self.get_gradients(batch)
+        applied_grads = self.apply_gradients(gradients)
+        self.update_target_network()
+
+        self.log(loss=loss, q_values=q_values, targets=targets, lr=self.lr.value,
+                 gradients_norm=[tf.norm(gradient) for gradient in gradients],
+                 gradients_applied_norm=[tf.norm(g) for g in applied_grads])
 
         print(f'Update took {round(time.time() - t0, 3)}s.')
 
@@ -157,10 +170,10 @@ class DQNAgent(Agent):
         return self.memory.states, self.memory.actions, self.memory.rewards, \
                self.memory.next_states, self.memory.terminals
 
-    def training_batches(self):
-        return utils.data_to_batches(tensors=self.get_batch_tensors(), batch_size=self.batch_size,
-                                     drop_remainder=self.drop_batch_remainder, skip=self.skip_count,
-                                     shuffle=True, shuffle_batches=False, num_shards=self.obs_skipping)
+    # def training_batches(self):
+    #     return utils.data_to_batches(tensors=self.get_batch_tensors(), batch_size=self.batch_size,
+    #                                  drop_remainder=self.drop_batch_remainder, skip=self.skip_count,
+    #                                  shuffle=True, shuffle_batches=False, num_shards=self.obs_skipping)
 
     @tf.function
     def objective(self, batch):
@@ -250,9 +263,10 @@ class DQNAgent(Agent):
                     if terminal or (t == timesteps):
                         print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
                               f'with reward {round(episode_reward, 3)}.')
+
+                        self.update()
                         break
-                # Update
-                self.update()
+
                 self.memory.ensure_space()
 
                 # Logging
@@ -271,8 +285,17 @@ class DQNAgent(Agent):
                 print('closing...')
                 self.env.close()
 
+    def load_weights(self):
+        print('[DQN] loading weights...')
+        self.dqn.load_weights()
+        self.target.set_weights(weights=self.dqn.get_weights())
+
+    def save_weights(self):
+        self.dqn.save_weights()
+
     def summary(self):
         self.dqn.summary()
+
 
 class DQNetwork(Network):
     def __init__(self, agent: DQNAgent):
@@ -374,6 +397,10 @@ class ReplayMemory:
         self.rewards = tf.zeros(shape=(0, 1), dtype=tf.float32)
         self.terminals = tf.zeros(shape=(0, 1), dtype=tf.float32)
 
+    def __len__(self):
+        """Memory's current size"""
+        return self.actions.shape[0]
+
     def append(self, state, action, reward, next_state, terminal):
         action = tf.reshape(action, shape=(1, self.actions.shape[1]))
         reward = tf.reshape(reward, shape=(1, 1))
@@ -392,6 +419,29 @@ class ReplayMemory:
         self.actions = tf.concat([self.actions, tf.cast(action, dtype=tf.float32)], axis=0)
         self.rewards = tf.concat([self.rewards, reward], axis=0)
         self.terminals = tf.concat([self.terminals, tf.cast(terminal, dtype=tf.float32)], axis=0)
+
+    # TODO: in this way `obs_skipping` is not possible, anymore...
+    def sample_batch(self, batch_size: int, seed=None) -> tuple:
+        assert len(self) >= batch_size
+
+        # use random indices to randomly sample (get) items
+        indices = tf.range(start=0, limit=len(self), dtype=tf.int32)
+        indices = tf.random.shuffle(indices, seed=seed)[:batch_size]
+
+        # batch = (states, actions, rewards, next_states, terminals)
+        if self.simple_state:
+            batch = (tf.gather(self.states, indices),
+                     tf.gather(self.actions, indices),
+                     tf.gather(self.rewards, indices),
+                     tf.gather(self.next_states, indices),
+                     tf.gather(self.terminals, indices))
+        else:
+            batch = ({k: tf.gather(v, indices) for k, v in self.states.items()},
+                     tf.gather(self.actions, indices),
+                     tf.gather(self.rewards, indices),
+                     {k: tf.gather(v, indices) for k, v in self.next_states.items()},
+                     tf.gather(self.terminals, indices))
+        return batch
 
     def ensure_space(self):
         elements_to_remove = self.actions.shape[0] - self.size

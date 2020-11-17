@@ -223,13 +223,13 @@ if __name__ == '__main__':
     #                  policy_lr=3e-4, entropy_regularization=0.0, update_frequency=4, seed=42)
     # agent.learn(episodes=192+16, timesteps=200, render_every=10, save_every=False)
 
-    # DQNAgent.test(env='CartPole-v0', batch_size=32, memory_size=2048, lr=3e-4, seed=42,
-    #               epsilon=0.1,
-    #               summary_keys=['episode_rewards', 'loss', 'q_values', 'targets'],
-    #               args=dict(episodes=208, timesteps=200, render_every=10, save_every='end'))
+    DQNAgent.test(env='CartPole-v0', batch_size=64, memory_size=2048, lr=3e-4, seed=42,
+                  epsilon=0.1, clip_norm=None,
+                  summary_keys=['episode_rewards', 'loss', 'q_values', 'targets'],
+                  args=dict(episodes=208, timesteps=200, render_every=10, save_every='end'))
 
-    DuelingDQNAgent.test(env='CartPole-v0', batch_size=32, memory_size=2048, lr=3e-4, seed=42,
-                         epsilon=0.1,
-                         summary_keys=['episode_rewards', 'loss', 'q_values', 'targets'],
-                         args=dict(episodes=208, timesteps=200, render_every=10, save_every='end'))
+    # DuelingDQNAgent.test(env='CartPole-v0', batch_size=32, memory_size=2048, lr=3e-4, seed=42,
+    #                      epsilon=0.1,
+    #                      summary_keys=['episode_rewards', 'loss', 'q_values', 'targets'],
+    #                      args=dict(episodes=208, timesteps=200, render_every=10, save_every='end'))
     pass

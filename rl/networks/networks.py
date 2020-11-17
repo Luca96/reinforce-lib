@@ -24,6 +24,15 @@ class Network:
     def reset(self):
         pass
 
+    def trainable_variables(self):
+        raise NotImplementedError
+
+    def set_weights(self, weights):
+        raise NotImplementedError
+
+    def get_weights(self):
+        raise NotImplementedError
+
     def load_weights(self):
         raise NotImplementedError
 
