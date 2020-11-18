@@ -21,7 +21,6 @@ from tensorflow.keras.optimizers.schedules import LearningRateSchedule
 
 class DQNAgent(Agent):
     # TODO: fix retracing issue (functions: objective, targets, and q_values)
-    # TODO: do not train on entire memory at each update
     # TODO: support for continuous actions?
     def __init__(self, *args, lr: Union[float, LearningRateSchedule, DynamicParameter] = 1e-3, name='dqn-agent',
                  gamma=0.99, load=False, optimizer='adam', clip_norm=1.0, polyak=0.999, repeat_action=1,
@@ -127,15 +126,6 @@ class DQNAgent(Agent):
 
         t0 = time.time()
 
-        # for batch in self.training_batches():
-        #     loss, q_values, targets, gradients = self.get_gradients(batch)
-        #     applied_grads = self.apply_gradients(gradients)
-        #     self.update_target_network()
-        #
-        #     self.log(loss=loss, q_values=q_values, targets=targets, lr=self.lr.value,
-        #              gradients_norm=[tf.norm(gradient) for gradient in gradients],
-        #              gradients_applied_norm=[tf.norm(g) for g in applied_grads])
-
         batch = self.memory.sample_batch(batch_size=self.batch_size, seed=self.seed)
         loss, q_values, targets, gradients = self.get_gradients(batch)
         applied_grads = self.apply_gradients(gradients)
@@ -164,16 +154,6 @@ class DQNAgent(Agent):
 
         self.optimizer.apply_gradients(zip(gradients, self.dqn.trainable_variables()))
         return gradients
-
-    def get_batch_tensors(self) -> Union[tuple, dict]:
-        """Tensors from which training batches are made"""
-        return self.memory.states, self.memory.actions, self.memory.rewards, \
-               self.memory.next_states, self.memory.terminals
-
-    # def training_batches(self):
-    #     return utils.data_to_batches(tensors=self.get_batch_tensors(), batch_size=self.batch_size,
-    #                                  drop_remainder=self.drop_batch_remainder, skip=self.skip_count,
-    #                                  shuffle=True, shuffle_batches=False, num_shards=self.obs_skipping)
 
     @tf.function
     def objective(self, batch):
@@ -417,7 +397,7 @@ class ReplayMemory:
                 self.next_states[k] = tf.concat([self.next_states[k], next_state[k]], axis=0)
 
         self.actions = tf.concat([self.actions, tf.cast(action, dtype=tf.float32)], axis=0)
-        self.rewards = tf.concat([self.rewards, reward], axis=0)
+        self.rewards = tf.concat([self.rewards, tf.cast(reward, dtype=tf.float32)], axis=0)
         self.terminals = tf.concat([self.terminals, tf.cast(terminal, dtype=tf.float32)], axis=0)
 
     # TODO: in this way `obs_skipping` is not possible, anymore...

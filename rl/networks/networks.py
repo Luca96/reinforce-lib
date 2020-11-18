@@ -55,6 +55,7 @@ class Network:
             layer = Input(shape=shape, dtype=tf.float32, name=name)
             input_layers[name] = layer
 
+        # TODO: bugged for discrete actions (requires '-1' in shape)
         if include_actions:
             for name, shape in self.agent.action_spec.items():
                 layer = Input(shape=shape, dtype=tf.float32, name=name)
