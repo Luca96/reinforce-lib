@@ -233,9 +233,15 @@ if __name__ == '__main__':
     #                      summary_keys=['episode_rewards', 'loss', 'q_values', 'targets'],
     #                      args=dict(episodes=208, timesteps=200, render_every=10, save_every='end'))
 
-    DDPGAgent.test(env='CartPole-v0', batch_size=64, memory_size=2048, seed=31,
-                   actor_lr=3e-4, critic_lr=1e-3,
-                   noise=0.0, clip_norm=None, name='ddpg-cartpole',
-                   # summary_keys=['episode_rewards', 'loss', 'q_values', 'targets'],
-                   args=dict(episodes=208*2, timesteps=200, render_every=10, save_every='end'))
+    # DDPGAgent.test(env='CartPole-v0', batch_size=64, memory_size=2048, seed=31,
+    #                actor_lr=3e-4, critic_lr=1e-3,
+    #                noise=0.0, clip_norm=None, name='ddpg-cartpole',
+    #                # summary_keys=['episode_rewards', 'loss', 'q_values', 'targets'],
+    #                args=dict(episodes=200, timesteps=200, render_every=10, save_every='end'))
+    #
+
+    SACAgent.test(env='CartPole-v0', batch_size=64, memory_size=2048, seed=42,
+                  name='sac-cartpole', temperature=0.05, lr=1e-4,
+                  args=dict(episodes=200+300, timesteps=200, render_every=10, save_every='end'),
+                  network_summary=False)
     pass

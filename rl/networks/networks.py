@@ -65,6 +65,9 @@ class Network:
 
     @staticmethod
     def _clip_actions(actions):
+        """Clips actions to prevent numerical instability when computing (log-)probabilities.
+           - Use for Beta distribution only.
+        """
         return tf.clip_by_value(actions, utils.EPSILON, 1.0 - utils.EPSILON)
 
     def get_distribution_layer(self, distribution: str, layer: Layer) -> tfp.layers.DistributionLambda:

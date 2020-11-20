@@ -11,3 +11,4 @@ from rl.agents.dueling_dqn import DuelingDQNAgent
 
 # Both Policy Optimization and Q-Learning agents:
 from rl.agents.ddpg import DDPGAgent
+from rl.agents.sac import SACAgent

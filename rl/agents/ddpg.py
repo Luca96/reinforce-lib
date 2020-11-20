@@ -6,11 +6,11 @@ import time
 import numpy as np
 import tensorflow as tf
 
-from typing import Union, List, Dict, Optional, Tuple
+from typing import Union, List, Dict, Tuple
 
 from rl import utils
 from rl.agents import Agent
-from rl.agents.dqn import DQNetwork, ReplayMemory
+from rl.agents.dqn import ReplayMemory
 from rl.parameters import DynamicParameter
 from rl.networks.networks import Network
 
@@ -24,8 +24,8 @@ class DDPGAgent(Agent):
     # TODO: allow different noise process
     # TODO: add L2-weight decay for critic (l2=10e-2)
     # TODO: network customization
-    def __init__(self, *args, optimizer='adam', actor_lr: Union[float, LearningRateSchedule, DynamicParameter] = 10e-4,
-                 critic_lr: Union[float, LearningRateSchedule, DynamicParameter] = 10e-3, name='ddpg-agent', gamma=0.99,
+    def __init__(self, *args, optimizer='adam', actor_lr: Union[float, LearningRateSchedule, DynamicParameter] = 1e-4,
+                 critic_lr: Union[float, LearningRateSchedule, DynamicParameter] = 1e-3, name='ddpg-agent', gamma=0.99,
                  load=False, clip_norm: Union[None, float, Tuple[float, float]] = None, polyak=0.999, repeat_action=1,
                  memory_size=1000, noise: Union[float, LearningRateSchedule, DynamicParameter] = 0.005, **kwargs):
         assert 0.0 < polyak <= 1.0
@@ -171,7 +171,7 @@ class DDPGAgent(Agent):
 
     def update(self):
         if len(self.memory) < self.batch_size:
-            print('Not updated: memory too small!')
+            print('Not updated: few experience in memory!')
             return
 
         t0 = time.time()
@@ -217,14 +217,14 @@ class DDPGAgent(Agent):
         gradients = tape.gradient(loss, self.critic.trainable_variables())
         return loss, targets, q_values, gradients
 
-    def apply_actor_gradients(self, gradients):
+    def apply_actor_gradients(self, gradients) -> List[tf.Tensor]:
         if self.should_clip_actor_grads:
             gradients = utils.clip_gradients(gradients, norm=self.actor_clip_norm)
 
         self.actor_optimizer.apply_gradients(zip(gradients, self.actor.trainable_variables()))
         return gradients
 
-    def apply_critic_gradients(self, gradients):
+    def apply_critic_gradients(self, gradients) -> List[tf.Tensor]:
         if self.should_clip_critic_grads:
             gradients = utils.clip_gradients(gradients, norm=self.critic_clip_norm)
 
@@ -412,11 +412,7 @@ class ActorNetwork(Network):
             if dropout_rate > 0.0:
                 x = Dense(units, activation=activation)(x)
                 x = Dropout(rate=dropout_rate)(x)
-
-                x = Dense(units, activation=activation)(x)
-                x = Dropout(rate=dropout_rate)(x)
             else:
-                x = Dense(units, activation=activation)(x)
                 x = Dense(units, activation=activation)(x)
 
             x = BatchNormalization()(x)
@@ -469,12 +465,13 @@ class CriticNetwork(Network):
 
     def layers(self, inputs: Dict[str, Input], **kwargs) -> Layer:
         units = kwargs.get('units', 64)
+        units_action = kwargs.get('units_action', 16)
         num_layers = kwargs.get('num_layers', kwargs.get('layers', 2))  # 'num_layers' or 'layers'
         activation = kwargs.get('activation', tf.nn.relu)
         dropout_rate = kwargs.get('dropout', 0.0)
 
         state_branch = self._branch(inputs['state'], units, num_layers, activation, dropout_rate)
-        action_branch = self._branch(inputs['action'], units, num_layers, activation, dropout_rate)
+        action_branch = self._branch(inputs['action'], units_action, num_layers, activation, dropout_rate)
 
         x = Dense(units, activation=activation,
                   bias_initializer='glorot_uniform')(concatenate([state_branch, action_branch]))
@@ -488,11 +485,7 @@ class CriticNetwork(Network):
             if dropout_rate > 0.0:
                 x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(x)
                 x = Dropout(rate=dropout_rate)(x)
-
-                x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(x)
-                x = Dropout(rate=dropout_rate)(x)
             else:
-                x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(x)
                 x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(x)
 
             x = BatchNormalization()(x)
