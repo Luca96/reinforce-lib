@@ -5,7 +5,6 @@ import numpy as np
 import scipy.signal
 import tensorflow as tf
 import matplotlib.pyplot as plt
-import tensorflow_probability as tfp
 import random
 
 from typing import Union, List, Dict, Tuple, Optional
@@ -279,14 +278,19 @@ def space_to_spec(space: gym.Space) -> Union[tuple, Dict[str, Union[tuple, dict]
 # TODO: @tf.function
 def to_tensor(x, expand_axis=0):
     if isinstance(x, dict):
+        t = dict()
+
         for k, v in x.items():
             v = to_float(v)
-            x[k] = tf.expand_dims(tf.convert_to_tensor(v), axis=expand_axis)
+            t[k] = tf.expand_dims(tf.convert_to_tensor(v), axis=expand_axis)
+
+        return t
     else:
         x = to_float(x)
         x = tf.convert_to_tensor(x)
         x = tf.expand_dims(x, axis=expand_axis)
-    return x
+
+        return x
 
 
 def tf_replace_nan(tensor, value=0.0, dtype=tf.float32):
@@ -303,23 +307,23 @@ def mask_dict_tensor(tensor: dict, mask) -> dict:
     return {k: v[mask] for k, v in tensor.items()}
 
 
-def concat_dict_tensor(*dicts: dict, axis=0) -> dict:
+def concat_tensors(*tensors, axis=0) -> Union[tf.Tensor, Dict[str, tf.Tensor]]:
+    assert len(tensors) > 0
+
+    if isinstance(tensors[0], dict):
+        return concat_dict_tensor(*tensors, axis=axis)
+
+    return tf.concat(tensors, axis=axis)
+
+
+def concat_dict_tensor(*dicts, axis=0) -> dict:
     assert len(dicts) > 0
+    assert isinstance(dicts[0], dict)
+
     result = dicts[0]
 
     for i in range(1, len(dicts)):
         d = dicts[i]
-        # print(i)
-        # breakpoint()
-
-        for k, v in result.items():
-            # print(k)
-            # breakpoint()
-            # print(v)
-            # breakpoint()
-            tf.concat([v, d[k]], axis=0)
-            # breakpoint()
-
         result = {k: tf.concat([v, d[k]], axis=axis) for k, v in result.items()}
 
     return result

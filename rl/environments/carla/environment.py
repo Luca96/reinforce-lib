@@ -238,8 +238,7 @@ class CARLABaseEnvironment(gym.Env):
             self.spawn_dict = None
             self.should_spawn = False
 
-        observation = env_utils.replace_nans(self.get_observation(sensors_data={}))
-        return observation
+        return self.get_observation(sensors_data={})
 
     def reward(self, actions, **kwargs):
         """Agent's reward function"""
@@ -331,7 +330,7 @@ class CARLABaseEnvironment(gym.Env):
 
         reward = self.reward(actions)
         terminal = self.terminal_condition()
-        next_state = env_utils.replace_nans(self.get_observation(sensors_data))
+        next_state = self.get_observation(sensors_data)
 
         return next_state, reward, terminal, self.get_info()
 
@@ -1069,13 +1068,13 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
                         road=self.ROAD_FEATURES['default'], past_control=self.CONTROL['default'],
                         command=RoadOption.VOID.to_one_hot())
 
-        # resize image if necessary
         image = sensors_data['camera']
 
+        # resize image if necessary
         if image.shape != self.image_shape:
             image = env_utils.resize(image, size=self.image_size)
 
-        # -1, +1 scaling
+        # 0-1 scaling
         image /= 255.0
 
         # observations
@@ -1083,8 +1082,10 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         control_obs = self._control_as_vector()
         road_obs = self._get_road_features()
 
-        return dict(image=image, vehicle=vehicle_obs, road=road_obs, past_control=control_obs,
-                    command=self.next_command.to_one_hot())
+        obs = dict(image=image, vehicle=vehicle_obs, road=road_obs, past_control=control_obs,
+                   command=self.next_command.to_one_hot())
+
+        return env_utils.replace_nans(obs)
 
     def get_info(self) -> dict:
         """Returns a dict with additional information either for debugging or learning"""

@@ -89,10 +89,10 @@ class PPOAgent(Agent):
         self.update_frequency = update_frequency
         self.policy_lr = DynamicParameter.create(value=policy_lr)
         self.value_lr = DynamicParameter.create(value=value_lr)
+        self.optimization_steps = dict(policy=optimization_steps[0], value=optimization_steps[1])
 
         self.policy_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=self.policy_lr)
         self.value_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=self.value_lr)
-        self.optimization_steps = dict(policy=optimization_steps[0], value=optimization_steps[1])
 
         self.should_polyak_average = polyak < 1.0
         self.polyak_coeff = polyak
@@ -186,9 +186,13 @@ class PPOAgent(Agent):
         # Policy network optimization:
         for opt_step in range(self.optimization_steps['policy']):
             for data_batch in policy_batches:
-                total_loss, kl, policy_grads = self.get_policy_gradients(data_batch)
+                total_loss, policy_grads = self.get_policy_gradients(data_batch)
 
                 self.update_policy(policy_grads)
+
+                if isinstance(policy_grads, dict):
+                    policy_grads = policy_grads['policy']
+
                 self.log(loss_total=total_loss, lr_policy=self.policy_lr.value,
                          gradients_norm_policy=[tf.norm(gradient) for gradient in policy_grads])
 
@@ -219,6 +223,10 @@ class PPOAgent(Agent):
                 value_loss, value_grads = self.get_value_gradients(data_batch)
 
                 self.update_value(value_grads)
+
+                if isinstance(value_grads, dict):
+                    value_grads = value_grads['value']
+
                 self.log(loss_value=value_loss, lr_value=self.value_lr.value,
                          gradients_norm_value=[tf.norm(gradient) for gradient in value_grads])
 
@@ -226,10 +234,10 @@ class PPOAgent(Agent):
 
     def get_policy_gradients(self, batch):
         with tf.GradientTape() as tape:
-            loss, kl = self.policy_objective(batch)
+            loss = self.policy_objective(batch)
 
         gradients = tape.gradient(loss, self.network.policy.trainable_variables)
-        return loss, kl, gradients
+        return loss, gradients
 
     def update_policy(self, gradients) -> (list, bool):
         return self.apply_policy_gradients(gradients), True
@@ -444,7 +452,7 @@ class PPOAgent(Agent):
                     memory.compute_advantages(self.gamma, self.lambda_)
 
                     # update policy:
-                    loss_policy, _, policy_grads = self.get_policy_gradients(batch=(states, memory.advantages,
+                    loss_policy, policy_grads = self.get_policy_gradients(batch=(states, memory.advantages,
                                                                                     actions, log_probs))
                     self.apply_policy_gradients(policy_grads)
 
@@ -479,7 +487,7 @@ class PPOAgent(Agent):
             render_every = 1
 
         try:
-            self.memory = PPOMemory(state_spec=self.state_spec, num_actions=self.num_actions)
+            self.memory = self.get_memory()
 
             for episode in range(1, episodes + 1):
                 preprocess_fn = self.preprocess()
@@ -522,6 +530,7 @@ class PPOAgent(Agent):
                     if done or (t == timesteps):
                         print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
                               f'with reward {round(episode_reward, 3)}.')
+                        self.log(timestep=t)
 
                         if isinstance(state, dict):
                             state = {f'state_{k}': v for k, v in state.items()}
@@ -537,7 +546,12 @@ class PPOAgent(Agent):
                 if episode % self.update_frequency == 0:
                     self.update()
                     self.memory.delete()
-                    self.memory = PPOMemory(state_spec=self.state_spec, num_actions=self.num_actions)
+                    self.memory = self.get_memory()
+
+                elif self.update_frequency > 1:
+                    # remove last `reward` and `value` to avoid shape issue when building the batch for update()
+                    self.memory.rewards = self.memory.rewards[:-1]
+                    self.memory.values = self.memory.values[:-1]
 
                 self.log(episode_rewards=episode_reward)
                 self.write_summaries()
@@ -554,13 +568,17 @@ class PPOAgent(Agent):
                 print('closing...')
                 self.env.close()
 
+    def get_memory(self):
+        """Instantiate the agent's memory; easy to subclass"""
+        return PPOMemory(state_spec=self.state_spec, num_actions=self.num_actions)
+
     def end_episode(self, last_value, append=False):
         """Used during learning `learn(...)` to terminate an episode"""
         self.memory.end_trajectory(last_value)
         returns = self.memory.compute_returns(discount=self.gamma, append=append)
         values, advantages = self.memory.compute_advantages(self.gamma, self.lambda_,
                                                             scale=self.adv_scale(), append=append)
-        self.memory.update_index()
+        self.memory.update_index(append=append)
 
         self.log(returns=returns, advantages=advantages, values=values, advantage_scale=self.adv_scale.value,
                  returns_base=self.memory.returns[:, 0], returns_exp=self.memory.returns[:, 1],
@@ -637,12 +655,15 @@ class PPOMemory:
         self.returns = None
         self.advantages = None
 
+    def __len__(self):
+        return self.actions.shape[0]
+
     def delete(self):
         if self.simple_state:
             del self.states
         else:
             for k in self.states.keys():
-                del self.states[k]
+                self.states[k] = None
 
             del self.states
 
@@ -707,8 +728,11 @@ class PPOMemory:
 
         return values, advantages
 
-    def update_index(self):
-        self.index = self.rewards.shape[0]
+    def update_index(self, append=False):
+        if append:
+            self.index = self.rewards.shape[0] - 1
+        else:
+            self.index = self.rewards.shape[0]
 
     def serialize(self, episode: int, save_path: str):
         """Writes to file (npz - numpy compressed format) all the transitions (state, reward, action) collected so

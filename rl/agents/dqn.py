@@ -45,7 +45,7 @@ class DQNAgent(Agent):
         self._init_action_space()
 
         # Memory
-        self.memory = ReplayMemory(state_spec=self.state_spec, num_actions=self.num_actions, size=memory_size)
+        self.memory = self.get_memory(size=memory_size)
 
         # Gradient clipping
         self._init_gradient_clipping(clip_norm)
@@ -118,6 +118,9 @@ class DQNAgent(Agent):
 
         q_values = self.dqn.q_values(state, training=False)
         return tf.argmax(q_values, axis=1)
+
+    def get_memory(self, size: int):
+        return ReplayMemory(state_spec=self.state_spec, num_actions=self.num_actions, size=size)
 
     def update(self):
         if len(self.memory) < self.batch_size:

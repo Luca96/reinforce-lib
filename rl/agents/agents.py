@@ -134,6 +134,9 @@ class Agent:
         print(f'Mean reward: {round(np.mean(rewards), 2)}, std: {round(np.std(rewards), 2)}')
         return rewards
 
+    def get_memory(self, *args, **kwargs):
+        raise NotImplementedError
+
     @classmethod
     def test(cls, args: dict, network_summary=False, **kwargs):
         """Rapid testing"""

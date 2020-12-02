@@ -48,7 +48,7 @@ class DDPGAgent(Agent):
         self._init_action_space()
 
         # Memory
-        self.memory = ReplayMemory(state_spec=self.state_spec, num_actions=self.num_actions, size=memory_size)
+        self.memory = self.get_memory(size=memory_size)
 
         # Gradient clipping
         self._init_gradient_clipping(clip_norm)
@@ -168,6 +168,9 @@ class DDPGAgent(Agent):
         actions = self.actor.actions(inputs=states)
         noise = tf.random.normal(shape=actions.shape, stddev=self.noise())
         return actions + noise
+
+    def get_memory(self, size: int):
+        return ReplayMemory(state_spec=self.state_spec, num_actions=self.num_actions, size=size)
 
     def update(self):
         if len(self.memory) < self.batch_size:
@@ -400,7 +403,7 @@ class ActorNetwork(Network):
         return actions
 
     def layers(self, inputs: Dict[str, Input], **kwargs) -> Layer:
-        units = kwargs.get('units', 256)
+        units = kwargs.get('units', 64)
         num_layers = kwargs.get('num_layers', kwargs.get('layers', 2))  # 'num_layers' or 'layers'
         activation = kwargs.get('activation', tf.nn.relu)
         dropout_rate = kwargs.get('dropout', 0.0)
@@ -408,7 +411,7 @@ class ActorNetwork(Network):
         x = Dense(units, activation=activation)(inputs['state'])
         x = BatchNormalization()(x)
 
-        for _ in range(0, num_layers, 2):
+        for _ in range(num_layers):
             if dropout_rate > 0.0:
                 x = Dense(units, activation=activation)(x)
                 x = Dropout(rate=dropout_rate)(x)
@@ -475,13 +478,14 @@ class CriticNetwork(Network):
 
         x = Dense(units, activation=activation,
                   bias_initializer='glorot_uniform')(concatenate([state_branch, action_branch]))
+        x = BatchNormalization()(x)
         return x
 
     def _branch(self, input_layer: Input, units: int, num_layers: int, activation, dropout_rate: float) -> Layer:
         x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(input_layer)
         x = BatchNormalization()(x)
 
-        for _ in range(0, num_layers, 2):
+        for _ in range(num_layers):
             if dropout_rate > 0.0:
                 x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(x)
                 x = Dropout(rate=dropout_rate)(x)
