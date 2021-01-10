@@ -271,6 +271,47 @@ def space_to_spec(space: gym.Space) -> Union[tuple, Dict[str, Union[tuple, dict]
     return spec
 
 
+def space_to_flat_spec2(space: gym.Space, name: str) -> Dict[str, dict]:
+    """From a gym.Space object returns a flat dictionary str -> tuple.
+       Naming convention:
+         - If space is Box or Discrete, it returns 'dict(name=shape)'
+         - If space is Dict (not nested), it returns 'dict(name_x=shape_x, name_y=shape_y)'
+            considering 'x' and 'y' be component of space.
+         - With further nesting, dict keys' names got created using the above two rules.
+           In this way each key (name) uniquely identifies a (sub-)component of the space.
+           Example:
+              Dict(a=x, b=Dict(c=y, d=z)) -> dict(a=x, b_c=y, b_d=z)
+    """
+    spec = dict()
+
+    if isinstance(space, spaces.Discrete):
+        spec[name] = dict(shape=(space.n,), dtype=tf.int32)
+
+    elif isinstance(space, spaces.MultiDiscrete):
+        spec[name] = dict(shape=space.nvec.shape, dtype=tf.int32)
+
+    elif isinstance(space, spaces.Box):
+        spec[name] = dict(shape=space.shape, dtype=tf.float32,
+                          low=space.low, high=space.high,
+                          bounded_below=space.bounded_below, bounded_above=space.bounded_above)
+
+    elif isinstance(space, spaces.Dict):
+        for key, value in space.spaces.items():
+            space_name = f'{name}_{key}'
+            result = space_to_flat_spec(space=value, name=space_name)
+
+            for k, v in result.items():
+                if isinstance(v, dict):
+                    spec[k] = v
+                else:
+                    spec[space_name] = result
+                    break
+    else:
+        raise TypeError(f'`space` must be one of Box, Discrete, MultiDiscrete, or Dict, not {type(space)}!')
+
+    return spec
+
+
 # -------------------------------------------------------------------------------------------------
 # -- TF utils
 # -------------------------------------------------------------------------------------------------
@@ -334,7 +375,6 @@ def tf_chance(seed=None):
     return tf.random.uniform(shape=(1,), minval=0.0, maxval=1.0, seed=seed)
 
 
-# TODO: @tf.function
 def tf_normalize(x, eps=EPSILON):
     """Normalizes some tensor x to 0-mean 1-stddev"""
     x = to_float(x)
@@ -393,7 +433,6 @@ def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batche
     return dataset.prefetch(buffer_size=prefetch_size)
 
 
-# TODO: @tf.function
 def tf_to_scalar_shape(tensor):
     return tf.reshape(tensor, shape=[])
 
@@ -486,6 +525,70 @@ def tf_dot_product(x, y, axis=0, keepdims=False):
 def tf_flatten(x):
     """Reshapes the given input as a 1-D array"""
     return tf.reshape(x, shape=[-1])
+
+
+class DynamicArray:
+    """Dynamic-growing np.array meant to be used for agent's Memory"""
+
+    def __init__(self, shape: tuple, max_capacity: int, min_capacity=16, dtype=np.float32):
+        assert min_capacity > 0
+        assert max_capacity >= min_capacity
+
+        self.elem_shape = shape
+        self.dtype = dtype
+
+        self.min_capacity = min_capacity
+        self.max_capacity = max_capacity
+        self.current_capacity = self.min_capacity
+
+        self.array = self._allocate(capacity=self.min_capacity)
+        self.index = 0
+
+    @property
+    def shape(self):
+        return self.array.shape
+
+    def grow(self):
+        self.current_capacity = min(2 * self.current_capacity, self.max_capacity)
+
+        old_array = self.array
+        self.array = self._allocate(capacity=self.current_capacity)
+        self._copy(array=old_array)
+
+        del old_array
+
+    # def insert(self, data, index: int):
+    #     assert 0 <= index < self.current_capacity
+    #
+    #     self.array[index] = self._to_numpy(data)
+
+    def append(self, data):
+        if self.index >= self.current_capacity:
+            assert self.index < self.max_capacity, 'DynamicArray is full!'
+            print('-- grow --')
+            self.grow()
+
+        self.array[self.index] = self._to_numpy(data)
+        self.index += 1
+
+    def to_tensor(self, dtype=tf.float32) -> tf.Tensor:
+        return tf.constant(self.array[:self.index], dtype=dtype)
+
+    def clean(self):
+        pass
+
+    def __repr__(self):
+        return self.array.__repr__()
+
+    def _to_numpy(self, data):
+        data = np.asarray(data, dtype=self.dtype)
+        return np.reshape(data, newshape=self.elem_shape)
+
+    def _copy(self, array):
+        self.array[:array.shape[0]] = array
+
+    def _allocate(self, capacity: int):
+        return np.zeros(shape=(capacity,) + self.elem_shape, dtype=self.dtype)
 
 
 # -------------------------------------------------------------------------------------------------
@@ -640,9 +743,12 @@ class Summary:
                 if 'weight-' in summary_name or 'bias-' in summary_name:
                     tf.summary.histogram(name=summary_name, data=values, step=step)
 
-                elif tf.is_tensor(data) and num_dims(data) == 4:
-                    # array of images
-                    tf.summary.image(name=summary_name, data=data, step=step)
+                elif 'image_' in summary_name:
+                    tf.summary.image(name=summary_name, data=tf.concat(values, axis=0), step=step)
+
+                # elif tf.is_tensor(data) and num_dims(data) == 4:
+                #     # array of images
+                #     tf.summary.image(name=summary_name, data=data, step=step)
                 else:
                     for i, value in enumerate(values):
                         # TODO: 'np.mean' is a temporary fix...

@@ -11,6 +11,7 @@ from rl import utils
 from rl.agents import Agent
 
 
+# TODO: improve interface
 class Network:
     def __init__(self, agent):
         self.agent = agent

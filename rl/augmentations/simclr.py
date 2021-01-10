@@ -41,9 +41,10 @@ def color_distortion(image, strength=1.0, jitter_prob=0.8, drop_prob=0.2, seed=N
     return image
 
 
+@tf.function
 def color_jitter(image, strength=1.0, original=True, seed=None):
     """Color jitter augmentation as defined in SimCLR paper"""
-    image = tf_brightness(image, delta=0.8 * strength, seed=seed)
+    image = tf_brightness(image, delta=0.2 * strength, seed=seed)
     image = tf_contrast(image, lower=1.0 - 0.8 * strength, upper=1.0 + 0.8 * strength, seed=seed)
     image = tf_saturation(image, lower=1.0 - 0.8 * strength, upper=1.0 + 0.8 * strength, seed=seed)
     image = tf_hue(image, delta=0.2 * strength, seed=seed)
@@ -51,9 +52,13 @@ def color_jitter(image, strength=1.0, original=True, seed=None):
     if original:
         return tf.clip_by_value(image, 0.0, 1.0)
 
+    if len(image.shape) == 4:
+        return tf_normalize_batch(image)
+
     return tf_normalize(image)
 
 
+@tf.function
 def color_drop(image):
     """Color drop augmentation as defined in SimCLR paper"""
     return tf_repeat_channels(tf_grayscale(image), n=3)

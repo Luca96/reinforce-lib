@@ -376,7 +376,8 @@ class ReplayMemory:
                 self.states[name] = tf.zeros(shape=(0,) + shape, dtype=tf.float32)
                 self.next_states[name] = tf.zeros_like(self.states[name])
 
-        self.actions = tf.zeros(shape=(0, num_actions), dtype=tf.float32)
+        self.actions = tf.zeros(shape=(0, 2), dtype=tf.float32)
+        # self.actions = tf.zeros(shape=(0, num_actions), dtype=tf.float32)
         self.rewards = tf.zeros(shape=(0, 1), dtype=tf.float32)
         self.terminals = tf.zeros(shape=(0, 1), dtype=tf.float32)
 
@@ -385,7 +386,8 @@ class ReplayMemory:
         return self.actions.shape[0]
 
     def append(self, state, action, reward, next_state, terminal):
-        action = tf.reshape(action, shape=(1, self.actions.shape[1]))
+        action = tf.reshape(tf.identity(action), shape=(1, 2))
+        # action = tf.reshape(action, shape=(1, self.actions.shape[1]))
         reward = tf.reshape(reward, shape=(1, 1))
         terminal = tf.reshape(terminal, shape=(1, 1))
 

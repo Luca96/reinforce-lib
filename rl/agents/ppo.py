@@ -6,6 +6,7 @@ import time
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
+import random
 
 from typing import Union
 
@@ -25,7 +26,7 @@ class PPOAgent(Agent):
     def __init__(self, *args, policy_lr: Union[float, LearningRateSchedule, DynamicParameter] = 1e-3, gamma=0.99,
                  lambda_=0.95, value_lr: Union[float, LearningRateSchedule, DynamicParameter] = 3e-4, load=False,
                  optimization_steps=(1, 1), name='ppo-agent', optimizer='adam', clip_norm=(1.0, 1.0),
-                 clip_ratio: Union[float, LearningRateSchedule, DynamicParameter] = 0.2,
+                 clip_ratio: Union[float, LearningRateSchedule, DynamicParameter] = 0.2, seed_regularization=False,
                  entropy_regularization: Union[float, LearningRateSchedule, DynamicParameter] = 0.0,
                  network: Union[dict, PPONetwork] = None, update_frequency=1, polyak=1.0, repeat_action=1,
                  advantage_scale: Union[float, LearningRateSchedule, DynamicParameter] = 2.0, **kwargs):
@@ -39,6 +40,16 @@ class PPOAgent(Agent):
         self.lambda_ = lambda_
         self.repeat_action = repeat_action
         self.adv_scale = DynamicParameter.create(value=advantage_scale)
+
+        if seed_regularization:
+            def _seed_regularization():
+                seed = random.randint(a=0, b=2**32 - 1)
+                self.set_random_seed(seed)
+
+            self.seed_regularization = _seed_regularization
+            self.seed_regularization()
+        else:
+            self.seed_regularization = lambda: None
 
         # Entropy regularization
         self.entropy_strength = DynamicParameter.create(value=entropy_regularization)
@@ -178,6 +189,7 @@ class PPOAgent(Agent):
 
     def update(self):
         t0 = time.time()
+        self.seed_regularization()
 
         # Prepare data:
         value_batches = self.get_value_batches()
@@ -186,6 +198,7 @@ class PPOAgent(Agent):
         # Policy network optimization:
         for opt_step in range(self.optimization_steps['policy']):
             for data_batch in policy_batches:
+                self.seed_regularization()
                 total_loss, policy_grads = self.get_policy_gradients(data_batch)
 
                 self.update_policy(policy_grads)
@@ -220,6 +233,7 @@ class PPOAgent(Agent):
         # Value network optimization:
         for _ in range(self.optimization_steps['value']):
             for data_batch in value_batches:
+                self.seed_regularization()
                 value_loss, value_grads = self.get_value_gradients(data_batch)
 
                 self.update_value(value_grads)
@@ -490,6 +504,9 @@ class PPOAgent(Agent):
             self.memory = self.get_memory()
 
             for episode in range(1, episodes + 1):
+                self.seed_regularization()
+                self.on_episode_start()
+
                 preprocess_fn = self.preprocess()
                 self.reset()
 
@@ -507,6 +524,9 @@ class PPOAgent(Agent):
 
                     state = preprocess_fn(state)
                     state = utils.to_tensor(state)
+
+                    # if (t + 1) % 10 == 0:
+                    #     self.log(image_state=state['state_image'])
 
                     # Agent prediction
                     action, mean, std, log_prob, value = self.predict(state)

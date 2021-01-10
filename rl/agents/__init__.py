@@ -1,5 +1,6 @@
 
 from rl.agents.agents import Agent
+from rl.agents.agents import RandomAgent
 
 # Policy optimization agents:
 from rl.agents.ppo import PPOAgent

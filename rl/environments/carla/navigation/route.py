@@ -85,6 +85,13 @@ class Route(object):
     def get_next_waypoint_location(self):
         return self.next.waypoint.transform.location
 
+    def get_next_waypoints(self, amount: int) -> list:
+        start = self.next.index
+        end = min(start + amount, len(self.path))
+
+        next_waypoints = map(lambda x: x[0], self.path[start:end])
+        return list(next_waypoints)
+
     def random_waypoint(self):
         return random.choice(self.path)[0]
 

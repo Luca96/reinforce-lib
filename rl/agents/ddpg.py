@@ -27,9 +27,11 @@ class DDPGAgent(Agent):
     def __init__(self, *args, optimizer='adam', actor_lr: Union[float, LearningRateSchedule, DynamicParameter] = 1e-4,
                  critic_lr: Union[float, LearningRateSchedule, DynamicParameter] = 1e-3, name='ddpg-agent', gamma=0.99,
                  load=False, clip_norm: Union[None, float, Tuple[float, float]] = None, polyak=0.999, repeat_action=1,
-                 memory_size=1000, noise: Union[float, LearningRateSchedule, DynamicParameter] = 0.005, **kwargs):
+                 memory_size=1000, noise: Union[float, LearningRateSchedule, DynamicParameter] = 0.005,
+                 optimization_steps=1, critic: dict = None, actor: dict = None, **kwargs):
         assert 0.0 < polyak <= 1.0
         assert repeat_action >= 1
+        assert optimization_steps >= 1
 
         super().__init__(*args, name=name, **kwargs)
         assert memory_size > self.batch_size
@@ -56,14 +58,24 @@ class DDPGAgent(Agent):
         # Networks (and target-networks)
         self.weights_path = dict(actor=os.path.join(self.base_path, 'actor'),
                                  critic=os.path.join(self.base_path, 'critic'))
+        if critic is None:
+            critic = dict()
+        else:
+            assert isinstance(critic, dict)
 
-        self.actor = ActorNetwork(agent=self)
-        self.critic = CriticNetwork(agent=self)
+        if actor is None:
+            actor = dict()
+        else:
+            assert isinstance(actor, dict)
 
-        self.actor_target = ActorNetwork(agent=self)
-        self.critic_target = CriticNetwork(agent=self)
+        self.actor = ActorNetwork(agent=self, **actor)
+        self.critic = CriticNetwork(agent=self, **critic)
+
+        self.actor_target = ActorNetwork(agent=self, **actor)
+        self.critic_target = CriticNetwork(agent=self, **critic)
 
         # Optimization
+        self.optimization_steps = optimization_steps
         self.actor_lr = DynamicParameter.create(value=actor_lr)
         self.critic_lr = DynamicParameter.create(value=critic_lr)
 
@@ -153,14 +165,18 @@ class DDPGAgent(Agent):
                 self.action_shape = (self.num_actions, self.num_classes)
             else:
                 self.num_actions = 1
-                self.num_classes = action_space.n - 1
+                self.num_classes = action_space.n - 1 + 1
                 # self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
                 self.action_shape = (self.num_classes,)
 
             def convert_action(a):
-                a = tf.clip_by_value(a, 0.0, self.num_classes)
-                a = tf.round(a)
-                return tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
+                a = tf.argmax(a, axis=1, output_type=tf.int32)
+                return tf.squeeze(a).numpy()
+
+            # def convert_action(a):
+            #     a = tf.clip_by_value(a, 0.0, self.num_classes)
+            #     a = tf.round(a)
+            #     return tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
             self.convert_action = convert_action
 
@@ -178,24 +194,38 @@ class DDPGAgent(Agent):
             return
 
         t0 = time.time()
-        batch = self.memory.sample_batch(batch_size=self.batch_size, seed=self.seed)
 
-        # critic update:
-        critic_loss, targets, critic_q_values, critic_grads = self.get_critic_gradients(batch)
-        applied_critic_grads = self.apply_critic_gradients(gradients=critic_grads)
+        for _ in range(self.optimization_steps):
+            batch = self.memory.sample_batch(batch_size=self.batch_size, seed=self.seed)
 
-        # actor update:
-        actor_loss, actions, actor_q_values, actor_grads = self.get_actor_gradients(batch)
-        applied_actor_grads = self.apply_actor_gradients(gradients=actor_grads)
+            # critic update:
+            critic_loss, targets, critic_q_values, critic_grads = self.get_critic_gradients(batch)
+            applied_critic_grads = self.apply_critic_gradients(gradients=critic_grads)
 
-        self.update_target_networks()
+            # actor update:
+            actor_loss, actions, actor_q_values, actor_grads = self.get_actor_gradients(batch)
+            applied_actor_grads = self.apply_actor_gradients(gradients=actor_grads)
 
-        self.log(loss_critic=critic_loss, loss_actor=actor_loss, lr_critic=self.critic_lr.value,
-                 lr_actor=self.actor_lr.value, q_values_critic=critic_q_values, q_values_actor=actor_q_values,
-                 targets=targets, gradients_norm_critic=[tf.norm(g) for g in critic_grads],
-                 gradients_norm_actor=[tf.norm(g) for g in actor_grads],
-                 gradients_applied_norm_critic=[tf.norm(g) for g in applied_critic_grads],
-                 gradients_applied_norm_actor=[tf.norm(g) for g in applied_actor_grads])
+            self.update_target_networks()
+
+            self.log(loss_critic=critic_loss, loss_actor=actor_loss, lr_critic=self.critic_lr.value,
+                     lr_actor=self.actor_lr.value, q_values_critic=critic_q_values, q_values_actor=actor_q_values,
+                     targets=targets, gradients_norm_critic=[tf.norm(g) for g in critic_grads],
+                     gradients_norm_actor=[tf.norm(g) for g in actor_grads],
+                     gradients_applied_norm_critic=[tf.norm(g) for g in applied_critic_grads],
+                     gradients_applied_norm_actor=[tf.norm(g) for g in applied_actor_grads])
+
+            for layer in self.actor.net.layers:
+                if isinstance(layer, Dense):
+                    weights, bias = layer.get_weights()
+                    self.log(**{f'weight-actor_{layer.name}': weights,
+                                f'bias-actor_{layer.name}': bias})
+
+            for layer in self.critic.net.layers:
+                if isinstance(layer, Dense):
+                    weights, bias = layer.get_weights()
+                    self.log(**{f'weight-critic_{layer.name}': weights,
+                                f'bias-critic_{layer.name}': bias})
 
         print(f'Update took {round(time.time() - t0, 3)}s.')
 
@@ -357,10 +387,10 @@ class DDPGAgent(Agent):
 
 
 class ActorNetwork(Network):
-    def __init__(self, agent: DDPGAgent):
+    def __init__(self, agent: DDPGAgent, **kwargs):
         super().__init__(agent=agent)
 
-        self.net = self.build()
+        self.net = self.build(**kwargs)
 
     @tf.function
     def actions(self, inputs: Union[tf.Tensor, List[tf.Tensor], Dict[str, tf.Tensor]], training=False):
@@ -377,46 +407,48 @@ class ActorNetwork(Network):
         space_type = self.agent.action_space_type
         num_actions = self.agent.num_actions
 
-        # TODO: is this initialization really helpful?
-        # refer to page 11 of the paper
-        weights_initializer = tf.keras.initializers.RandomUniform(-30e-3, 30e-3)
-        bias_initializer = tf.keras.initializers.RandomUniform(-30e-3, 30e-3)
-
         if space_type == 'discrete':
             num_classes = tf.cast(self.agent.num_classes, dtype=tf.float32)
 
-            actions = Dense(units=num_actions * num_classes,
-                            kernel_initializer=weights_initializer, bias_initializer=bias_initializer,
-                            activation=lambda x: num_classes * tf.nn.sigmoid(x), name='discrete_actions')(layer)
+            # actions = Dense(units=num_actions * num_classes, bias_initializer='glorot_uniform',
+            #                 activation=lambda x: num_classes * tf.nn.sigmoid(x), name='discrete_actions')(layer)
 
-            if num_actions > 1:
-                actions = Reshape((num_actions, num_classes))(actions)
+            actions = Dense(units=num_actions * num_classes, bias_initializer='glorot_uniform',
+                            activation='softmax', name='action-logits')(layer)
+
+            # actions = tf.cast(tf.argmax(logits, axis=1), dtype=tf.float32)
+            # actions.set_shape(shape=(num_actions,))
+
+            # if num_actions > 1:
+            #     actions = Reshape((num_actions, num_classes))(actions)
 
         elif space_type == 'bounded_continuous':
             # `tanh` layer to bound actions in [-1,+1] as in the paper
             actions = Dense(units=num_actions, activation=tf.nn.tanh, name='bounded_actions',
-                            kernel_initializer=weights_initializer, bias_initializer=bias_initializer)(layer)
+                            bias_initializer='glorot_uniform')(layer)
         else:
             # continuous
             actions = Dense(units=num_actions, activation=None, name='continuous_actions',
-                            kernel_initializer=weights_initializer, bias_initializer=bias_initializer)(layer)
+                            bias_initializer='glorot_uniform')(layer)
         return actions
 
     def layers(self, inputs: Dict[str, Input], **kwargs) -> Layer:
-        units = kwargs.get('units', 64)
         num_layers = kwargs.get('num_layers', kwargs.get('layers', 2))  # 'num_layers' or 'layers'
-        activation = kwargs.get('activation', tf.nn.relu)
         dropout_rate = kwargs.get('dropout', 0.0)
+        dense_args = dict(units=kwargs.get('units', 64),
+                          activation=kwargs.get('activation', tf.nn.relu),
+                          kernel_initializer=kwargs.get('kernel_initializer', 'glorot_uniform'),
+                          bias_initializer=kwargs.get('bias_initializer', 'glorot_uniform'))
 
-        x = Dense(units, activation=activation)(inputs['state'])
+        x = Dense(**dense_args)(inputs['state'])
         x = BatchNormalization()(x)
 
         for _ in range(num_layers):
             if dropout_rate > 0.0:
-                x = Dense(units, activation=activation)(x)
+                x = Dense(**dense_args)(x)
                 x = Dropout(rate=dropout_rate)(x)
             else:
-                x = Dense(units, activation=activation)(x)
+                x = Dense(**dense_args)(x)
 
             x = BatchNormalization()(x)
 
@@ -444,9 +476,9 @@ class ActorNetwork(Network):
 
 # TODO: include L2 weight-decay
 class CriticNetwork(Network):
-    def __init__(self, agent: DDPGAgent):
+    def __init__(self, agent: DDPGAgent, **kwargs):
         super().__init__(agent=agent)
-        self.net = self.build()
+        self.net = self.build(**kwargs)
 
     @tf.function
     def q_values(self, inputs: Union[tf.Tensor, List[tf.Tensor], Dict[str, tf.Tensor]], training=False):
@@ -462,35 +494,34 @@ class CriticNetwork(Network):
         return Model(inputs, outputs=q_values, name='Critic-Network')
 
     def q_layer(self, layer: Layer) -> Layer:
-        return Dense(units=1, activation=None,
-                     kernel_initializer=tf.keras.initializers.RandomUniform(-30e-3, 30e-3),
-                     bias_initializer=tf.keras.initializers.RandomUniform(-30e-3, 30e-3), name='q_values')(layer)
+        return Dense(units=1, bias_initializer='glorot_uniform', name='q_values')(layer)
 
     def layers(self, inputs: Dict[str, Input], **kwargs) -> Layer:
         units = kwargs.get('units', 64)
         units_action = kwargs.get('units_action', 16)
         num_layers = kwargs.get('num_layers', kwargs.get('layers', 2))  # 'num_layers' or 'layers'
-        activation = kwargs.get('activation', tf.nn.relu)
+        dense_args = dict(activation=kwargs.get('activation', tf.nn.relu),
+                          bias_initializer=kwargs.get('bias_initializer', 'glorot_uniform'),
+                          kernel_initializer=kwargs.get('kernel_initializer', 'glorot_uniform'))
         dropout_rate = kwargs.get('dropout', 0.0)
 
-        state_branch = self._branch(inputs['state'], units, num_layers, activation, dropout_rate)
-        action_branch = self._branch(inputs['action'], units_action, num_layers, activation, dropout_rate)
+        state_branch = self._branch(inputs['state'], units, num_layers, dropout_rate, **dense_args)
+        action_branch = self._branch(inputs['action'], units_action, num_layers, dropout_rate, **dense_args)
 
-        x = Dense(units, activation=activation,
-                  bias_initializer='glorot_uniform')(concatenate([state_branch, action_branch]))
+        x = Dense(units, **dense_args)(concatenate([state_branch, action_branch]))
         x = BatchNormalization()(x)
         return x
 
-    def _branch(self, input_layer: Input, units: int, num_layers: int, activation, dropout_rate: float) -> Layer:
-        x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(input_layer)
+    def _branch(self, input_layer: Input, units: int, num_layers: int, dropout_rate: float, **kwargs) -> Layer:
+        x = Dense(units, **kwargs)(input_layer)
         x = BatchNormalization()(x)
 
         for _ in range(num_layers):
             if dropout_rate > 0.0:
-                x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(x)
+                x = Dense(units, **kwargs)(x)
                 x = Dropout(rate=dropout_rate)(x)
             else:
-                x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(x)
+                x = Dense(units, **kwargs)(x)
 
             x = BatchNormalization()(x)
 

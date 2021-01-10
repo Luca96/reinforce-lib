@@ -1,5 +1,6 @@
 import os
 import gym
+import time
 import json
 import random
 import numpy as np
@@ -7,17 +8,16 @@ import tensorflow as tf
 
 from rl import utils
 from typing import List, Dict, Union
-from tensorflow.keras import layers
 
 
-# TODO: implement RandomAgent
+# TODO: more unified agent interface across implemented agents
 # TODO: actor-critic agent interface (to include policy/value network as well as loading/saving)?
-# TODO: save agent configuration as json
 class Agent:
     """Agent abstract class"""
     def __init__(self, env: Union[gym.Env, str], batch_size: int, seed=None, weights_dir='weights', name='agent',
-                 log_mode='summary', drop_batch_remainder=False, skip_data=0, consider_obs_every=1,
-                 shuffle_batches=False, shuffle=True, traces_dir: str = None, summary_keys: List[str] = None):
+                 log_mode='summary', drop_batch_remainder=False, skip_data=0, consider_obs_every=1, shuffle=True,
+                 evaluation_dir='evaluation', shuffle_batches=False, traces_dir: str = None,
+                 summary_keys: List[str] = None):
 
         if isinstance(env, str):
             self.env = gym.make(env)
@@ -45,8 +45,9 @@ class Agent:
         self.shuffle_batches = shuffle_batches
         self.shuffle = shuffle
 
-        # Saving stuff:
+        # Saving stuff (weights, config, evaluation):
         self.base_path = os.path.join(weights_dir, name)
+        self.evaluation_path = utils.makedir(os.path.join(evaluation_dir, name))
         self.weights_path = dict(policy=os.path.join(self.base_path, 'policy_net'),
                                  value=os.path.join(self.base_path, 'value_net'))
 
@@ -60,6 +61,8 @@ class Agent:
     def set_random_seed(self, seed):
         """Sets the random seed for tensorflow, numpy, python's random, and the environment"""
         if seed is not None:
+            assert 0 <= seed < 2 ** 32
+
             tf.random.set_seed(seed)
             np.random.seed(seed)
             random.seed(seed)
@@ -83,6 +86,7 @@ class Agent:
     def learn(self, *args, **kwargs):
         raise NotImplementedError
 
+    # TODO: re-design `evaluation()` procedure
     def evaluate(self, episodes: int, timesteps: int, render=True, seeds=None) -> list:
         rewards = []
         sample_seed = False
@@ -160,7 +164,10 @@ class Agent:
         self.statistics.log(**kwargs)
 
     def write_summaries(self):
-        self.statistics.write_summaries()
+        try:
+            self.statistics.write_summaries()
+        except Exception:
+            print('[write_summaries] error.')
 
     def summary(self):
         """Networks summary"""
@@ -206,3 +213,86 @@ class Agent:
 
     def on_episode_end(self):
         pass
+
+
+class RandomAgent(Agent):
+    def __init__(self, *args, discount=1.0, name='random-agent', repeat_action=1, **kwargs):
+        assert 0.0 < discount <= 1.0
+        assert repeat_action >= 1
+
+        super().__init__(*args, batch_size=0, name=name, **kwargs)
+
+        self.discount = discount
+        self.repeat_action = repeat_action
+        self.action_space = self.env.action_space
+
+    def evaluate(self, name: str, timesteps: int, trials: int, render=True, seeds: Union[None, int, List[int]] = None,
+                 close=False) -> dict:
+        assert trials > 0
+        assert timesteps > 0
+
+        if isinstance(seeds, int):
+            self.set_random_seed(seed=seeds)
+
+        results = dict(total_reward=[], timesteps=[])
+        save_path = os.path.join(self.evaluation_path, f'{name}.json')
+
+        try:
+            for trial in range(1, trials + 1):
+                # random seed
+                if isinstance(seeds, list):
+                    if len(seeds) == trials:
+                        self.set_random_seed(seed=seeds[trial])
+                    else:
+                        self.set_random_seed(seed=random.choice(seeds))
+
+                elif seeds == 'sample':
+                    self.set_random_seed(seed=random.randint(a=0, b=2 ** 32 - 1))
+
+                self.reset()
+
+                _ = self.env.reset()
+                t0 = time.time()
+                total_reward = 0.0
+
+                for t in range(timesteps):
+                    # Agent prediction
+                    action = self.action_space.sample()
+
+                    # Environment step
+                    for _ in range(self.repeat_action):
+                        next_state, reward, done, _ = self.env.step(action)
+                        total_reward += reward
+
+                        if done:
+                            break
+
+                    self.log(eval_actions=action, eval_rewards=reward)
+
+                    if done or (t == timesteps):
+                        # save results of current trial
+                        results['total_reward'].append(total_reward)
+                        results['timesteps'].append(t)
+
+                        self.log(**{f'eval_{k}': v[-1] for k, v in results.items()})
+
+                        print(f'Trial-{trial} terminated after {t} timesteps in {round(time.time() - t0, 3)} with total'
+                              f' reward of {round(total_reward, 3)}.')
+                        break
+
+                self.write_summaries()
+
+            # save average results with their standard deviations over trials as json
+            avg_results = {k: np.mean(v) for k, v in results.items()}
+
+            for k, v in results.items():
+                avg_results[f'std_{k}'] = np.std(v)
+
+            with open(save_path, 'w') as file:
+                json.dump(avg_results, fp=file)
+
+        finally:
+            if close:
+                self.env.close()
+
+        return results

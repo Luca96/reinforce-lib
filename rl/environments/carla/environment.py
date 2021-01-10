@@ -81,6 +81,8 @@ class CARLABaseEnvironment(gym.Env):
         self.ignore_traffic_light = ignore_traffic_light
 
         # Map
+        self.current_town = 'Town03'  # loaded by default
+
         if isinstance(town, str):
             self.set_town(town)
 
@@ -255,6 +257,10 @@ class CARLABaseEnvironment(gym.Env):
 
     def set_town(self, town: str, timeout=2.0, max_trials=5):
         """Loads then given town"""
+        if self.current_town == town:
+            print(f'{town} already loaded.')
+            return
+
         print(f'Loading town: {town}...')
         self.map = None
 
@@ -270,6 +276,7 @@ class CARLABaseEnvironment(gym.Env):
                 break
 
         self.world.apply_settings(self.world_settings)
+        self.current_town = town
         print(f'Town {town} loaded.')
 
     def spawn_actors(self, spawn_dict: dict, hybrid=True, safe=True):
@@ -1051,7 +1058,6 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
         # self.control.throttle = float(actions[0]) if actions[0] > 0 else 0.0
         self.control.brake = float(-actions[0]) if actions[0] < 0 else 0.0
         self.control.steer = float(actions[1])
-        self.control.reverse = bool(actions[2] > 0)
         self.control.hand_brake = False
 
         if self.should_harden_controls and (utils.speed(self.vehicle) <= self.hard_control_threshold):
@@ -1060,6 +1066,8 @@ class OneCameraCARLAEnvironment(CARLABaseEnvironment):
 
         if self.disable_reverse:
             self.control.reverse = False
+        else:
+            self.control.reverse = bool(actions[2] > 0)
 
     def get_observation(self, sensors_data: dict) -> dict:
         if len(sensors_data.keys()) == 0:
@@ -1244,8 +1252,9 @@ class ThreeCameraCARLAEnvironment(OneCameraCARLAEnvironment):
         right_image = self.sensors['right_camera'].convert_image(data['right_camera'])
 
         # include depth information in one image:
-        data['depth'] = self.sensors['depth'].convert_image(data['depth'])
-        front_image = np.multiply(1 - data['depth'] / 255.0, front_image)
+        if 'depth' in self.sensors:
+            data['depth'] = self.sensors['depth'].convert_image(data['depth'])
+            front_image = np.multiply(1 - data['depth'] / 255.0, front_image)
 
         # Concat images
         data['camera'] = np.concatenate((left_image, front_image, right_image), axis=1)
@@ -1297,7 +1306,7 @@ class ThreeCameraCARLAEnvironmentDiscrete(ThreeCameraCARLAEnvironment):
 # -- Benchmarks: CARLA + NoCrash
 # -------------------------------------------------------------------------------------------------
 
-# TODO: untested
+# TODO: deprecate
 class CARLABenchmark(CARLAWrapper):
     """CARLA benchmark, as described in the paper: "End-to-end Driving via Conditional Imitation Learning"
          - https://arxiv.org/pdf/1710.02410
