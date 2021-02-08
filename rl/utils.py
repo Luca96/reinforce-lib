@@ -21,6 +21,8 @@ from rl.parameters import DynamicParameter
 # -- Constants
 # -------------------------------------------------------------------------------------------------
 
+GLOBAL_SEED = None
+
 NP_EPS = np.finfo(np.float32).eps
 EPSILON = tf.constant(NP_EPS, dtype=tf.float32)
 
@@ -46,9 +48,58 @@ def get_optimizer_by_name(name: str, *args, **kwargs) -> tf.keras.optimizers.Opt
     return optimizer_class(*args, **kwargs)
 
 
+def get_normalization_layer(name: str, **kwargs) -> tf.keras.layers.Layer:
+    if name == 'batch':
+        return tf.keras.layers.BatchNormalization(**kwargs)
+
+    if name == 'layer':
+        return tf.keras.layers.LayerNormalization(**kwargs)
+
+
+def normalization_layer(layer: tf.keras.layers.Layer, name: str, **kwargs) -> tf.keras.layers.Layer:
+    if name == 'batch':
+        return tf.keras.layers.BatchNormalization(**kwargs)(layer)
+
+    if name == 'layer':
+        return tf.keras.layers.LayerNormalization(**kwargs)(layer)
+
+    return layer
+
+
+def get_normalization_fn(name: str, **kwargs):
+    assert name in [None, 'identity', 'standard', 'sign', 'min_max', 'minmax']
+    name = name.lower()
+
+    if name == 'identity' or name is None:
+        return lambda x: x
+
+    if name == 'standard':
+        return lambda x: tf_normalize(x, **kwargs)
+
+    if name == 'sign':
+        return lambda x: tf_sp_norm(x, **kwargs)
+
+    if name == 'min_max' or name == 'minmax':
+        return lambda x: tf_minmax_norm(x, **kwargs)
+
+
 # -------------------------------------------------------------------------------------------------
 # -- Misc
 # -------------------------------------------------------------------------------------------------
+
+def set_random_seed(seed=None):
+    """Sets the random seed for tensorflow, numpy, python's random"""
+    global GLOBAL_SEED
+
+    if seed is not None:
+        assert 0 <= seed < 2 ** 32
+
+        tf.random.set_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        GLOBAL_SEED = seed
+        print(f'Global random seed {seed} set.')
+
 
 def np_normalize(x, epsilon=np.finfo(np.float32).eps):
     return (x - np.mean(x)) / (np.std(x) + epsilon)
@@ -102,6 +153,7 @@ def clip(value, min_value, max_value):
     return min(max_value, max(value, min_value))
 
 
+# TODO: possible bug; it interpolates "all weights" not only "trainable variables"...
 def polyak_averaging(model: tf.keras.Model, old_weights: list, alpha=0.99):
     """Source: Deep Learning Book (section 8.7.3)
         - the original implementation is: `w = alpha * w_old + (1.0 - alpha) * w_new`,
@@ -115,6 +167,12 @@ def polyak_averaging(model: tf.keras.Model, old_weights: list, alpha=0.99):
         weights.append(w)
 
     model.set_weights(weights)
+
+
+def polyak_averaging2(model, target, alpha: float):
+    for var, var_target in zip(model.trainable_variables(), target.trainable_variables()):
+        value = alpha * var_target + (1.0 - alpha) * var
+        var_target.assign(value, read_value=False)
 
 
 def clip_gradients(gradients: list, norm: float) -> list:
@@ -155,11 +213,14 @@ def decompose_number(num: float) -> (float, float):
 # -- Plot utils
 # -------------------------------------------------------------------------------------------------
 
-def plot_images(images: list):
+def plot_images(images: list, title=None):
     """Plots a list of images, arranging them in a rectangular fashion"""
     num_plots = len(images)
     rows = round(math.sqrt(num_plots))
     cols = math.ceil(math.sqrt(num_plots))
+
+    if title is not None:
+        plt.title(str(title))
 
     for k, img in enumerate(images):
         plt.subplot(rows, cols, k + 1)
@@ -370,23 +431,33 @@ def concat_dict_tensor(*dicts, axis=0) -> dict:
     return result
 
 
-def tf_chance(seed=None):
-    """Use to get a single random number between 0 and 1"""
-    return tf.random.uniform(shape=(1,), minval=0.0, maxval=1.0, seed=seed)
+def tf_chance(shape=(1,), lower=0.0, upper=1.0, seed=None):
+    """Use to get random numbers between `lower` and `upper`"""
+    return tf.random.uniform(shape=shape, minval=lower, maxval=upper, seed=seed)
 
 
 def tf_normalize(x, eps=EPSILON):
-    """Normalizes some tensor x to 0-mean 1-stddev"""
+    """Normalizes some tensor `x` to 0-mean 1-stddev (aka standardization`)"""
     x = to_float(x)
     return (x - tf.math.reduce_mean(x)) / (tf.math.reduce_std(x) + eps)
 
 
 def tf_sp_norm(x, eps=1e-3):
+    """Sign-preserving normalization:
+        - normalizes positive values of `x` independently from the negative one.
+    """
     x = to_float(x)
 
     positives = x * to_float(x > 0.0)
     negatives = x * to_float(x < 0.0)
     return (positives / (tf.reduce_max(x) + eps)) + (negatives / -(tf.reduce_min(x) - eps))
+
+
+def tf_minmax_norm(x, lower=0.0, upper=1.0, eps=EPSILON):
+    """Min-Max normalization, which scales `x` to be in range [lower, upper]"""
+    x = to_float(x)
+    x_min = tf.minimum(x) + eps
+    return (x - x_min) / (tf.maximum(x) - x_min) * (upper - lower) + lower
 
 
 def tf_shuffle_tensors(*tensors, indices=None):
@@ -703,7 +774,7 @@ class Summary:
             self.summary_dir = os.path.join(summary_dir, name, datetime.now().strftime("%Y%m%d-%H%M%S"))
             self.tf_summary_writer = tf.summary.create_file_writer(self.summary_dir)
 
-    def log(self, **kwargs):
+    def log(self, average=False, **kwargs):
         if not self.should_log:
             return
 
@@ -711,11 +782,24 @@ class Summary:
             if not self.should_log_key(key):
                 continue
 
+            # if 'action' in key:
+            #     if value.shape[-1] > 1:
+            #         for i, action in enumerate(value):
+            #             k = f'{key}_i'
+            #
+            #             if k not in self.stats:
+            #                 self.stats[k] = dict(step=0, list=[])
+            #
+            #
+
             if key not in self.stats:
                 self.stats[key] = dict(step=0, list=[])
 
             if tf.is_tensor(value):
-                if np.prod(value.shape) > 1:
+                if average:
+                    self.stats[key]['list'].append(tf.reduce_mean(value))
+
+                elif np.prod(value.shape) > 1:
                     self.stats[key]['list'].extend(value)
                 else:
                     self.stats[key]['list'].append(value)

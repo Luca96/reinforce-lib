@@ -6,9 +6,9 @@ from tensorflow.keras.layers import *
 from tensorflow.keras.models import Model
 
 from typing import List, Union, Dict
+from functools import partial
 
 from rl import utils
-from rl.agents import Agent
 
 
 # TODO: improve interface
@@ -24,6 +24,9 @@ class Network:
 
     def reset(self):
         pass
+
+    # TODO: objective(batch)
+    # TODO: get_gradients(batch, clip_norm), apply_gradients(grads, polyak)
 
     def trainable_variables(self):
         raise NotImplementedError
@@ -71,18 +74,38 @@ class Network:
         """
         return tf.clip_by_value(actions, utils.EPSILON, 1.0 - utils.EPSILON)
 
-    def get_distribution_layer(self, distribution: str, layer: Layer) -> tfp.layers.DistributionLambda:
+    def get_distribution_layer(self, distribution: str, layer: Layer, min_std=0.02, unimodal=False,
+                               **kwargs) -> tfp.layers.DistributionLambda:
+        """
+        A probability distribution layer, used for sampling actions, computing the `log_prob`, `entropy` ecc.
+
+        :param distribution: one of 'categorical', 'beta', or 'gaussian'.
+        :param layer: last layer of the network (e.g. actor, critic, policy networks ecc)
+        :param min_std: minimum variance, useful for 'beta' and especially 'gaussian' to prevent NaNs.
+        :param unimodal: only used in 'beta' to make it concave and unimodal.
+        :param kwargs: additional argument given to tf.keras.layers.Dense.
+        :return: tfp.layers.DistributionLambda instance.
+        """
+        assert distribution in ['categorical', 'beta', 'gaussian']
+        assert min_std >= 0.0
+
+        dense = partial(Dense, **kwargs)
+        min_std = tf.constant(min_std, dtype=tf.float32)
+
         # Discrete actions:
         if distribution == 'categorical':
             num_actions = self.agent.num_actions
             num_classes = self.agent.num_classes
 
-            logits = Dense(units=num_actions * num_classes, activation='linear', name='logits')(layer)
+            from tensorflow_addons.layers import WeightNormalization as Wn
+            logits = dense(units=num_actions * num_classes, activation='linear', name='logits')(layer)
 
-            if num_actions > 1:
-                logits = Reshape((num_actions, num_classes))(logits)
-            else:
-                logits = tf.expand_dims(logits, axis=0)
+            logits = Reshape((num_actions, num_classes))(logits)
+            # if num_actions > 1:
+            #     logits = Reshape((num_actions, num_classes))(logits)
+            # else:
+                # logits = tf.expand_dims(logits, axis=0)
+                # logits = tf.expand_dims(logits, axis=-1)
 
             return tfp.layers.DistributionLambda(
                 make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t))(logits)
@@ -92,9 +115,11 @@ class Network:
         if distribution == 'beta':
             num_actions = self.agent.num_actions
 
-            # make a, b > 1, so that the Beta distribution is concave and unimodal (see paper above)
-            alpha = Dense(units=num_actions, activation=utils.softplus(1.0 + 1e-2), name='alpha')(layer)
-            beta = Dense(units=num_actions, activation=utils.softplus(1.0 + 1e-2), name='beta')(layer)
+            if unimodal:
+                min_std += 1.0
+
+            alpha = dense(units=num_actions, activation=utils.softplus(min_std), name='alpha')(layer)
+            beta = dense(units=num_actions, activation=utils.softplus(min_std), name='beta')(layer)
 
             return tfp.layers.DistributionLambda(
                 make_distribution_fn=lambda t: tfp.distributions.Beta(t[0], t[1]))([alpha, beta])
@@ -104,8 +129,8 @@ class Network:
         if distribution == 'gaussian':
             num_actions = self.agent.num_actions
 
-            mu = Dense(units=num_actions, activation='linear', name='mu')(layer)
-            sigma = Dense(units=num_actions, activation=utils.softplus(1.0 + 1e-2), name='sigma')(layer)
+            mu = dense(units=num_actions, activation='linear', name='mu')(layer)
+            sigma = dense(units=num_actions, activation=utils.softplus(min_std), name='sigma')(layer)
 
             return tfp.layers.DistributionLambda(
                 make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[0], scale=t[1]))([mu, sigma])
@@ -157,7 +182,7 @@ class PPONetwork(Network):
     def value_predict(self, inputs):
         return self.value(inputs, training=False)
 
-    def predict_last_value(self, state, timestep: float, is_terminal: bool):
+    def predict_last_value(self, state, is_terminal: bool):
         if is_terminal:
             return self.last_value
 
@@ -192,9 +217,12 @@ class PPONetwork(Network):
         activation = kwargs.get('activation', tf.nn.swish)
         dropout_rate = kwargs.get('dropout', 0.0)
         linear_units = kwargs.get('linear_units', 0)
+        normalization = kwargs.get('normalization', 'layer')
 
         x = Dense(units, activation=activation)(inputs['state'])
-        x = LayerNormalization()(x)
+
+        if normalization is not None:
+            x = utils.get_normalization_layer(name=normalization)(x)
 
         for _ in range(0, num_layers, 2):
             if dropout_rate > 0.0:
@@ -207,7 +235,8 @@ class PPONetwork(Network):
                 x = Dense(units, activation=activation)(x)
                 x = Dense(units, activation=activation)(x)
 
-            x = LayerNormalization()(x)
+            if normalization is not None:
+                x = utils.get_normalization_layer(name=normalization)(x)
 
         if linear_units > 0:
             x = Dense(units=linear_units, activation='linear')(x)

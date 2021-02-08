@@ -8,6 +8,7 @@ from rl.agents.reinforce import ReinforceAgent
 
 # Q-Learning agents:
 from rl.agents.dqn import DQNAgent
+from rl.agents.double_dqn import DoubleDQN
 from rl.agents.dueling_dqn import DuelingDQNAgent
 
 # Both Policy Optimization and Q-Learning agents:

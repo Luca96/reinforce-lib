@@ -21,12 +21,15 @@ from tensorflow.keras.optimizers.schedules import LearningRateSchedule
 
 class DQNAgent(Agent):
     # TODO: fix retracing issue (functions: objective, targets, and q_values)
-    # TODO: support for continuous actions?
+    # TODO: add `multi-step targets` (see "rainbow" paper)
+    # TODO: add `dueling architecture`
     def __init__(self, *args, lr: Union[float, LearningRateSchedule, DynamicParameter] = 1e-3, name='dqn-agent',
                  gamma=0.99, load=False, optimizer='adam', clip_norm=1.0, polyak=0.999, repeat_action=1,
-                 memory_size=1000, epsilon: Union[float, LearningRateSchedule, DynamicParameter] = 0.05, **kwargs):
+                 network: dict = None, memory_size=1024, initial_random_batches=0,
+                 epsilon: Union[float, LearningRateSchedule, DynamicParameter] = 0.05, **kwargs):
         assert 0.0 < polyak <= 1.0
         assert repeat_action >= 1
+        assert initial_random_batches >= 0
 
         super().__init__(*args, name=name, **kwargs)
         assert memory_size > self.batch_size
@@ -34,6 +37,7 @@ class DQNAgent(Agent):
         self.gamma = gamma
         self.repeat_action = repeat_action
         self.drop_batch_remainder = memory_size % self.batch_size != 0
+        self.initial_random_steps = initial_random_batches * self.batch_size
 
         # Epsilon-greedy probability
         if isinstance(epsilon, float):
@@ -52,8 +56,7 @@ class DQNAgent(Agent):
 
         # Networks (DQN and target-network)
         self.weights_path = dict(dqn=os.path.join(self.base_path, 'dqn'))
-        self.dqn = DQNetwork(agent=self)
-        self.target = DQNetwork(agent=self)
+        self.dqn, self.target = self.get_network(**(network if isinstance(network, dict) else {}))
 
         # Optimization
         self.lr = DynamicParameter.create(value=lr)
@@ -76,48 +79,25 @@ class DQNAgent(Agent):
             raise TypeError(f'`clip_norm` should be "None" or "float" not "{type(clip_norm)}"!')
 
     def _init_action_space(self):
-        action_space = self.env.action_space
+        assert isinstance(self.env.action_space, gym.spaces.Discrete)
 
-        if isinstance(action_space, gym.spaces.Box):
-            raise NotImplementedError('`gym.spaces.Box` not yet supported!')
-            self.num_actions = action_space.shape[0]
-
-            # continuous:
-            if action_space.is_bounded():
-                self.distribution_type = 'beta'
-
-                self.action_low = tf.constant(action_space.low, dtype=tf.float32)
-                self.action_high = tf.constant(action_space.high, dtype=tf.float32)
-                self.action_range = tf.constant(action_space.high - action_space.low,
-                                                dtype=tf.float32)
-
-                self.convert_action = lambda a: (a * self.action_range + self.action_low)[0].numpy()
-            else:
-                self.distribution_type = 'gaussian'
-                self.convert_action = lambda a: a[0].numpy()
-        else:
-            # discrete:
-            self.distribution_type = 'categorical'
-
-            if isinstance(action_space, gym.spaces.MultiDiscrete):
-                raise NotImplementedError('`gym.spaces.MultiDiscrete` not yet supported!')
-                # make sure all discrete components of the space have the same number of classes
-                assert np.all(action_space.nvec == action_space.nvec[0])
-
-                self.num_actions = action_space.nvec.shape[0]
-                self.num_classes = action_space.nvec[0] + 1  # to include the last class, i.e. 0 to K (not 0 to k-1)
-                self.convert_action = lambda a: tf.cast(a[0], dtype=tf.int32).numpy()
-            else:
-                self.num_actions = 1
-                self.num_classes = action_space.n
-                self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
+        self.num_actions = 1
+        self.num_classes = self.env.action_space.n
+        self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
     def get_action(self, state):
         if self.epsilon() > utils.tf_chance(seed=self.seed):
+            # TODO: Sampling Gym space is not deterministic (lacks `seed` parameter)
             return self.env.action_space.sample()
 
-        q_values = self.dqn.q_values(state, training=False)
-        return tf.argmax(q_values, axis=1)
+        return self.dqn.greedy_actions(state, training=False)
+
+    def get_network(self, **kwargs):
+        dqn = DQNetwork(agent=self, **kwargs)
+        target = DQNetwork(agent=self, **kwargs)
+        target.set_weights(weights=dqn.get_weights())
+
+        return dqn, target
 
     def get_memory(self, size: int):
         return ReplayMemory(state_spec=self.state_spec, num_actions=self.num_actions, size=size)
@@ -130,33 +110,34 @@ class DQNAgent(Agent):
         t0 = time.time()
 
         batch = self.memory.sample_batch(batch_size=self.batch_size, seed=self.seed)
-        loss, q_values, targets, gradients = self.get_gradients(batch)
-        applied_grads = self.apply_gradients(gradients)
-        self.update_target_network()
+        loss, gradients, debug = self.get_gradients(batch)
+        applied_grads, debug = self.apply_gradients(gradients, debug)
 
-        self.log(loss=loss, q_values=q_values, targets=targets, lr=self.lr.value,
-                 gradients_norm=[tf.norm(gradient) for gradient in gradients],
-                 gradients_applied_norm=[tf.norm(g) for g in applied_grads])
+        self.update_target_network()
+        self.log(average=True, lr=self.lr.value, **debug)
 
         print(f'Update took {round(time.time() - t0, 3)}s.')
 
     def update_target_network(self):
-        """Updates the weights of the target network by Polyak average"""
-        utils.polyak_averaging(model=self.target.net, old_weights=self.dqn.get_weights(), alpha=self.polyak_coeff)
+        """Updates the weights of the target networks by Polyak average"""
+        utils.polyak_averaging2(model=self.dqn, target=self.target, alpha=self.polyak_coeff)
 
     def get_gradients(self, batch):
         with tf.GradientTape() as tape:
-            loss, q_values, targets = self.objective(batch)
+            loss, debug = self.objective(batch)
 
         gradients = tape.gradient(loss, self.dqn.trainable_variables())
-        return loss, q_values, targets, gradients
+        debug['gradient_norm'] = [tf.norm(g) for g in gradients]
 
-    def apply_gradients(self, gradients):
+        return loss, gradients, debug
+
+    def apply_gradients(self, gradients, debug):
         if self.should_clip_grads:
             gradients = utils.clip_gradients(gradients, norm=self.grad_norm_value)
+            debug['gradient_clipped_norm'] = [tf.norm(g) for g in gradients]
 
         self.optimizer.apply_gradients(zip(gradients, self.dqn.trainable_variables()))
-        return gradients
+        return gradients, debug
 
     @tf.function
     def objective(self, batch):
@@ -164,8 +145,17 @@ class DQNAgent(Agent):
         states, actions, rewards, next_states, terminals = batch[:5]
 
         q_values = self.dqn.q_values(states, training=True)
+        selected_q_values = self.index_q_values(q_values, actions)
 
-        # use `actions` to index (select) q-values
+        targets = self.targets(next_states, rewards, terminals)
+
+        loss = 0.5 * losses.MSE(selected_q_values, targets)
+        debug = dict(loss=loss, targets=targets, q_values=selected_q_values)
+
+        return loss, debug
+
+    def index_q_values(self, q_values, actions):
+        """Use `actions` to index a tensor of Q-values"""
         shape = (q_values.shape[0], 1)
 
         q_indices = tf.concat([
@@ -173,18 +163,68 @@ class DQNAgent(Agent):
             tf.cast(actions, dtype=tf.int32)
         ], axis=1)
 
-        selected_q_values = tf.gather_nd(q_values, q_indices)
-        targets = self.targets(next_states, rewards, terminals)
-
-        loss = 0.5 * losses.MSE(selected_q_values, targets)
-        return loss, selected_q_values, targets
+        return tf.gather_nd(q_values, q_indices)
 
     @tf.function
     def targets(self, next_states, rewards, terminals):
-        q_values = self.target.q_values(next_states, training=True)
+        q_values = self.target.q_values(next_states, training=False)
+
         targets = rewards + self.gamma * tf.reduce_max(q_values, axis=1, keepdims=True)
         targets = tf.where(terminals == 0.0, x=rewards, y=targets)
-        return targets
+
+        return tf.stop_gradient(targets)
+
+    # TODO: check
+    def random_steps(self):
+        preprocess_fn = self.preprocess()
+        self.reset()
+
+        state = self.env.reset()
+        state = preprocess_fn(state)
+        state = utils.to_tensor(state)
+
+        episode_reward = 0.0
+        t0 = time.time()
+        t = 0
+
+        for _ in range(self.initial_random_steps):
+            action = self.env.action_space.sample()
+            self.log(random_action=action)
+
+            for _ in range(self.repeat_action):
+                next_state, reward, terminal, _ = self.env.step(action)
+                episode_reward += reward
+
+                if terminal:
+                    break
+
+            next_state = preprocess_fn(next_state)
+            next_state = utils.to_tensor(next_state)
+
+            self.memory.append(state, action, reward, next_state, terminal)
+            state = next_state
+
+            if terminal:
+                print(f'Random episode terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
+                      f'with reward {round(episode_reward, 3)}.')
+
+                self.log(random_reward=episode_reward)
+                self.write_summaries()
+
+                self.memory.ensure_space()
+                self.on_episode_end()
+
+                preprocess_fn = self.preprocess()
+                self.reset()
+                state = self.env.reset()
+                state = preprocess_fn(state)
+                state = utils.to_tensor(state)
+
+                t0 = time.time()
+                t = 0
+                episode_reward = 0.0
+            else:
+                t += 1
 
     def learn(self, episodes: int, timesteps: int, save_every: Union[bool, str, int] = False,
               render_every: Union[bool, str, int] = False, close=True):
@@ -203,6 +243,9 @@ class DQNAgent(Agent):
             render_every = 1
 
         try:
+            if self.initial_random_steps > 0:
+                self.random_steps()
+
             for episode in range(1, episodes + 1):
                 preprocess_fn = self.preprocess()
                 self.reset()
@@ -246,7 +289,6 @@ class DQNAgent(Agent):
                     if terminal or (t == timesteps):
                         print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
                               f'with reward {round(episode_reward, 3)}.')
-
                         self.update()
                         break
 
@@ -281,60 +323,76 @@ class DQNAgent(Agent):
 
 
 class DQNetwork(Network):
-    def __init__(self, agent: DQNAgent):
+    # TODO: generic save/load key, summary name
+    def __init__(self, agent: DQNAgent, **kwargs):
         super().__init__(agent)
         self.agent: DQNAgent
 
-        self.distribution = self.agent.distribution_type
-
         # Deep Q-Network
-        self.net = self.build()
+        self.net = self.build(**kwargs)
 
     @tf.function
     def q_values(self, inputs: Union[tf.Tensor, List[tf.Tensor], Dict[str, tf.Tensor]], training=False):
         return self.net(inputs, training=training)
 
+    @tf.function
+    def greedy_actions(self, inputs: Union[tf.Tensor, List[tf.Tensor], Dict[str, tf.Tensor]], training=False):
+        q = self.q_values(inputs, training=training)
+        return tf.argmax(q, axis=1)
+
     # TODO: only 1-D discrete actions supported
     def build(self, **kwargs) -> Model:
-        assert self.distribution == 'categorical'
         assert self.agent.num_actions == 1
+        q_args = kwargs.pop('output', dict(bias_initializer='zeros', kernel_initializer='glorot_uniform'))
 
         inputs = self._get_input_layers()
         last_layer = self.layers(inputs, **kwargs)
-        q_values = Dense(units=self.agent.num_classes, activation=None, name='q_values')(last_layer)
+        q_values = self.output_layer(last_layer, **q_args)
 
         return Model(inputs, outputs=q_values, name='Deep-Q-Network')
 
-    def layers(self, inputs: Dict[str, Input], **kwargs) -> Layer:
-        """Defines the architecture of the DQN"""
-        units = kwargs.get('units', 32)
+    # def layers(self, inputs: Dict[str, Input], **kwargs) -> Layer:
+    #     units = kwargs.get('units', 64)
+    #     num_layers = kwargs.get('num_layers', kwargs.get('layers', 2))  # 'num_layers' or 'layers'
+    #     dropout_rate = kwargs.get('dropout', 0.0)
+    #     normalization = kwargs.get('normalization', 'layer')
+    #     args = dict(activation=kwargs.get('activation', tf.nn.tanh),
+    #                 bias_initializer=kwargs.get('bias_initializer', 'glorot_uniform'),
+    #                 kernel_initializer=kwargs.get('kernel_initializer', 'glorot_normal'))
+    #
+    #     x = Dense(units, **args)(inputs['state'])
+    #     x = utils.normalization_layer(x, name=normalization)
+    #
+    #     for _ in range(num_layers):
+    #         if dropout_rate > 0.0:
+    #             x = Dense(units, **args)(x)
+    #             x = Dropout(rate=dropout_rate)(x)
+    #         else:
+    #             x = Dense(units, **args)(x)
+    #
+    #         x = utils.normalization_layer(x, name=normalization)
+    #
+    #     return x
+
+    def layers(self, inputs, **kwargs):
+        from rl.layers import NoisyDense
+
         num_layers = kwargs.get('num_layers', kwargs.get('layers', 2))  # 'num_layers' or 'layers'
-        activation = kwargs.get('activation', tf.nn.swish)
-        dropout_rate = kwargs.get('dropout', 0.0)
-        linear_units = kwargs.get('linear_units', 0)
+        normalization = kwargs.get('normalization', 'layer')
+        args = dict(activation=kwargs.get('activation', 'relu'), noise='independent',
+                    units=kwargs.get('units', 64))
 
-        # inputs = concatenate([inputs['state'], inputs['action']], axis=1)
-        # x = Dense(units, activation=activation)(inputs)
-        x = Dense(units, activation=activation)(inputs['state'])
-        x = BatchNormalization()(x)
+        x = NoisyDense(**args)(inputs['state'])
+        x = utils.normalization_layer(x, name=normalization)
 
-        for _ in range(0, num_layers, 2):
-            if dropout_rate > 0.0:
-                x = Dense(units, activation=activation)(x)
-                x = Dropout(rate=dropout_rate)(x)
-
-                x = Dense(units, activation=activation)(x)
-                x = Dropout(rate=dropout_rate)(x)
-            else:
-                x = Dense(units, activation=activation)(x)
-                x = Dense(units, activation=activation)(x)
-
-            x = BatchNormalization()(x)
-
-        if linear_units > 0:
-            x = Dense(units=linear_units, activation='linear')(x)
+        for _ in range(num_layers):
+            x = NoisyDense(**args)(x)
+            x = utils.normalization_layer(x, name=normalization)
 
         return x
+
+    def output_layer(self, layer: Layer, name='q_values', **kwargs) -> Layer:
+        return Dense(units=self.agent.num_classes, name=name, **kwargs)(layer)
 
     def trainable_variables(self):
         return self.net.trainable_variables
@@ -360,6 +418,7 @@ class ReplayMemory:
     def __init__(self, state_spec: dict, num_actions: int, size: int):
         assert size > 0
         self.size = size
+        self.action_shape = (1, num_actions)
 
         if list(state_spec.keys()) == ['state']:
             # Simple state-space
@@ -376,8 +435,7 @@ class ReplayMemory:
                 self.states[name] = tf.zeros(shape=(0,) + shape, dtype=tf.float32)
                 self.next_states[name] = tf.zeros_like(self.states[name])
 
-        self.actions = tf.zeros(shape=(0, 2), dtype=tf.float32)
-        # self.actions = tf.zeros(shape=(0, num_actions), dtype=tf.float32)
+        self.actions = tf.zeros(shape=(0, num_actions), dtype=tf.float32)
         self.rewards = tf.zeros(shape=(0, 1), dtype=tf.float32)
         self.terminals = tf.zeros(shape=(0, 1), dtype=tf.float32)
 
@@ -386,8 +444,7 @@ class ReplayMemory:
         return self.actions.shape[0]
 
     def append(self, state, action, reward, next_state, terminal):
-        action = tf.reshape(tf.identity(action), shape=(1, 2))
-        # action = tf.reshape(action, shape=(1, self.actions.shape[1]))
+        action = tf.reshape(tf.identity(action), shape=self.action_shape)
         reward = tf.reshape(reward, shape=(1, 1))
         terminal = tf.reshape(terminal, shape=(1, 1))
 

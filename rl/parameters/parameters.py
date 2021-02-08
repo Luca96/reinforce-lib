@@ -1,5 +1,7 @@
 """Dynamic step-dependent parameters"""
 
+import tensorflow as tf
+
 from typing import Union
 
 from tensorflow.keras.optimizers import schedules
@@ -15,15 +17,14 @@ class DynamicParameter:
     @staticmethod
     def create(value: Union[float, LearningRateSchedule], **kwargs):
         """Converts a floating or LearningRateSchedule `value` into a DynamicParameter object"""
+        if isinstance(value, DynamicParameter) or isinstance(value, ScheduleWrapper):
+            return value
+
         if isinstance(value, float):
             return ConstantParameter(value)
 
         if isinstance(value, LearningRateSchedule):
             return ScheduleWrapper(schedule=value, **kwargs)
-
-        # already DynamicParameter (or, DynamicParameter only!)
-        assert isinstance(value, DynamicParameter) or isinstance(value, ScheduleWrapper)
-        return value
 
     def __call__(self, *args, **kwargs):
         return self.value
@@ -56,6 +57,29 @@ class ScheduleWrapper(LearningRateSchedule, DynamicParameter):
 
     def get_config(self) -> dict:
         return self.schedule.get_config()
+
+
+class LearnableParameter(DynamicParameter):
+    def __init__(self, initial_value: float, name=None):
+        self._value = tf.Variable(initial_value=initial_value, trainable=True, name=name,
+                                  dtype=tf.float32)
+        super().__init__()
+        self.value = initial_value
+
+    @property
+    def value(self):
+        return self._value.value()
+
+    @value.setter
+    def value(self, v):
+        self._value.assign(value=v, read_value=False)
+
+    @property
+    def variable(self) -> list:
+        return [self._value]
+
+    def __call__(self, *args, **kwargs):
+        return self.value
 
 
 class ConstantParameter(DynamicParameter):

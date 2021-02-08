@@ -158,71 +158,6 @@ if __name__ == '__main__':
     # ppo_car_racing_discrete(e=200, t=200, b=50, load=False)
     # ppo_walker(e=500, t=200, b=32, load=True)
 
-    # cartpole_test(e=300, t=200)
-    # ppo_cartpole_test(seeds=[42])
-
-    # import matplotlib.pyplot as plt
-    # # data = tf.random.uniform((40,), minval=-2.0, maxval=5.0)
-    #
-    # data = tf.random.uniform((40,), minval=-0.2, maxval=2.0)
-    # # data = tf.random.uniform((40,), minval=-2.0, maxval=0.1)
-    #
-    # data_norm = utils.tf_normalize(data)
-    # data_spn = utils.tf_sign_preserving_normalization(data)
-    # data_sp2 = utils.tf_sp_norm(data)
-    #
-    # def scatter(aa, c: str):
-    #     pos = tf.where(aa < 0.01, aa, 0.0)
-    #     idx = tf.constant(list(range(40)), tf.float32)
-    #     a = list(filter(lambda x: x[0] != 0.0, zip(pos, idx)))
-    #     z = list(map(lambda x: x[0], a))
-    #     y = list(map(lambda x: x[1], a))
-    #     plt.scatter(y, z, c=c)
-    #
-    # scatter(data_sp2, c='violet')
-    # scatter(data, c='b')
-    #
-    # print('mean:', tf.reduce_mean(data), 'std:', tf.math.reduce_std(data))
-    # print('min:', tf.reduce_min(data), 'max:', tf.reduce_max(data))
-    #
-    # for a, b, c in zip(data, data_norm, data_spn):
-    #     print(f'{np.round(a, 4)} -> {np.round(b, 4)} vs {np.round(c, 4)}')
-    #
-    # mean = tf.reduce_mean(data)
-    # # std = tf.math.reduce_std(data)
-    # ones = tf.ones_like(data)
-    # #
-    # plt.plot(data, label='A(s,a)')
-    # # # plt.plot(data * 0.5, label='data-0.5')
-    # # plt.plot(mean * ones, label='mean')
-    # plt.plot(ones, label='+1')
-    # plt.plot(ones * 0.0, label='zero')
-    # plt.plot(-ones, label='-1')
-    # # plt.plot(std * ones, label='std')
-    # # plt.plot(-std * ones, label='-std')
-    # # plt.plot((mean + std) * ones, label='mean+std')
-    # # plt.plot((mean - std) * ones, label='mean-std')
-    # # plt.plot(data_norm, label='A-norm')
-    # # plt.plot(data_spn, label='A-sp')
-    # plt.plot(data_sp2, label='A-sp')
-    # # plt.plot(data / std, label='data / std')
-    # # plt.plot(data / tf.norm(data), label='data / norm')
-    # plt.legend(loc='best')
-    # plt.title('Advantage Normalization')
-    # plt.show()
-
-    # from rl.agents import ReinforceAgent
-    # agent = ReinforceAgent(env='CartPole-v0', name='reinforce-cartPole', batch_size=20, drop_batch_remainder=True,
-    #                        lambda_=0.95, optimization_steps=(1, 1),
-    #                        seed=42, episodes_per_update=1, log_mode='summary')
-    # agent.learn(episodes=200, timesteps=200, render_every=10, save_every='end')
-
-    # agent = PPOAgent(env='CartPole-v0', name='ppo2-cartpole', batch_size=32,
-    #                  drop_batch_remainder=True, optimization_steps=(1, 1),
-    #                  summary_keys=['episode_rewards', 'loss_policy', 'ratio'],
-    #                  policy_lr=3e-4, entropy_regularization=0.0, update_frequency=4, seed=42)
-    # agent.learn(episodes=192+16, timesteps=200, render_every=10, save_every=False)
-
     # DQNAgent.test(env='CartPole-v0', batch_size=64, memory_size=2048, lr=3e-4, seed=42,
     #               epsilon=0.1, clip_norm=None,
     #               summary_keys=['episode_rewards', 'loss', 'q_values', 'targets'],
@@ -233,15 +168,57 @@ if __name__ == '__main__':
     #                      summary_keys=['episode_rewards', 'loss', 'q_values', 'targets'],
     #                      args=dict(episodes=208, timesteps=200, render_every=10, save_every='end'))
 
-    # DDPGAgent.test(env='CartPole-v0', batch_size=64, memory_size=2048, seed=31,
-    #                actor_lr=3e-4, critic_lr=1e-3,
-    #                noise=0.0, clip_norm=None, name='ddpg-cartpole',
-    #                # summary_keys=['episode_rewards', 'loss', 'q_values', 'targets'],
-    #                args=dict(episodes=200, timesteps=200, render_every=10, save_every='end'))
-    #
+    from rl.agents.mba import MBAAgent
 
-    SACAgent.test(env='CartPole-v0', batch_size=64, memory_size=2048, seed=42,
-                  name='sac-cartpole', temperature=0.05, lr=1e-4,
-                  args=dict(episodes=200+300, timesteps=200, render_every=10, save_every='end'),
-                  network_summary=False)
+    MBAAgent.test(env='CartPole-v0', name='mba-cartpole', action_lr=3e-5, network=dict(units=32),
+                  batch_size=32, lr=3e-4, noise=0.0, planning_horizon=16, network_summary=False,
+                  args=dict(episodes=200, timesteps=200, render_every=10, save_every='end'))
+    exit()
+
+    from rl.agents.mpc import MPCAgent
+
+    def cartpole_reward(env, s, a):
+        x = s[0]
+        theta = s[2]
+        done = bool(x < -env.x_threshold
+            or x > env.x_threshold
+            or theta < -env.theta_threshold_radians
+            or theta > env.theta_threshold_radians)
+
+        return 0.0 if done else 1.0
+
+    MPCAgent.test(env='CartPole-v0', reward_fn=lambda s, a: 1, name='mpc-cartpole',
+                  batch_size=32, lr=1e-3, noise=0.0, planning_horizon=16,
+                  plan_trajectories=64, optimization_steps=8,
+                  args=dict(episodes=200, timesteps=200, render_every=10, save_every='end'))
+    exit()
+
+    actor = dict(units=32, activation=tf.nn.swish,
+                 kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.5),
+                 bias_initializer=tf.keras.initializers.RandomUniform(-0.05, 0.05))
+
+    critic = dict(units=32, activation=tf.nn.swish,
+                  kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.1),
+                  bias_initializer=tf.keras.initializers.RandomUniform(-0.05, 0.05))
+    import random
+    seed = random.randint(1, 1000)
+    print(seed)
+    DDPGAgent.test(env='CartPole-v0', batch_size=40, memory_size=4096, seed=seed,
+                   actor_lr=1e-3, critic_lr=1e-3, optimization_steps=2,
+                   critic=critic, actor=actor, clip_norm=1.0,
+                   noise=0.05, name='ddpg-cartpole',
+                   # summary_keys=['episode_rewards', 'loss', 'q_values', 'targets'],
+                   args=dict(episodes=200, timesteps=200, render_every=10, save_every='end'))
+    exit()
+
+    # SACAgent.test(env='LunarLanderContinuous-v2', batch_size=128, memory_size=4096, seed=31,
+    #               name='sac-lunar', temperature=0.2, lr=1e-4,
+    #               args=dict(episodes=500, timesteps=200, render_every=10, save_every='end'),
+    #               network_summary=False)
+
+    # from rl.agents.auto_sac import AutoSACAgent
+    # AutoSACAgent.test(env='CartPole-v0', batch_size=16, memory_size=4096, seed=42,
+    #                   name='auto-sac-cartpole',
+    #                   args=dict(episodes=500, timesteps=200, render_every=10, save_every='end'),
+    #                   network_summary=False)
     pass

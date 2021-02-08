@@ -5,7 +5,7 @@ import tensorflow as tf
 from tensorflow.keras.layers import *
 
 
-def shufflenet_v2(input_image: Input, g=1.0, leak=0.0, last_channels=1024, linear_units=128):
+def shufflenet_v2(input_image: Input, g=1.0, leak=0.0, last_channels=1024, linear_units=128) -> Layer:
     """ShuffleNet-V2, based on:
        https://github.com/tensorpack/tensorpack/blob/master/examples/ImageNetModels/shufflenet.py
     """

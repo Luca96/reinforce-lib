@@ -160,8 +160,8 @@ class Agent:
 
         return preprocess_fn
 
-    def log(self, **kwargs):
-        self.statistics.log(**kwargs)
+    def log(self, average=False, **kwargs):
+        self.statistics.log(average=average, **kwargs)
 
     def write_summaries(self):
         try:

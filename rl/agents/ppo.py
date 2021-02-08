@@ -20,6 +20,7 @@ from tensorflow.keras.optimizers.schedules import LearningRateSchedule
 
 
 class PPOAgent(Agent):
+    # TODO: improve performance
     # TODO: dynamic-parameters: gamma, lambda, opt_steps, update_freq?, polyak?, clip_norm
     # TODO: debug each action separately
     # TODO: RNN support
@@ -29,17 +30,22 @@ class PPOAgent(Agent):
                  clip_ratio: Union[float, LearningRateSchedule, DynamicParameter] = 0.2, seed_regularization=False,
                  entropy_regularization: Union[float, LearningRateSchedule, DynamicParameter] = 0.0,
                  network: Union[dict, PPONetwork] = None, update_frequency=1, polyak=1.0, repeat_action=1,
+                 normalize_advantages: Union[None, str] = 'sign', clip_negative_advantages=False,
                  advantage_scale: Union[float, LearningRateSchedule, DynamicParameter] = 2.0, **kwargs):
         assert 0.0 < polyak <= 1.0
         assert repeat_action >= 1
 
-        super().__init__(*args, name=name, **kwargs)
+        super().__init__(*args, name=name, drop_batch_remainder=True, **kwargs)
 
         self.memory: PPOMemory = None
         self.gamma = gamma
         self.lambda_ = lambda_
         self.repeat_action = repeat_action
+
+        # Advantages
         self.adv_scale = DynamicParameter.create(value=advantage_scale)
+        self.should_clip_adv = clip_negative_advantages
+        self.adv_normalization_fn = utils.get_normalization_fn(name=normalize_advantages)
 
         if seed_regularization:
             def _seed_regularization():
@@ -332,18 +338,30 @@ class PPOAgent(Agent):
         states, advantages, actions, old_log_probabilities = batch[:4]
         new_policy: tfp.distributions.Distribution = self.network.policy(states, training=True)
 
-        # TODO: probable bug -> "self.num_actions == 1"??
-        if self.distribution_type == 'categorical' and self.num_actions == 1:
-            batch_size = tf.shape(actions)[0]
-            actions = tf.reshape(actions, shape=batch_size)
+        if self.should_clip_adv:
+            advantages = tf.where(advantages > 0.0, x=advantages, y=0.0)
+            self.log(average=True, advantages_clipped=advantages)
 
-            new_log_prob = new_policy.log_prob(actions)
-            new_log_prob = tf.reshape(new_log_prob, shape=(batch_size, self.num_actions))
-        else:
+        if self.distribution_type != 'categorical':
             # round samples (actions) before computing density:
             # motivation: https://www.tensorflow.org/probability/api_docs/python/tfp/distributions/Beta
             actions = tf.clip_by_value(actions, utils.EPSILON, 1.0 - utils.EPSILON)
-            new_log_prob = new_policy.log_prob(actions)
+            # actions = tf.clip_by_value(actions, 1e-3, 1.0 - 1e-3)  # TODO: test if better
+
+        new_log_prob = new_policy.log_prob(actions)
+
+        # # TODO: probable bug -> "self.num_actions == 1"??
+        # if self.distribution_type == 'categorical' and self.num_actions == 1:
+        #     batch_size = tf.shape(actions)[0]
+        #     actions = tf.reshape(actions, shape=batch_size)
+        #
+        #     new_log_prob = new_policy.log_prob(actions)
+        #     new_log_prob = tf.reshape(new_log_prob, shape=(batch_size, self.num_actions))
+        # else:
+        #     # round samples (actions) before computing density:
+        #     # motivation: https://www.tensorflow.org/probability/api_docs/python/tfp/distributions/Beta
+        #     actions = tf.clip_by_value(actions, utils.EPSILON, 1.0 - utils.EPSILON)
+        #     new_log_prob = new_policy.log_prob(actions)
 
         kl_divergence = utils.kl_divergence(old_log_probabilities, new_log_prob)
         kl_divergence = tf.reduce_mean(kl_divergence)
@@ -358,7 +376,7 @@ class PPOAgent(Agent):
 
         # Compute the clipped ratio times advantage
         clip_value = self.clip_ratio()
-        clipped_ratio = tf.clip_by_value(ratio, clip_value_min=1.0 - clip_value, clip_value_max=1.0 + clip_value)
+        # clipped_ratio = tf.clip_by_value(ratio, clip_value_min=1.0 - clip_value, clip_value_max=1.0 + clip_value)
 
         # Source: https://github.com/openai/spinningup/blob/master/spinup/algos/tf1/ppo/ppo.py#L201
         min_adv = tf.where(advantages > 0.0, x=(1.0 + clip_value) * advantages, y=(1.0 - clip_value) * advantages)
@@ -369,15 +387,16 @@ class PPOAgent(Agent):
         total_loss = policy_loss - entropy_penalty
 
         # Log stuff
-        self.log(ratio=tf.reduce_mean(ratio), log_prob=tf.reduce_mean(new_log_prob), entropy=entropy,
+        self.log(average=True, ratio=ratio, log_prob=new_log_prob, entropy=entropy,
                  entropy_coeff=self.entropy_strength.value, ratio_clip=clip_value, kl_divergence=kl_divergence,
                  loss_policy=policy_loss.numpy(), loss_entropy=entropy_penalty.numpy(),
                  # adv_diff=clipped_ratio - min_adv, adv_ratio=ratio * advantages, adv_min=min_adv,
                  # adv_minimum=tf.minimum(ratio * advantages, min_adv), adv_min_diff=ratio * advantages - min_adv
-                 )
+                 **({f'prob_{i}': x for i, x in enumerate(tf.exp(new_log_prob))}))
 
         return total_loss, kl_divergence
 
+    # TODO: standardize `collect()` and `imitate()` across agents
     def collect(self, episodes: int, timesteps: int, render=True, record_threshold=0.0, seeds=None, close=True):
         import random
         sample_seed = False
@@ -463,7 +482,7 @@ class PPOAgent(Agent):
                     memory.rewards = rewards
                     memory.values = values
                     memory.compute_returns(discount=self.gamma)
-                    memory.compute_advantages(self.gamma, self.lambda_)
+                    memory.compute_advantages(self.adv_normalization_fn, self.gamma, self.lambda_)
 
                     # update policy:
                     loss_policy, policy_grads = self.get_policy_gradients(batch=(states, memory.advantages,
@@ -543,7 +562,7 @@ class PPOAgent(Agent):
                     self.log(actions=action, action_env=action_env, rewards=reward,
                              distribution_mean=mean, distribution_std=std)
 
-                    self.memory.append(state, action, reward, value, log_prob, timestep=t / timesteps)
+                    self.memory.append(state, action, reward, value, log_prob)
                     state = next_state
 
                     # check whether a termination (terminal state or end of a transition) is reached:
@@ -558,8 +577,7 @@ class PPOAgent(Agent):
                         state = preprocess_fn(state)
                         state = utils.to_tensor(state)
 
-                        last_value = self.network.predict_last_value(state, timestep=(t + 1) / timesteps,
-                                                                     is_terminal=done)
+                        last_value = self.network.predict_last_value(state, is_terminal=done)
                         self.end_episode(last_value, append=self.update_frequency > 1)
                         break
 
@@ -596,11 +614,11 @@ class PPOAgent(Agent):
         """Used during learning `learn(...)` to terminate an episode"""
         self.memory.end_trajectory(last_value)
         returns = self.memory.compute_returns(discount=self.gamma, append=append)
-        values, advantages = self.memory.compute_advantages(self.gamma, self.lambda_,
+        values, advantages = self.memory.compute_advantages(self.adv_normalization_fn, self.gamma, self.lambda_,
                                                             scale=self.adv_scale(), append=append)
         self.memory.update_index(append=append)
 
-        self.log(returns=returns, advantages=advantages, values=values, advantage_scale=self.adv_scale.value,
+        self.log(average=True, returns=returns, advantages=advantages, values=values, advantage_scale=self.adv_scale.value,
                  returns_base=self.memory.returns[:, 0], returns_exp=self.memory.returns[:, 1],
                  values_base=self.memory.values[:, 0], values_exp=self.memory.values[:, 1],
                  returns_minus_values=returns - values[:-1], advantages_normalized=self.memory.advantages)
@@ -696,7 +714,7 @@ class PPOMemory:
         del self.advantages
 
     # TODO: use kwargs to define what to append and where to store?
-    def append(self, state, action, reward, value, log_prob, timestep):
+    def append(self, state, action, reward, value, log_prob):
         if self.simple_state:
             self.states = tf.concat([self.states, state], axis=0)
         else:
@@ -709,7 +727,6 @@ class PPOMemory:
         self.rewards = tf.concat([self.rewards, [reward]], axis=0)
         self.values = tf.concat([self.values, value], axis=0)
         self.log_probabilities = tf.concat([self.log_probabilities, log_prob], axis=0)
-        # self.timesteps = tf.concat([self.timesteps, [timestep]], axis=0)
 
     def end_trajectory(self, last_value: tf.Tensor):
         """Terminates the current trajectory by adding the value of the terminal state"""
@@ -733,13 +750,15 @@ class PPOMemory:
 
         return returns
 
-    def compute_advantages(self, gamma: float, lambda_: float, scale=2.0, append=False):
+    def compute_advantages(self, normalization_fn, gamma: float, lambda_: float, scale=2.0, append=False):
         """Computes the advantages using generalized-advantage estimation"""
+        assert callable(normalization_fn)
+
         # value = base * 10^exponent
         values = self.values[self.index:, 0] * tf.pow(10.0, self.values[self.index:, 1])
 
         advantages = utils.gae(self.rewards[self.index:], values=values, gamma=gamma, lambda_=lambda_, normalize=False)
-        new_advantages = utils.tf_sp_norm(advantages) * scale
+        new_advantages = normalization_fn(advantages) * scale
 
         if (self.advantages is None) or (not append):
             self.advantages = new_advantages

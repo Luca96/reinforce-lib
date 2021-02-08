@@ -74,6 +74,9 @@ class DDPGAgent(Agent):
         self.actor_target = ActorNetwork(agent=self, **actor)
         self.critic_target = CriticNetwork(agent=self, **critic)
 
+        self.actor_target.set_weights(weights=self.actor.get_weights())
+        self.critic_target.set_weights(weights=self.critic.get_weights())
+
         # Optimization
         self.optimization_steps = optimization_steps
         self.actor_lr = DynamicParameter.create(value=actor_lr)
@@ -165,18 +168,14 @@ class DDPGAgent(Agent):
                 self.action_shape = (self.num_actions, self.num_classes)
             else:
                 self.num_actions = 1
-                self.num_classes = action_space.n - 1 + 1
+                self.num_classes = action_space.n
                 # self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
                 self.action_shape = (self.num_classes,)
 
             def convert_action(a):
+                self.log(logits1=a[:, 0], logits_2=a[:, 1])
                 a = tf.argmax(a, axis=1, output_type=tf.int32)
                 return tf.squeeze(a).numpy()
-
-            # def convert_action(a):
-            #     a = tf.clip_by_value(a, 0.0, self.num_classes)
-            #     a = tf.round(a)
-            #     return tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
             self.convert_action = convert_action
 
@@ -229,12 +228,17 @@ class DDPGAgent(Agent):
 
         print(f'Update took {round(time.time() - t0, 3)}s.')
 
+    # def update_target_networks(self):
+    #     """Updates the weights of the target networks by Polyak average"""
+    #     utils.polyak_averaging(model=self.actor_target.net, old_weights=self.actor.get_weights(),
+    #                            alpha=self.polyak_coeff)
+    #     utils.polyak_averaging(model=self.critic_target.net, old_weights=self.critic.get_weights(),
+    #                            alpha=self.polyak_coeff)
+
     def update_target_networks(self):
         """Updates the weights of the target networks by Polyak average"""
-        utils.polyak_averaging(model=self.actor_target.net, old_weights=self.actor.get_weights(),
-                               alpha=self.polyak_coeff)
-        utils.polyak_averaging(model=self.critic_target.net, old_weights=self.critic.get_weights(),
-                               alpha=self.polyak_coeff)
+        utils.polyak_averaging2(model=self.actor, target=self.actor_target, alpha=self.polyak_coeff)
+        utils.polyak_averaging2(model=self.critic, target=self.critic_target, alpha=self.polyak_coeff)
 
     def get_actor_gradients(self, batch):
         with tf.GradientTape() as tape:
@@ -266,7 +270,7 @@ class DDPGAgent(Agent):
 
     # @tf.function
     def actor_objective(self, batch):
-        states = batch[:1]
+        states = batch[0]
 
         actions = self.actor.actions(states, training=True)
         q_values = self.critic.q_values(inputs=dict(state=states, action=actions), training=True)
@@ -284,7 +288,9 @@ class DDPGAgent(Agent):
         targets = rewards + self.gamma * (1.0 - terminals) * self.critic_target.q_values(inputs=target_input)
         q_values = self.critic.q_values(inputs=critic_input, training=True)
 
-        loss = tf.reduce_mean(losses.MSE(q_values, targets))
+        # loss = tf.reduce_mean(losses.MSE(q_values, targets))
+        loss = tf.reduce_mean(tf.square(q_values - targets))
+
         return loss, targets, q_values
 
     def learn(self, episodes: int, timesteps: int, save_every: Union[bool, str, int] = False,
@@ -441,6 +447,7 @@ class ActorNetwork(Network):
                           bias_initializer=kwargs.get('bias_initializer', 'glorot_uniform'))
 
         x = Dense(**dense_args)(inputs['state'])
+        # x = LayerNormalization()(x)
         x = BatchNormalization()(x)
 
         for _ in range(num_layers):
@@ -450,6 +457,7 @@ class ActorNetwork(Network):
             else:
                 x = Dense(**dense_args)(x)
 
+            # x = LayerNormalization()(x)
             x = BatchNormalization()(x)
 
         return x
@@ -509,11 +517,13 @@ class CriticNetwork(Network):
         action_branch = self._branch(inputs['action'], units_action, num_layers, dropout_rate, **dense_args)
 
         x = Dense(units, **dense_args)(concatenate([state_branch, action_branch]))
+        # x = LayerNormalization()(x)
         x = BatchNormalization()(x)
         return x
 
     def _branch(self, input_layer: Input, units: int, num_layers: int, dropout_rate: float, **kwargs) -> Layer:
         x = Dense(units, **kwargs)(input_layer)
+        # x = BatchNormalization()(x)
         x = BatchNormalization()(x)
 
         for _ in range(num_layers):
@@ -523,6 +533,7 @@ class CriticNetwork(Network):
             else:
                 x = Dense(units, **kwargs)(x)
 
+            # x = LayerNormalization()(x)
             x = BatchNormalization()(x)
 
         return x

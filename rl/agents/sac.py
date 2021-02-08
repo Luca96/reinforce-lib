@@ -12,7 +12,7 @@ from typing import Union, List, Dict, Tuple
 from rl import utils
 from rl.agents import Agent
 from rl.agents.dqn import ReplayMemory
-from rl.parameters import DynamicParameter
+from rl.parameters import DynamicParameter, LearnableParameter
 from rl.networks.networks import Network
 
 from tensorflow.keras.layers import *
@@ -23,10 +23,13 @@ from tensorflow.keras.optimizers.schedules import LearningRateSchedule
 
 class SACAgent(Agent):
     # TODO: add noise-action?
-    def __init__(self, *args, optimizer='adam', lr: Union[float, LearningRateSchedule, DynamicParameter] = 3e-4,
-                 name='sac-agent', gamma=0.99, load=False, clip_norm: Union[None, float, Tuple[float, float]] = None,
-                 polyak=0.995, repeat_action=1, memory_size=1000, optimization_steps=1,
-                 temperature: Union[float, LearningRateSchedule, DynamicParameter] = 0.2, **kwargs):
+    # TODO: make `polyak`, `optimization_steps`, `memory`, `discount`, and `clip_norm` DynamicParameters?
+    def __init__(self, *args, optimizer='adam', actor_lr: Union[float, LearningRateSchedule, DynamicParameter] = 3e-3,
+                 critic_lr: Union[float, LearningRateSchedule, DynamicParameter] = 3e-4, name='sac-agent', gamma=0.99,
+                 load=False, clip_norm: Union[None, float, Tuple[float, float]] = None, polyak=0.995, repeat_action=1,
+                 memory_size=1000, optimization_steps=1, critic: dict = None, actor: dict = None,
+                 target_entropy: Union[None, str, float] = None,
+                 temperature: Union[float, str, LearningRateSchedule, DynamicParameter] = 0.2, **kwargs):
         assert 0.0 < polyak <= 1.0
         assert repeat_action >= 1
         assert optimization_steps >= 1
@@ -38,14 +41,35 @@ class SACAgent(Agent):
         self.repeat_action = repeat_action
         self.drop_batch_remainder = memory_size % self.batch_size != 0
 
-        # Temperature parameter (alpha)
-        if isinstance(temperature, float):
-            assert temperature >= 0.0
-
-        self.temperature = DynamicParameter.create(value=temperature)
-
         # Action space
         self._init_action_space()
+
+        # Temperature parameter (alpha)
+        if target_entropy is not None:
+            self.should_adjust_entropy = True
+
+            if isinstance(target_entropy, float):
+                self.target_entropy = tf.constant(target_entropy, dtype=tf.float32)
+            else:
+                # 'auto' => Target entropy is -|A|
+                self.target_entropy = tf.constant(-np.prod(self.action_shape), dtype=tf.float32)
+
+            if temperature == 'auto':
+                self.temperature = LearnableParameter(initial_value=1.0)
+                # self.temperature = DynamicParameter.create(value=1.0)
+                self.log_temperature = LearnableParameter(initial_value=0.0)  # 0 = log(1)
+            else:
+                assert isinstance(temperature, float)
+                assert temperature > 0.0
+
+                self.temperature = LearnableParameter(initial_value=temperature)
+                # self.temperature = DynamicParameter.create(value=temperature)
+                self.log_temperature = LearnableParameter(initial_value=tf.math.log(temperature))
+        else:
+            assert not isinstance(temperature, str)
+
+            self.should_adjust_entropy = False
+            self.temperature = DynamicParameter.create(value=temperature)
 
         # Memory
         self.memory = self.get_memory(size=memory_size)
@@ -58,20 +82,32 @@ class SACAgent(Agent):
                                  q_net1=os.path.join(self.base_path, 'q_net1'),
                                  q_net2=os.path.join(self.base_path, 'q_net2'))
 
-        self.policy = PolicyNetwork(agent=self)
-        self.q_net1 = QNetwork(agent=self, weights_path=self.weights_path['q_net1'])
-        self.q_net2 = QNetwork(agent=self, weights_path=self.weights_path['q_net2'])
+        critic = {} if critic is None else critic
+        actor = {} if actor is None else actor
 
-        self.target_q1 = QNetwork(agent=self, weights_path='')
-        self.target_q2 = QNetwork(agent=self, weights_path='')
+        self.policy = PolicyNetwork(agent=self, **actor)
+        self.q_net1 = QNetwork(agent=self, weights_path=self.weights_path['q_net1'], **critic)
+        self.q_net2 = QNetwork(agent=self, weights_path=self.weights_path['q_net2'], **critic)
+
+        self.target_q1 = QNetwork(agent=self, weights_path='', **critic)
+        self.target_q2 = QNetwork(agent=self, weights_path='', **critic)
+
+        self.target_q1.set_weights(weights=self.q_net1.get_weights())
+        self.target_q2.set_weights(weights=self.q_net2.get_weights())
 
         # Optimization
-        self.lr = DynamicParameter.create(value=lr)
-        self.policy_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=self.lr)
-        self.q1_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=self.lr)
-        self.q2_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=self.lr)
+        self.actor_lr = DynamicParameter.create(value=actor_lr)
+        self.critic_lr = DynamicParameter.create(value=critic_lr)
+
+        self.policy_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=self.actor_lr)
+        self.q1_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=self.critic_lr)
+        self.q2_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=self.critic_lr)
         self.optimization_steps = optimization_steps
         self.polyak_coeff = polyak
+
+        if self.should_adjust_entropy:
+            self.entropy_lr = DynamicParameter.create(value=actor_lr)  # use same lr as actor
+            self.entropy_optimizer = utils.get_optimizer_by_name(optimizer, learning_rate=self.entropy_lr)
 
         if load:
             self.load()
@@ -133,23 +169,53 @@ class SACAgent(Agent):
                 self.convert_action = lambda a: a[0].numpy()
         else:
             # discrete:
+            assert not isinstance(action_space, gym.spaces.MultiDiscrete)
+
             self.distribution_type = 'categorical'
-
-            if isinstance(action_space, gym.spaces.MultiDiscrete):
-                # make sure all discrete components of the space have the same number of classes
-                assert np.all(action_space.nvec == action_space.nvec[0])
-
-                self.num_actions = action_space.nvec.shape[0]
-                self.num_classes = action_space.nvec[0] + 1
-                self.action_shape = (self.num_actions, self.num_classes - 1)
-            else:
-                self.num_actions = 1
-                self.num_classes = action_space.n
-                self.action_shape = (self.num_classes - 1,)
+            self.num_actions = 1
+            self.num_classes = action_space.n
+            self.action_shape = (self.num_classes - 1,)
 
             def convert_action(a):
                 a = tf.round(a)
                 return tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
+
+            self.convert_action = convert_action
+
+    def _init_action_space2(self):
+        action_space = self.env.action_space
+
+        if isinstance(action_space, gym.spaces.Box):
+            self.num_actions = action_space.shape[0]
+            self.action_shape = action_space.shape
+
+            # continuous:
+            if action_space.is_bounded():
+                self.distribution_type = 'beta'
+
+                self.action_low = tf.constant(action_space.low, dtype=tf.float32)
+                self.action_high = tf.constant(action_space.high, dtype=tf.float32)
+                self.action_range = tf.constant(action_space.high - action_space.low,
+                                                dtype=tf.float32)
+
+                self.convert_action = lambda a: tf.squeeze(a * self.action_range + self.action_low).numpy()
+            else:
+                self.distribution_type = 'gaussian'
+                self.convert_action = lambda a: a[0].numpy()
+        else:
+            # discrete:
+            self.distribution_type = 'beta'
+            # self.distribution_type = 'gaussian'
+            self.num_actions = 1
+            self.num_classes = action_space.n
+            self.action_range = self.num_classes - 1
+            self.action_shape = (self.action_range,)
+
+            def convert_action(a):
+                a = tf.squeeze(a * self.action_range)
+                a = tf.round(a)
+                # a = tf.clip_by_value(a, clip_value_min=0.0, clip_value_max=self.action_range)
+                return tf.cast(a, dtype=tf.int32).numpy()
 
             self.convert_action = convert_action
 
@@ -180,21 +246,38 @@ class SACAgent(Agent):
 
             self.update_target_networks()
 
+            # Update temperature (alpha) parameter:
+            if self.should_adjust_entropy:
+                with tf.GradientTape() as tape:
+                    entropy_loss = self.entropy_objective(batch)
+
+                # entropy_grads = tape.gradient(entropy_loss, self.temperature.variable)
+                # self.entropy_optimizer.apply_gradients(zip(entropy_grads, self.temperature.variable))
+                entropy_grads = tape.gradient(entropy_loss, self.log_temperature.variable)
+                self.entropy_optimizer.apply_gradients(zip(entropy_grads, self.log_temperature.variable))
+                self.temperature.value = tf.exp(self.log_temperature.value)
+
+                self.log(gradient_value_temperature=[g for g in entropy_grads],
+                         loss_entropy=entropy_loss, temperature_log=self.log_temperature.value)
+
             # debug
-            self.log(gradients_policy=[tf.norm(g) for g in policy_grads], lr=self.lr.value,
+            self.log(gradients_policy=[tf.norm(g) for g in policy_grads], actor_lr=self.actor_lr.value,
                      gradients_policy_applied=[tf.norm(g) for g in applied_grads_policy],
                      gradients_q1=[tf.norm(g) for g in grads_q1], gradients_q2=[tf.norm(g) for g in grads_q2],
-                     gradients_q1_applied=[tf.norm(g) for g in applied_grads_q[0]],
+                     gradients_q1_applied=[tf.norm(g) for g in applied_grads_q[0]], critic_lr=self.critic_lr.value,
                      gradients_q2_applied=[tf.norm(g) for g in applied_grads_q[1]])
 
         print(f'Update took {round(time.time() - t0, 3)}s.')
 
     def update_target_networks(self):
         """Updates the weights of the target networks by Polyak average"""
-        utils.polyak_averaging(model=self.target_q1.net, old_weights=self.q_net1.get_weights(),
-                               alpha=self.polyak_coeff)
-        utils.polyak_averaging(model=self.target_q2.net, old_weights=self.q_net2.get_weights(),
-                               alpha=self.polyak_coeff)
+        self.polyak_averaging(model=self.q_net1, target=self.target_q1)
+        self.polyak_averaging(model=self.q_net2, target=self.target_q2)
+
+    def polyak_averaging(self, model: Network, target: Network):
+        for var, var_target in zip(model.trainable_variables(), target.trainable_variables()):
+            value = self.polyak_coeff * var_target + (1.0 - self.polyak_coeff) * var
+            var_target.assign(value, read_value=False)
 
     def get_policy_gradients(self, batch):
         with tf.GradientTape() as tape:
@@ -212,6 +295,13 @@ class SACAgent(Agent):
         del tape
         return gradients_q1, gradients_q2
 
+    def get_temperature_gradients(self, batch):
+        with tf.GradientTape() as tape:
+            loss = self.entropy_objective(batch)
+
+        gradients = tape.gradient(loss, self.temperature.variable)
+        return gradients
+
     def apply_policy_gradients(self, gradients) -> List[tf.Tensor]:
         if self.should_clip_policy_grads:
             gradients = utils.clip_gradients(gradients, norm=self.policy_clip_norm)
@@ -225,29 +315,67 @@ class SACAgent(Agent):
             gradients[1] = utils.clip_gradients(gradients[1], norm=self.q_net_clip_norm)
 
         self.q1_optimizer.apply_gradients(zip(gradients[0], self.q_net1.trainable_variables()))
-        self.q1_optimizer.apply_gradients(zip(gradients[1], self.q_net2.trainable_variables()))
-
+        self.q2_optimizer.apply_gradients(zip(gradients[1], self.q_net2.trainable_variables()))
         return gradients
 
     # @tf.function
+    # def policy_objective(self, batch):
+    #     states = batch[0]
+    #     actions, log_prob, mean, std = self.policy.predict(inputs=states)
+    #
+    #     # predict Q-values from both Q-functions and then take the minimum of the two
+    #     q_values1 = self.q_net1.predict(states, actions, training=True)
+    #     q_values2 = self.q_net2.predict(states, actions, training=True)
+    #     q_values = tf.minimum(q_values1, q_values2)
+    #
+    #     # loss = q_values - self.temperature() * tf.exp(log_prob)
+    #     loss = q_values - self.temperature() * log_prob
+    #
+    #     # debug
+    #     self.log(loss_policy=loss, actions_policy=actions, q_values1=q_values1, q_values2=q_values2,
+    #              q_values=q_values, distribution_mean=mean, distribution_std=std, log_prob=log_prob,
+    #              temperature=self.temperature.value, entropy_policy=self.temperature.value * log_prob)
+    #
+    #     # minus sign '-' for ascent direction
+    #     return -loss
+
     def policy_objective(self, batch):
-        states = batch[:1]
+        states = batch[0]
         actions, log_prob, mean, std = self.policy.predict(inputs=states)
 
         # predict Q-values from both Q-functions and then take the minimum of the two
         q_values1 = self.q_net1.predict(states, actions, training=True)
         q_values2 = self.q_net2.predict(states, actions, training=True)
-        q_values = tf.minimum(q_values1, q_values2)
 
-        loss = q_values - self.temperature() * log_prob
+        q_values1 = self.combine(q_values1)
+        q_values2 = self.combine(q_values2)
+        q_values = tf.expand_dims(tf.minimum(q_values1, q_values2), axis=1)
+
+        # loss = q_values - self.temperature() * tf.exp(log_prob)
+        entropy = self.temperature() * tf.reduce_mean(log_prob, axis=1, keepdims=True)
+        # entropy = self.temperature() * log_prob
+
+        # loss = q_values - entropy
+        loss = tf.reduce_mean(entropy - q_values)
 
         # debug
-        self.log(loss_policy=loss, actions_policy=actions, q_values1=q_values1, q_values2=q_values2,
-                 q_values=q_values, distribution_mean=mean, distribution_std=std, log_prob=log_prob,
-                 temperature=self.temperature.value, entropy_policy=self.temperature.value * log_prob)
+        self.log(average=True, loss_policy=loss, actions_policy=actions, log_prob=log_prob,
+                 q_values1=q_values1, q_values2=q_values2,
+                 q_values=q_values, distribution_mean=mean, distribution_std=std,
+                 temperature=self.temperature.value, entropy_policy=entropy)
 
-        # minus sign '-' for ascent direction
-        return -loss
+        return loss
+
+    @staticmethod
+    def combine(q):
+        base = q[:, 0]
+        exp = q[:, 1]
+        return base * tf.pow(10.0, exp)
+
+    @staticmethod
+    def decompose(tensor):
+        base, exp = tf.map_fn(fn=utils.decompose_number, elems=tensor, dtype=(tf.float32, tf.float32))
+        return tf.concat([base, tf.expand_dims(exp, 1)], axis=1)
 
     # @tf.function
     def q_network_objective(self, batch):
@@ -257,25 +385,53 @@ class SACAgent(Agent):
         # compute targets
         target_q_values1 = self.target_q1.predict(next_states, next_actions, training=True)
         target_q_values2 = self.target_q2.predict(next_states, next_actions, training=True)
-        target_q_values = tf.minimum(target_q_values1, target_q_values2)
+        # target_q_values = tf.minimum(target_q_values1, target_q_values2)
+        target_q_values = tf.minimum(x=self.combine(target_q_values1),
+                                     y=self.combine(target_q_values2))
+        target_q_values = tf.expand_dims(target_q_values, axis=1)
 
-        targets = rewards * self.gamma * (1.0 - terminals) * (target_q_values - self.temperature() * log_prob)
+        entropy = self.temperature() * tf.reduce_mean(log_prob, axis=1, keepdims=True)
+
+        # targets = rewards * self.gamma * (1.0 - terminals) * (target_q_values - self.temperature() * log_prob)
+        targets = tf.stop_gradient(
+            rewards + self.gamma * (1.0 - terminals) * (target_q_values - entropy))
 
         # compute two losses, for the two Q-networks respectively
         q_values1 = self.q_net1.predict(states, actions, training=True)
         q_values2 = self.q_net2.predict(states, actions, training=True)
 
-        loss_q1 = 0.5 * losses.MSE(q_values1, targets)
-        loss_q2 = 0.5 * losses.MSE(q_values2, targets)
+        # loss_q1 = 0.5 * losses.MSE(q_values1, targets)
+        # loss_q2 = 0.5 * losses.MSE(q_values2, targets)
+        loss_q1 = self.q_loss(q_values1, targets=self.decompose(targets))
+        loss_q2 = self.q_loss(q_values2, targets=self.decompose(targets))
 
         # debug
-        self.log(loss_q1=loss_q1, loss_q2=loss_q2, actions_q=next_actions, targets=targets, distribution_std_q=std,
-                 q_values1=q_values1, q_values2=q_values2, target_q_values1=target_q_values1,
-                 target_q_values2=target_q_values2, target_q_values=target_q_values,
-                 entropy_q=self.temperature.value * log_prob,
+        self.log(average=True, loss_q1=loss_q1, loss_q2=loss_q2, actions_q=next_actions, targets=targets,
+                 distribution_std_q=std, q_values1=self.combine(q_values1), q_values2=self.combine(q_values2),
+                 target_q_values1=self.combine(target_q_values1), target_q_values2=self.combine(target_q_values2),
+                 target_q_values=target_q_values, entropy_q=entropy, terminals=terminals,
                  temperature=self.temperature.value, log_prob_q=log_prob, distribution_mean_q=mean)
 
         return loss_q1, loss_q2
+
+    def q_loss(self, q_values, targets):
+        base_loss = tf.reduce_mean((q_values[:, 0] - targets[:, 0]) ** 2)
+        exp_loss = tf.reduce_mean((q_values[:, 1] - targets[:, 1]) ** 2)
+
+        return 0.5 * (0.25 * base_loss + exp_loss / (self.q_net1.exp_scale ** 2))
+
+    def entropy_objective(self, batch):
+        states = batch[0]
+        log_prob = self.policy.predict(inputs=states)[1]
+
+        loss = -tf.reduce_mean(
+            self.log_temperature.value * tf.stop_gradient(log_prob + self.target_entropy))
+
+        # loss = tf.reduce_mean(
+        #     -self.temperature.value * tf.stop_gradient(log_prob + self.target_entropy))
+
+        return loss
+        # return loss, dict(loss_entropy=loss, temperature_log=self.log_temperature.value)
 
     def learn(self, episodes: int, timesteps: int, save_every: Union[bool, str, int] = False,
               render_every: Union[bool, str, int] = False, close=True):
@@ -359,6 +515,9 @@ class SACAgent(Agent):
                 print('closing...')
                 self.env.close()
 
+    def on_episode_end(self):
+        self.temperature.on_episode()
+
     def load_weights(self):
         print('[SAC] loading weights...')
         self.policy.load_weights()
@@ -379,12 +538,12 @@ class SACAgent(Agent):
 
 
 class PolicyNetwork(Network):
-    def __init__(self, agent: SACAgent):
+    def __init__(self, agent: SACAgent, **kwargs):
         super().__init__(agent=agent)
 
         self.distribution = self.agent.distribution_type
         self.weights_path = self.agent.weights_path['policy']
-        self.net = self.build()
+        self.net = self.build(**kwargs)
 
     @tf.function
     def predict(self, inputs: Union[tf.Tensor, List[tf.Tensor], Dict[str, tf.Tensor]], training=False):
@@ -402,32 +561,37 @@ class PolicyNetwork(Network):
             actions = tf.reshape(actions, shape=(actions.shape[1], actions.shape[0]))
 
         # mean, std are useful for debugging
-        return actions, log_prob, mean, std
+        return actions, tf.reshape(log_prob, actions.shape), mean, std
 
     def build(self, **kwargs) -> Model:
+        dist_args = kwargs.pop('distribution', dict(bias_initializer='zeros', kernel_initializer='glorot_uniform'))
+
         inputs = self._get_input_layers()
         last_layer = self.layers(inputs, **kwargs)
-        actions = self.get_distribution_layer(distribution=self.distribution, layer=last_layer)
+        actions = self.get_distribution_layer(distribution=self.distribution, layer=last_layer, **dist_args)
 
         return Model(inputs, outputs=actions, name='Policy-Network')
 
     def layers(self, inputs: Dict[str, Input], **kwargs) -> Layer:
         units = kwargs.get('units', 64)
         num_layers = kwargs.get('num_layers', kwargs.get('layers', 2))  # 'num_layers' or 'layers'
-        activation = kwargs.get('activation', tf.nn.relu)
         dropout_rate = kwargs.get('dropout', 0.0)
+        normalization = kwargs.get('normalization', 'layer')
+        args = dict(activation=kwargs.get('activation', tf.nn.tanh),
+                    bias_initializer=kwargs.get('bias_initializer', 'glorot_uniform'),
+                    kernel_initializer=kwargs.get('kernel_initializer', 'glorot_normal'))
 
-        x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(inputs['state'])
-        x = BatchNormalization()(x)
+        x = Dense(units, **args)(inputs['state'])
+        x = utils.normalization_layer(x, name=normalization)
 
         for _ in range(num_layers):
             if dropout_rate > 0.0:
-                x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(x)
+                x = Dense(units, **args)(x)
                 x = Dropout(rate=dropout_rate)(x)
             else:
-                x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(x)
+                x = Dense(units, **args)(x)
 
-            x = BatchNormalization()(x)
+            x = utils.normalization_layer(x, name=normalization)
 
         return x
 
@@ -446,12 +610,44 @@ class PolicyNetwork(Network):
 
 
 class QNetwork(Network):
-    def __init__(self, agent: SACAgent, weights_path: str):
+    def __init__(self, agent: SACAgent, weights_path: str, **kwargs):
         super().__init__(agent=agent)
 
         self.discrete_action_space = self.agent.distribution_type == 'categorical'
         self.weights_path = weights_path
-        self.net = self.build()
+
+        self.exp_scale = None
+        self.net = self.build(**kwargs)
+
+    # @tf.function
+    # def predict(self, states: Union[tf.Tensor, List[tf.Tensor]], actions: Union[tf.Tensor, List[tf.Tensor]],
+    #             training=False):
+    #     q_values = self.net(inputs=dict(state=states, action=actions), training=training)
+    #     tf.print(q_values.shape)
+    #     breakpoint()
+    #
+    #     if self.discrete_action_space:
+    #         # index |A|-dimensional q-values by given `actions`
+    #         num_classes = self.agent.num_classes
+    #         shape = (q_values.shape[0], 1)
+    #
+    #         q_indices = tf.concat([
+    #             tf.reshape(tf.range(start=0, limit=shape[0], dtype=tf.int32), shape),
+    #             tf.cast(actions, dtype=tf.int32)
+    #         ], axis=1)
+    #
+    #         tf.print(q_indices.shape)
+    #         breakpoint()
+    #
+    #         # select 1 q-value per action (select corresponding bases and exponents)
+    #         selected_q_values = tf.gather_nd(q_values, q_indices)
+    #         tf.print(selected_q_values.shape)
+    #         breakpoint()
+    #
+    #         # TODO: expand_dims
+    #         return selected_q_values
+    #
+    #     return q_values
 
     @tf.function
     def predict(self, states: Union[tf.Tensor, List[tf.Tensor]], actions: Union[tf.Tensor, List[tf.Tensor]],
@@ -460,6 +656,7 @@ class QNetwork(Network):
 
         if self.discrete_action_space:
             # index |A|-dimensional q-values by given `actions`
+            num_classes = self.agent.num_classes
             shape = (q_values.shape[0], 1)
 
             q_indices = tf.concat([
@@ -467,18 +664,23 @@ class QNetwork(Network):
                 tf.cast(actions, dtype=tf.int32)
             ], axis=1)
 
-            # select 1 q-value per action
-            selected_q_values = tf.gather_nd(q_values, q_indices)
-            return selected_q_values
+            # select 1 q-value per action (select corresponding bases and exponents)
+            selected_bases = tf.gather_nd(q_values[:, :num_classes], q_indices)
+            selected_exp = tf.gather_nd(q_values[:, num_classes:], q_indices)
+
+            return tf.stack([selected_bases, selected_exp], axis=1)
 
         return q_values
 
     def build(self, **kwargs) -> Model:
+        self.exp_scale = tf.constant(kwargs.pop('exponent_scale', 3.0), dtype=tf.float32)
+        q_args = kwargs.pop('output', dict(bias_initializer='zeros', kernel_initializer='glorot_uniform'))
+
         inputs = self._get_input_layers()
         inputs['action'] = Input(shape=self.agent.action_shape, dtype=tf.float32, name='action')
 
         last_layer = self.layers(inputs, **kwargs)
-        q_values = self.output_layer(last_layer)
+        q_values = self.output_layer(last_layer, **q_args)
 
         return Model(inputs, outputs=q_values, name='Q-Network')
 
@@ -486,54 +688,85 @@ class QNetwork(Network):
         units = kwargs.get('units', 64)
         units_action = kwargs.get('units_action', 16)
         num_layers = kwargs.get('num_layers', kwargs.get('layers', 2))  # 'num_layers' or 'layers'
-        activation = kwargs.get('activation', tf.nn.relu)
         dropout_rate = kwargs.get('dropout', 0.0)
+        normalization = kwargs.get('normalization', 'layer')
 
-        state_branch = self._branch(inputs['state'], units, num_layers, activation, dropout_rate)
-        action_branch = self._branch(inputs['action'], units_action, num_layers, activation, dropout_rate)
+        args = dict(activation=kwargs.get('activation', tf.nn.swish),
+                    bias_initializer=kwargs.get('bias_initializer', 'glorot_uniform'),
+                    kernel_initializer=kwargs.get('kernel_initializer', 'glorot_normal'))
 
-        x = Dense(units, bias_initializer='glorot_uniform',
-                  activation=activation)(concatenate([state_branch, action_branch]))
-        x = BatchNormalization()(x)
+        state_branch = self._branch(inputs['state'], units, num_layers, dropout_rate, normalization, **args)
+        action_branch = self._branch(inputs['action'], units_action, num_layers, dropout_rate, normalization, **args)
+
+        x = Dense(units, **args)(concatenate([state_branch, action_branch]))
+        x = utils.normalization_layer(x, name=normalization)
         return x
 
-    def output_layer(self, layer: Layer) -> Layer:
+    # def output_layer(self, layer: Layer, **kwargs) -> Layer:
+    #     if self.discrete_action_space:
+    #         assert self.agent.num_actions == 1
+    #         num_classes = self.agent.num_classes
+    #
+    #         # # q_values = q_bases * 10^q_exp
+    #         q_base = Dense(units=num_classes, activation=tf.nn.tanh, name='q-base', **kwargs)(layer)
+    #         q_exp = Dense(units=num_classes, activation=lambda x: self.exp_scale * tf.nn.sigmoid(x), name='q-exponent',
+    #                       **kwargs)(layer)
+    #
+    #         # q_values = Dense(units=self.agent.num_classes, bias_initializer='glorot_uniform',
+    #         #                  name='discrete-q-values')(layer)
+    #         # return q_values
+    #         return concatenate([q_base, q_exp], axis=1)
+    #
+    #         # # index |A|-dimensional q-values by input `actions`
+    #         # shape = (q_values.shape[0], 1)
+    #         #
+    #         # q_indices = tf.concat([
+    #         #     tf.reshape(tf.range(start=0, limit=shape[0], dtype=tf.int32), shape),
+    #         #     tf.cast(inputs['action'], dtype=tf.int32)
+    #         # ], axis=1)
+    #         #
+    #         # # select 1 q-value per action
+    #         # selected_q_values = tf.gather_nd(q_values, q_indices)
+    #         # # selected_q_values.set_shape(shape)
+    #         # return selected_q_values
+    #     else:
+    #         # q_values = Dense(units=1, bias_initializer='glorot_uniform', name='continuous-q-values')(layer)
+    #         q_base = Dense(units=1, activation=tf.nn.tanh, name='q-base', **kwargs)(layer)
+    #         q_exp = Dense(units=1, activation=lambda x: self.exp_scale * tf.nn.sigmoid(x), name='q-exponent',
+    #                       **kwargs)(layer)
+    #
+    #         return concatenate([q_base, q_exp], axis=1)
+
+    def output_layer(self, layer: Layer, **kwargs) -> Layer:
         if self.discrete_action_space:
-            assert self.agent.num_actions == 1
+            num_classes = self.agent.num_classes
 
-            q_values = Dense(units=self.agent.num_classes, bias_initializer='glorot_uniform',
-                             name='discrete-q-values')(layer)
-            return q_values
+            # # q_values = q_bases * 10^q_exp
+            q_base = Dense(units=num_classes, activation=tf.nn.tanh, name='q-base', **kwargs)(layer)
+            q_exp = Dense(units=num_classes, activation=lambda x: self.exp_scale * tf.nn.sigmoid(x), name='q-exponent',
+                          **kwargs)(layer)
 
-            # # index |A|-dimensional q-values by input `actions`
-            # shape = (q_values.shape[0], 1)
-            #
-            # q_indices = tf.concat([
-            #     tf.reshape(tf.range(start=0, limit=shape[0], dtype=tf.int32), shape),
-            #     tf.cast(inputs['action'], dtype=tf.int32)
-            # ], axis=1)
-            #
-            # # select 1 q-value per action
-            # selected_q_values = tf.gather_nd(q_values, q_indices)
-            # # selected_q_values.set_shape(shape)
-            # return selected_q_values
+            return concatenate([q_base, q_exp], axis=1)
         else:
-            q_values = Dense(units=1, bias_initializer='glorot_uniform', name='continuous-q-values')(layer)
+            q_base = Dense(units=1, activation=tf.nn.tanh, name='q-base', **kwargs)(layer)
+            q_exp = Dense(units=1, activation=lambda x: self.exp_scale * tf.nn.sigmoid(x), name='q-exponent',
+                          **kwargs)(layer)
 
-        return q_values
+            return concatenate([q_base, q_exp], axis=1)
 
-    def _branch(self, input_layer: Input, units: int, num_layers: int, activation, dropout_rate: float) -> Layer:
-        x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(input_layer)
-        x = BatchNormalization()(x)
+    def _branch(self, input_layer: Input, units: int, num_layers: int, dropout_rate: float,
+                normalization: str, **kwargs) -> Layer:
+        x = Dense(units, **kwargs)(input_layer)
+        x = utils.normalization_layer(x, name=normalization)
 
         for _ in range(num_layers):
             if dropout_rate > 0.0:
-                x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(x)
+                x = Dense(units, **kwargs)(x)
                 x = Dropout(rate=dropout_rate)(x)
             else:
-                x = Dense(units, bias_initializer='glorot_uniform', activation=activation)(x)
+                x = Dense(units, **kwargs)(x)
 
-            x = BatchNormalization()(x)
+            x = utils.normalization_layer(x, name=normalization)
 
         return x
 
