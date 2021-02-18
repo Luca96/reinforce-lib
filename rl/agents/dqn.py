@@ -383,11 +383,11 @@ class DQNetwork(Network):
                     units=kwargs.get('units', 64))
 
         x = NoisyDense(**args)(inputs['state'])
-        x = utils.normalization_layer(x, name=normalization)
+        x = utils.apply_normalization(x, name=normalization)
 
         for _ in range(num_layers):
             x = NoisyDense(**args)(x)
-            x = utils.normalization_layer(x, name=normalization)
+            x = utils.apply_normalization(x, name=normalization)
 
         return x
 

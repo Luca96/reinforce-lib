@@ -10,14 +10,13 @@ from rl import utils
 from typing import List, Dict, Union
 
 
-# TODO: more unified agent interface across implemented agents
 # TODO: actor-critic agent interface (to include policy/value network as well as loading/saving)?
+# TODO: save agent configuration as json
 class Agent:
     """Agent abstract class"""
     def __init__(self, env: Union[gym.Env, str], batch_size: int, seed=None, weights_dir='weights', name='agent',
-                 log_mode='summary', drop_batch_remainder=False, skip_data=0, consider_obs_every=1, shuffle=True,
-                 evaluation_dir='evaluation', shuffle_batches=False, traces_dir: str = None,
-                 summary_keys: List[str] = None):
+                 log_mode='summary', drop_batch_remainder=False, skip_data=0, consider_obs_every=1,
+                 shuffle_batches=False, shuffle=True, traces_dir: str = None, summary_keys: List[str] = None):
 
         if isinstance(env, str):
             self.env = gym.make(env)
@@ -45,9 +44,8 @@ class Agent:
         self.shuffle_batches = shuffle_batches
         self.shuffle = shuffle
 
-        # Saving stuff (weights, config, evaluation):
+        # Saving stuff:
         self.base_path = os.path.join(weights_dir, name)
-        self.evaluation_path = utils.makedir(os.path.join(evaluation_dir, name))
         self.weights_path = dict(policy=os.path.join(self.base_path, 'policy_net'),
                                  value=os.path.join(self.base_path, 'value_net'))
 
@@ -61,7 +59,7 @@ class Agent:
     def set_random_seed(self, seed):
         """Sets the random seed for tensorflow, numpy, python's random, and the environment"""
         if seed is not None:
-            assert 0 <= seed < 2 ** 32
+            assert 0 <= seed < 2**32
 
             tf.random.set_seed(seed)
             np.random.seed(seed)
@@ -86,7 +84,6 @@ class Agent:
     def learn(self, *args, **kwargs):
         raise NotImplementedError
 
-    # TODO: re-design `evaluation()` procedure
     def evaluate(self, episodes: int, timesteps: int, render=True, seeds=None) -> list:
         rewards = []
         sample_seed = False
@@ -160,8 +157,8 @@ class Agent:
 
         return preprocess_fn
 
-    def log(self, average=False, **kwargs):
-        self.statistics.log(average=average, **kwargs)
+    def log(self, **kwargs):
+        self.statistics.log(**kwargs)
 
     def write_summaries(self):
         try:

@@ -582,7 +582,7 @@ class PolicyNetwork(Network):
                     kernel_initializer=kwargs.get('kernel_initializer', 'glorot_normal'))
 
         x = Dense(units, **args)(inputs['state'])
-        x = utils.normalization_layer(x, name=normalization)
+        x = utils.apply_normalization(x, name=normalization)
 
         for _ in range(num_layers):
             if dropout_rate > 0.0:
@@ -591,7 +591,7 @@ class PolicyNetwork(Network):
             else:
                 x = Dense(units, **args)(x)
 
-            x = utils.normalization_layer(x, name=normalization)
+            x = utils.apply_normalization(x, name=normalization)
 
         return x
 
@@ -699,7 +699,7 @@ class QNetwork(Network):
         action_branch = self._branch(inputs['action'], units_action, num_layers, dropout_rate, normalization, **args)
 
         x = Dense(units, **args)(concatenate([state_branch, action_branch]))
-        x = utils.normalization_layer(x, name=normalization)
+        x = utils.apply_normalization(x, name=normalization)
         return x
 
     # def output_layer(self, layer: Layer, **kwargs) -> Layer:
@@ -757,7 +757,7 @@ class QNetwork(Network):
     def _branch(self, input_layer: Input, units: int, num_layers: int, dropout_rate: float,
                 normalization: str, **kwargs) -> Layer:
         x = Dense(units, **kwargs)(input_layer)
-        x = utils.normalization_layer(x, name=normalization)
+        x = utils.apply_normalization(x, name=normalization)
 
         for _ in range(num_layers):
             if dropout_rate > 0.0:
@@ -766,7 +766,7 @@ class QNetwork(Network):
             else:
                 x = Dense(units, **kwargs)(x)
 
-            x = utils.normalization_layer(x, name=normalization)
+            x = utils.apply_normalization(x, name=normalization)
 
         return x
 

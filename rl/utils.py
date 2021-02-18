@@ -37,6 +37,9 @@ OPTIMIZERS = dict(adadelta=tf.keras.optimizers.Adadelta,
                   rmsprop=tf.keras.optimizers.RMSprop,
                   sgd=tf.keras.optimizers.SGD)
 
+# Types
+DynamicType = Union[float, LearningRateSchedule, DynamicParameter]
+
 
 def get_optimizer_by_name(name: str, *args, **kwargs) -> tf.keras.optimizers.Optimizer:
     optimizer_class = OPTIMIZERS.get(name.lower(), None)
@@ -56,7 +59,7 @@ def get_normalization_layer(name: str, **kwargs) -> tf.keras.layers.Layer:
         return tf.keras.layers.LayerNormalization(**kwargs)
 
 
-def normalization_layer(layer: tf.keras.layers.Layer, name: str, **kwargs) -> tf.keras.layers.Layer:
+def apply_normalization(layer: tf.keras.layers.Layer, name: str, **kwargs) -> tf.keras.layers.Layer:
     if name == 'batch':
         return tf.keras.layers.BatchNormalization(**kwargs)(layer)
 
@@ -170,7 +173,7 @@ def polyak_averaging(model: tf.keras.Model, old_weights: list, alpha=0.99):
 
 
 def polyak_averaging2(model, target, alpha: float):
-    for var, var_target in zip(model.trainable_variables(), target.trainable_variables()):
+    for var, var_target in zip(model.trainable_variables, target.trainable_variables):
         value = alpha * var_target + (1.0 - alpha) * var
         var_target.assign(value, read_value=False)
 
@@ -378,21 +381,52 @@ def space_to_flat_spec2(space: gym.Space, name: str) -> Dict[str, dict]:
 # -------------------------------------------------------------------------------------------------
 
 # TODO: @tf.function
+# def to_tensor(x, expand_axis: Union[int, None, False] = 0):
+#     if isinstance(x, dict):
+#         t = dict()
+#         should_expand = isinstance(expand_axis, int)
+#
+#         for k, v in x.items():
+#             if should_expand:
+#                 t[k] = tf.expand_dims(to_float(v), axis=expand_axis)
+#             else:
+#                 t[k] = to_float(v)
+#
+#         tf.nest.map_structure
+#
+#         return t
+#     else:
+#         x = to_float(x)
+#         # x = tf.convert_to_tensor(x)
+#
+#         if isinstance(expand_axis, int):
+#             x = tf.expand_dims(x, axis=expand_axis)
+#
+#         return x
+
+@tf.function
 def to_tensor(x, expand_axis=0):
     if isinstance(x, dict):
-        t = dict()
-
-        for k, v in x.items():
-            v = to_float(v)
-            t[k] = tf.expand_dims(tf.convert_to_tensor(v), axis=expand_axis)
-
-        return t
+        return tf.nest.map_structure(lambda v: to_tensor(v, expand_axis), x)
     else:
         x = to_float(x)
-        x = tf.convert_to_tensor(x)
+
+    if isinstance(expand_axis, int):
         x = tf.expand_dims(x, axis=expand_axis)
 
-        return x
+    return x
+
+
+def index_tensor(tensor, indices):
+    """Index some `tensor` by some other tensor (`indices`)"""
+    shape = (tensor.shape[0], 1)
+
+    indices = tf.concat([
+        tf.reshape(tf.range(start=0, limit=shape[0], dtype=tf.int32), shape),
+        tf.cast(indices, dtype=tf.int32)
+    ], axis=1)
+
+    return tf.gather_nd(tensor, indices)
 
 
 def tf_replace_nan(tensor, value=0.0, dtype=tf.float32):
@@ -473,10 +507,15 @@ def tf_shuffle_tensors(*tensors, indices=None):
     return [tf.gather(t, indices) for t in tensors]
 
 
-def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batches=False, seed=None,
-                    drop_remainder=False, map_fn=None, prefetch_size=2, num_shards=1, skip=0, shuffle=False):
+# TODO: rename to `tensors_to_batches`
+# TODO: add `filter` option
+def data_to_batches(tensors: Union[list, dict, tuple], batch_size: int, shuffle_batches=False, take: int = None,
+                    drop_remainder=False, map_fn=None, prefetch_size=2, num_shards=1, skip=0, seed=None, shuffle=False):
     """Transform some tensors data into a dataset of mini-batches"""
     dataset = tf.data.Dataset.from_tensor_slices(tensors).skip(count=skip)
+
+    if isinstance(take, int):
+        dataset = dataset.take(count=take)
 
     if shuffle:
         dataset = dataset.shuffle(buffer_size=batch_size, seed=seed, reshuffle_each_iteration=True)
@@ -492,14 +531,14 @@ def data_to_batches(tensors: Union[List, Tuple], batch_size: int, shuffle_batche
         dataset = ds
 
     if map_fn is not None:
-        # 'map_fn' is mainly used for 'data augmentation'
+        # 'map_fn' is mainly used for 'data augmentation' and 'pre-processing'
         dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE,
                               deterministic=True)
 
     dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
 
     if shuffle_batches:
-        dataset = dataset.shuffle(buffer_size=batch_size, seed=seed)
+        dataset = dataset.shuffle(buffer_size=batch_size, seed=seed, reshuffle_each_iteration=True)
 
     return dataset.prefetch(buffer_size=prefetch_size)
 
