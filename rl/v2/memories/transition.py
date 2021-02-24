@@ -1,4 +1,5 @@
 
+import numpy as np
 import tensorflow as tf
 
 from typing import Union, List, Tuple, Dict
@@ -24,7 +25,7 @@ class TransitionSpec:
             self.specs['action'] = self.get_spec(spec=action)
 
         if reward is True:
-            self.specs['reward'] = dict(shape=(1, 1), dtype=tf.float32)
+            self.specs['reward'] = dict(shape=(1,), dtype=np.float32)
 
         elif (reward is not None) and (reward is not False):
             self.specs['reward'] = self.get_spec(spec=reward)
@@ -33,7 +34,7 @@ class TransitionSpec:
         #     self.specs['discount'] = self.get_spec(spec=discount)
 
         if terminal is True:
-            self.specs['terminal'] = dict(shape=(1, 1), dtype=tf.float32)
+            self.specs['terminal'] = dict(shape=(1,), dtype=np.float32)
 
         elif (terminal is not None) and (terminal is not False):
             self.specs['terminal'] = self.get_spec(spec=terminal)
@@ -62,12 +63,14 @@ class TransitionSpec:
 
     def get_spec(self, spec) -> dict:
         if isinstance(spec, tuple):
-            return dict(shape=(1,) + spec, dtype=tf.float32)
+            # return dict(shape=(1,) + spec, dtype=tf.float32)
+            return dict(shape=spec, dtype=np.float32)
 
         elif isinstance(spec, dict):
             if 'shape' in spec:
                 assert isinstance(spec['shape'], tuple)
-                return dict(shape=(1,) + spec['shape'], dtype=spec.get('dtype', tf.float32))
+                # return dict(shape=(1,) + spec['shape'], dtype=spec.get('dtype', tf.float32))
+                return dict(shape=spec['shape'], dtype=spec.get('dtype', np.float32))
             else:
                 new_spec = dict()
 
@@ -86,26 +89,3 @@ class TransitionSpec:
 
     def items(self):
         return self.specs.items()
-
-    # def add_spec(self, name: str, spec):
-    #     if spec is None:
-    #         return
-    #         # raise ValueError(f'Spec "{prefix}_{name}" = None, was found. Remove or define it.')
-    #
-    #     if isinstance(spec, tuple):
-    #         self._check_spec(name)
-    #         self.specs[name] = dict(shape=(1,) + spec, dtype=tf.float32)
-    #
-    #     elif isinstance(spec, dict):
-    #         if 'shape' in spec:
-    #             self._check_spec(name)
-    #             self.specs[name] = dict(shape=(1,) + spec['shape'], dtype=spec.get('dtype', tf.float32))
-    #         else:
-    #             for k, v in spec.items():
-    #                 self.add_spec(name=f'{name}_{k}', spec=v)
-    #     else:
-    #         raise ValueError(f"`Spec` should be one of 'dict', 'tuple', or 'None' not '{type(spec)}'.")
-    #
-    # def _check_spec(self, name):
-    #     if name in self.specs:
-    #         raise ValueError(f'A spec named "{name}" was already added. Please use another name.')

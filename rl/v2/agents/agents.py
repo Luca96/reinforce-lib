@@ -159,8 +159,6 @@ class Agent:
             if terminal:
                 state = self.env.reset()
                 state = self.preprocess(state, evaluation=False)
-
-                self.write_summaries()
                 print(f'Explorative episode terminated. Steps left: {steps - 1}.')
 
             steps -= 1
@@ -324,7 +322,6 @@ class Agent:
                     state = self.preprocess(state, evaluation=True)
 
             self.on_episode_end(episode, episode_reward=episodic_rewards[episode - 1], evaluation=True)
-            self.write_summaries()
 
         if should_close:
             self.env.close()

@@ -3,8 +3,9 @@
 import os
 import gym
 import time
-import tensorflow as tf
 import tensorflow_probability as tfp
+import tensorflow as tf
+import numpy as np
 
 from tensorflow.keras.layers import *
 
@@ -119,9 +120,9 @@ class PPO(Agent):
         data = self.memory.get_data()
 
         self.policy.fit(x=data, y=None, batch_size=self.batch_size, steps_per_epoch=self.optimization_steps[0],
-                        shuffle=True, verbose=1)
+                        shuffle=True, verbose=0)
         self.value.fit(x=data, y=None, batch_size=self.batch_size, steps_per_epoch=self.optimization_steps[1],
-                       shuffle=True, verbose=1)
+                       shuffle=True, verbose=0)
 
         print(f'Update in {round(time.time() - t0, 3)}s')
 
@@ -335,7 +336,7 @@ class ValueNetwork(Network):
         else:
             loss = base_loss + exp_loss
 
-        return loss, dict(loss_base=base_loss, loss_exp=exp_loss,  loss=loss)
+        return loss, dict(loss_base=base_loss, loss_exp=exp_loss, loss=loss)
 
 
 class GAEMemory(EpisodicMemory):
@@ -349,8 +350,8 @@ class GAEMemory(EpisodicMemory):
         if 'advantage' in self.data:
             raise ValueError('Key "advantage" is reserved!')
 
-        self.data['return'] = tf.Variable(initial_value=tf.zeros_like(self.data['value']), trainable=False)
-        self.data['advantage'] = tf.Variable(initial_value=tf.zeros(shape=(self.size, 1)), trainable=False)
+        self.data['return'] = np.zeros_like(self.data['value'])
+        self.data['advantage'] = np.zeros(shape=(self.size, 1), dtype=np.float32)
 
         self.last_index = 0
         self.agent = agent
@@ -382,23 +383,22 @@ class GAEMemory(EpisodicMemory):
         if self.last_index > self.index:
             k = self.size - self.last_index
 
-            self.data['return'][self.last_index:].assign(returns[:k])
-            self.data['return'][:self.index].assign(returns[k:])
+            self.data['return'][self.last_index:] = returns[:k]
+            self.data['return'][:self.index] = returns[k:]
 
-            self.data['advantage'][self.last_index:].assign(advantages[:k])
-            self.data['advantage'][:self.index].assign(advantages[k:])
+            self.data['advantage'][self.last_index:] = advantages[:k]
+            self.data['advantage'][:self.index] = advantages[k:]
         else:
-            self.data['return'][self.last_index:self.index].assign(returns)
-            self.data['advantage'][self.last_index:self.index].assign(advantages)
+            self.data['return'][self.last_index:self.index] = returns
+            self.data['advantage'][self.last_index:self.index] = advantages
 
         # update index
         self.last_index = self.index
 
         # debug
-        debug = dict(returns=returns[:, 0] * tf.pow(10.0, returns[:, 1]), advantages_normalized=advantages,
-                     advantages=adv, values_base=v_base, values=values, returns_base=returns[:, 0],
-                     returns_exp=returns[:, 1], values_exp=v_exp)
-        return debug
+        return dict(returns=returns[:, 0] * tf.pow(10.0, returns[:, 1]), advantages_normalized=advantages,
+                    advantages=adv, values_base=v_base, values=values, returns_base=returns[:, 0],
+                    returns_exp=returns[:, 1], values_exp=v_exp)
 
     def compute_returns(self, rewards: tf.Tensor):
         returns = utils.rewards_to_go(rewards, discount=self.agent.gamma)
@@ -418,7 +418,8 @@ def lunr_lner():
     policy = dict(activation=tf.nn.swish, num_layers=4, units=64)
     value = dict(activation=tf.nn.tanh, num_layers=4, units=64, exponent_scale=4.0)
 
-    a = PPO(env='LunarLanderContinuous-v2', name='ppo-lunar', batch_size=64, gamma=1.0, lambda_=1.0, memory_size=8, entropy_strength=0.001,
+    a = PPO(env='LunarLanderContinuous-v2', name='ppo-lunar', batch_size=64, gamma=1.0, lambda_=1.0, memory_size=8,
+            entropy_strength=0.001,
             optimization_steps=(4, 4), policy_lr=3e-4, policy=policy, value=value, seed=42)
     a.summary()
     a.learn(1000, 200, evaluation=dict(freq=50, episodes=10))
@@ -429,7 +430,7 @@ def cartpole():
     value = dict(activation=tf.nn.swish, exponent_scale=3.0)
 
     a = PPO(env='CartPole-v0', batch_size=32, gamma=1.0, lambda_=1.0, memory_size=4, entropy_strength=0.0,
-            optimization_steps=(4//2, 4//2), policy_lr=3e-4, policy=policy, value=value, seed=42)
+            optimization_steps=(4 // 2, 4 // 2), policy_lr=3e-4, policy=policy, value=value, seed=42)
     a.learn(1000, 200)
 
 

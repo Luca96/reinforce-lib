@@ -11,7 +11,7 @@ from rl.parameters import DynamicParameter
 
 from rl.v2.agents import Agent
 from rl.v2.memories import TransitionSpec
-from rl.v2.memories.episodic import EpisodicMemory2
+from rl.v2.memories.episodic import EpisodicMemory
 from rl.v2.networks import ValueNetwork, PolicyNetwork
 
 from rl.environments.gym.parallel import ParallelEnv
@@ -392,7 +392,7 @@ class CriticNetwork(ValueNetwork):
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
 
 
-class ParallelGAEMemory(EpisodicMemory2):
+class ParallelGAEMemory(EpisodicMemory):
 
     def __init__(self, *args, agent: A2C, **kwargs):
         super().__init__(*args, **kwargs)

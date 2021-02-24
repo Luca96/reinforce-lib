@@ -149,12 +149,6 @@ class DQN(Agent):
             self.update()
             self.update_target_network()
 
-    def on_episode_end(self, episode: int, episode_reward: float, evaluation=False):
-        super().on_episode_end(episode, episode_reward, evaluation=evaluation)
-
-        if not evaluation:
-            self.memory.ensure_size()
-
     def save_weights(self):
         self.dqn.save_weights(filepath=self.weights_path['dqn'])
 
