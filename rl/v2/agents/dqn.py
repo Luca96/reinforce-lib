@@ -6,7 +6,7 @@ import time
 import numpy as np
 import tensorflow as tf
 
-from typing import Union, List, Dict
+from typing import Union, List, Dict, Tuple
 
 from rl import utils
 from rl.parameters import DynamicParameter
@@ -17,10 +17,9 @@ from rl.v2.networks.q import DQNetwork
 
 
 class DQN(Agent):
-    # initial_random_batches = 0,
     def __init__(self, *args, name='dqn-agent', lr: utils.DynamicType = 3e-4, optimizer='adam', memory_size=1024,
                  policy='e-greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = 1.0, load=False,
-                 update_target_weights: Union[bool, int] = False, polyak: utils.DynamicType = 0.995,
+                 update_target_network: Union[bool, int] = False, polyak: utils.DynamicType = 0.995,
                  network: dict = None, update_on_timestep=True, **kwargs):
         assert policy.lower() in ['boltzmann', 'softmax', 'e-greedy', 'greedy']
         super().__init__(*args, name=name, **kwargs)
@@ -31,11 +30,11 @@ class DQN(Agent):
         self.polyak = DynamicParameter.create(value=polyak)
         self.update_on_timestep = bool(update_on_timestep)
 
-        if not update_target_weights and self.polyak.value == 1.0:
+        if not update_target_network and self.polyak.value == 1.0:
             self.should_update_target = False
         else:
             self.should_update_target = True
-            self.update_target_freq = int(update_target_weights)
+            self.update_target_freq = int(update_target_network)
             self._update_target_freq = self.update_target_freq  # copy
 
         self._init_action_space()
@@ -96,6 +95,10 @@ class DQN(Agent):
             action = self.dqn.act(state)
 
         return action, other, debug
+
+    def act_randomly(self, state) -> Tuple[tf.Tensor, dict, dict]:
+        actions = tf.random.categorical(logits=tf.ones(shape=(1, self.num_classes)), num_samples=1, seed=self.seed)
+        return actions, {}, {}
 
     def learn(self, *args, **kwargs):
         t0 = time.time()
@@ -163,9 +166,9 @@ class DQN(Agent):
 
 
 if __name__ == '__main__':
-    agent = DQN(env='CartPole-v0', batch_size=32, policy='e-greedy', lr=1e-3,
+    agent = DQN(env='CartPole-v0', batch_size=32, policy='e-greedy', lr=1e-3*2,
                 log_mode=False, update_on_timestep=False, seed=42)
     agent.summary()
 
-    agent.learn(episodes=200+300, timesteps=200, render=False,
+    agent.learn(episodes=500, timesteps=200, render=False,
                 evaluation=dict(episodes=100, freq=500))

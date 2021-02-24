@@ -7,8 +7,8 @@ from typing import Union, List, Tuple, Dict
 class TransitionSpec:
     """Defines the structure of a transition"""
 
-    def __init__(self, state, action, reward: Union[dict, bool, None] = True, terminal: Union[dict, bool, None] = True,
-                 other: dict = None, info: dict = None, next_state=False):
+    def __init__(self, state, action, reward: Union[dict, bool, tuple, None] = True, info: dict = None,
+                 terminal: Union[dict, bool, tuple, None] = True, other: dict = None, next_state=False):
         self.specs = dict()
 
         if state is not None:

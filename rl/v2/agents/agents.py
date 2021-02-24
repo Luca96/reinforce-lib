@@ -3,18 +3,21 @@ import gym
 import time
 import json
 import random
-import numpy as np
+import multiprocessing as mp
 import tensorflow as tf
+import numpy as np
 
 from rl import utils
-from rl.v2.memories import Memory, TransitionSpec
 from rl.parameters import DynamicParameter
+
+from rl.v2.memories import Memory, TransitionSpec
 
 from typing import List, Dict, Union, Tuple
 
 
-# TODO: all dynamicParameters should call `on_episode()`, use @property hyper-parms which returns a list of hp.
-# TODO: introduce further abstractions: e.g. Q-Agent, PG-Agent, ...
+# TODO: gym.env wrapper that supports "reproucible" sampling, and has suitable "specs" for state and action-spaces
+#  + basic pre-processing (e.g. conversion to numpy/tensor)?
+# TODO: evaluation callbacks?
 class Agent:
     """Agent abstract class"""
     # TODO: load, ...
@@ -68,8 +71,10 @@ class Agent:
         self.config_path = os.path.join(self.base_path, 'config.json')
         self.config = dict()
 
-        # Statistics:
-        self.statistics = utils.Summary(mode=log_mode, name=name, keys=summary_keys)
+        # Statistics (tf.summary):
+        self.queue = mp.Queue()
+        self.stop_event = mp.Event()
+        self.statistics = utils.SummaryProcess(self.queue, self.stop_event, mode=log_mode, name=name, keys=summary_keys)
 
     @property
     def transition_spec(self) -> TransitionSpec:
@@ -115,23 +120,58 @@ class Agent:
         """
         raise NotImplementedError
 
+    def act_randomly(self, state) -> Tuple[tf.Tensor, dict, dict]:
+        """Agent draws a random (or explorative) action.
+            - Used in `explore()`
+        """
+        raise NotImplementedError
+
     def record(self, *args, **kwargs):
         pass
 
     def update(self):
         raise NotImplementedError
 
-    def explore(self, *args, **kwargs):
+    def explore(self, steps: int):
         """Random exploration steps before training"""
-        # TODO: use pre-defined (even user-defined) exploration policies/agents (e.g. random, ???)
-        # TODO: method `act_randomly`....
-        raise NotImplementedError
+        if steps <= 0:
+            return
+
+        state = self.env.reset()
+        state = self.preprocess(state, evaluation=False)
+
+        while steps > 0:
+            action, other, debug = self.act_randomly(state)
+            action_env = self.convert_action(action)
+
+            for _ in range(self.repeat_action):
+                next_state, reward, terminal, info = self.env.step(action=action_env)
+
+                if terminal:
+                    break
+
+            transition = dict(state=state, action=action, reward=reward, next_state=next_state,
+                              terminal=terminal, **(info or {}), **(other or {}))
+
+            self.memory.store(transition)
+            self.log(random_action_env=action_env, random_action=action, **debug)
+
+            if terminal:
+                state = self.env.reset()
+                state = self.preprocess(state, evaluation=False)
+
+                self.write_summaries()
+                print(f'Explorative episode terminated. Steps left: {steps - 1}.')
+
+            steps -= 1
 
     def learn(self, episodes: int, timesteps: int, render: Union[bool, int, None] = False, should_close=True,
-              evaluation: Union[dict, bool] = None, should_explore=False, save=True):
+              evaluation: Union[dict, bool] = None, exploration_steps=0, save=True):
         """Training loop"""
         assert episodes > 0
         assert timesteps > 0
+
+        self.on_start()
 
         # Render:
         if render is True:
@@ -163,8 +203,7 @@ class Agent:
             should_save = False
 
         # Exploration:
-        if should_explore:
-            self.explore()
+        self.explore(steps=int(exploration_steps))
 
         # Learning-loop:
         for episode in range(1, episodes + 1):
@@ -217,7 +256,6 @@ class Agent:
                     state = self.preprocess(state)
 
             self.on_episode_end(episode, episode_reward)
-            self.write_summaries()
 
             if should_evaluate:
                 eval_rewards = self.evaluate(**evaluation)
@@ -311,20 +349,16 @@ class Agent:
         return utils.to_tensor(state, expand_axis=0)
 
     def log(self, average=False, **kwargs):
-        self.statistics.log(average=average, **kwargs)
+        if not self.statistics.should_log:
+            return
+
+        self.queue.put(dict(average=average, **kwargs))
 
     def log_transition(self, transition: dict):
         self.log(reward=transition['reward'], action=transition['action'])
 
     def log_dynamic_parameters(self):
         self.log(**({k: p.value for k, p in self.dynamic_parameters.items()}))
-
-    def write_summaries(self):
-        try:
-            self.statistics.write_summaries()
-        except Exception as e:
-            print('[write_summaries] error.')
-            print(e)
 
     def summary(self):
         """Networks summary"""
@@ -407,96 +441,45 @@ class Agent:
 
     def on_start(self):
         """Called *before* the training loop commence"""
-        pass
+        if not self.statistics.is_alive() and self.statistics.should_log:
+            self.statistics.start()
 
     def on_close(self, should_close: bool):
         """Called *after* the training loop ends"""
+        self.close_summary()
+
         if should_close:
             print('closing...')
             self.env.close()
 
-    # TODO: evaluation callbacks?
+    def close_summary(self, timeout=2.0):
+        """Closes the SummaryProcess"""
+        self.stop_event.set()
+        self.statistics.close(timeout)
 
 
-# TODO: implement
 class RandomAgent(Agent):
-    def __init__(self, *args, discount=1.0, name='random-agent', repeat_action=1, **kwargs):
-        assert 0.0 < discount <= 1.0
-        assert repeat_action >= 1
 
-        super().__init__(*args, batch_size=0, name=name, **kwargs)
+    def __init__(self, *args, name='random-agent', **kwargs):
+        super().__init__(*args, name=name, **kwargs)
 
-        self.discount = discount
-        self.repeat_action = repeat_action
-        self.action_space = self.env.action_space
+        action_space = self.env.action_space
 
-    def evaluate(self, name: str, timesteps: int, trials: int, render=True, seeds: Union[None, int, List[int]] = None,
-                 close=False) -> dict:
-        assert trials > 0
-        assert timesteps > 0
+        if isinstance(action_space, gym.spaces.Discrete):
+            # sample action from categorical distribution with uniform probabilities
+            logits = tf.ones(shape=(1, action_space.n), dtype=tf.int32)
+            self.sample = lambda _: tf.random.categorical(logits=logits, num_samples=1, seed=self.seed)
 
-        if isinstance(seeds, int):
-            self.set_random_seed(seed=seeds)
+        elif isinstance(action_space, gym.spaces.Box) and action_space.is_bounded():
+            self.sample = lambda _: tf.random.uniform(shape=action_space.shape, minval=action_space.low,
+                                                      maxval=action_space.high, seed=self.seed)
+        else:
+            raise ValueError('Only bounded environments are supported: Discrete, and Box.')
 
-        results = dict(total_reward=[], timesteps=[])
-        save_path = os.path.join(self.evaluation_path, f'{name}.json')
+        self.convert_action = lambda a: tf.squeeze(a).numpy()
 
-        try:
-            for trial in range(1, trials + 1):
-                # random seed
-                if isinstance(seeds, list):
-                    if len(seeds) == trials:
-                        self.set_random_seed(seed=seeds[trial])
-                    else:
-                        self.set_random_seed(seed=random.choice(seeds))
+    def act(self, state) -> Tuple[tf.Tensor, dict, dict]:
+        return self.sample(state), {}, {}
 
-                elif seeds == 'sample':
-                    self.set_random_seed(seed=random.randint(a=0, b=2 ** 32 - 1))
-
-                self.reset()
-
-                _ = self.env.reset()
-                t0 = time.time()
-                total_reward = 0.0
-
-                for t in range(timesteps):
-                    # Agent prediction
-                    action = self.action_space.sample()
-
-                    # Environment step
-                    for _ in range(self.repeat_action):
-                        next_state, reward, done, _ = self.env.step(action)
-                        total_reward += reward
-
-                        if done:
-                            break
-
-                    self.log(eval_actions=action, eval_rewards=reward)
-
-                    if done or (t == timesteps):
-                        # save results of current trial
-                        results['total_reward'].append(total_reward)
-                        results['timesteps'].append(t)
-
-                        self.log(**{f'eval_{k}': v[-1] for k, v in results.items()})
-
-                        print(f'Trial-{trial} terminated after {t} timesteps in {round(time.time() - t0, 3)} with total'
-                              f' reward of {round(total_reward, 3)}.')
-                        break
-
-                self.write_summaries()
-
-            # save average results with their standard deviations over trials as json
-            avg_results = {k: np.mean(v) for k, v in results.items()}
-
-            for k, v in results.items():
-                avg_results[f'std_{k}'] = np.std(v)
-
-            with open(save_path, 'w') as file:
-                json.dump(avg_results, fp=file)
-
-        finally:
-            if close:
-                self.env.close()
-
-        return results
+    def learn(self, *args, **kwargs):
+        raise RuntimeError('RandomAgent does not support learning.')

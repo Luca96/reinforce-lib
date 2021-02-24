@@ -9,16 +9,18 @@ import tensorflow_probability as tfp
 from tensorflow.keras.layers import *
 
 from rl import utils
-from rl.agents import Agent
 from rl.parameters import DynamicParameter
 
+from rl.v2.agents import Agent
 from rl.v2.memories import EpisodicMemory, TransitionSpec
 from rl.v2.networks import Network, backbones
 
 from typing import Dict, Tuple, Union
 
 
-class PPOAgent(Agent):
+# TODO: parallel environments
+# TODO: check log_prob shape with discrete and continuous actions
+class PPO(Agent):
     def __init__(self, *args, name='ppo-agent', policy_lr: utils.DynamicType = 1e-3, value_lr: utils.DynamicType = 3e-4,
                  optimization_steps=(1, 1), lambda_=0.95, optimizer='adam', load=False, policy: dict = None,
                  clip_ratio: utils.DynamicType = 0.2, clip_norm: Tuple[utils.DynamicType] = (1.0, 1.0), memory_size=8,
@@ -133,11 +135,11 @@ class PPOAgent(Agent):
 
     def on_termination(self, last_transition, timestep: int, episode: int):
         super().on_termination(last_transition, timestep, episode)
-        terminal_state = self.preprocess(state=last_transition['next_state'])
 
         if last_transition['terminal']:
             value = tf.zeros(shape=(1, 2))
         else:
+            terminal_state = self.preprocess(state=last_transition['next_state'])
             value = self.value(terminal_state, training=False)
 
         debug = self.memory.end_trajectory(last_value=value)
@@ -160,7 +162,7 @@ class PPOAgent(Agent):
 
 class PolicyNetwork(Network):
 
-    def __init__(self, agent: PPOAgent, eps=utils.EPSILON, log_prefix='policy', **kwargs):
+    def __init__(self, agent: PPO, eps=utils.EPSILON, log_prefix='policy', **kwargs):
         self._base_model_initialized = True  # weird hack
 
         self.dist_args = kwargs.pop('distribution', {})
@@ -295,7 +297,7 @@ class PolicyNetwork(Network):
 
 class ValueNetwork(Network):
 
-    def __init__(self, agent: PPOAgent, exponent_scale=6.0, target=False, log_prefix='value', normalize_loss=True,
+    def __init__(self, agent: PPO, exponent_scale=6.0, target=False, log_prefix='value', normalize_loss=True,
                  **kwargs):
         self._base_model_initialized = True  # weird hack
         self.exp_scale = tf.constant(exponent_scale, dtype=tf.float32)
@@ -338,7 +340,7 @@ class ValueNetwork(Network):
 
 class GAEMemory(EpisodicMemory):
 
-    def __init__(self, *args, agent: PPOAgent, **kwargs):
+    def __init__(self, *args, agent: PPO, **kwargs):
         super().__init__(*args, **kwargs)
 
         if 'return' in self.data:
@@ -416,8 +418,8 @@ def lunr_lner():
     policy = dict(activation=tf.nn.swish, num_layers=4, units=64)
     value = dict(activation=tf.nn.tanh, num_layers=4, units=64, exponent_scale=4.0)
 
-    a = PPOAgent(env='LunarLanderContinuous-v2', name='ppo-lunar', batch_size=64, gamma=1.0, lambda_=1.0, memory_size=8, entropy_strength=0.001,
-                 optimization_steps=(4, 4), policy_lr=3e-4, policy=policy, value=value, seed=42)
+    a = PPO(env='LunarLanderContinuous-v2', name='ppo-lunar', batch_size=64, gamma=1.0, lambda_=1.0, memory_size=8, entropy_strength=0.001,
+            optimization_steps=(4, 4), policy_lr=3e-4, policy=policy, value=value, seed=42)
     a.summary()
     a.learn(1000, 200, evaluation=dict(freq=50, episodes=10))
 
@@ -426,8 +428,8 @@ def cartpole():
     policy = dict(activation=tf.nn.swish)
     value = dict(activation=tf.nn.swish, exponent_scale=3.0)
 
-    a = PPOAgent(env='CartPole-v0', batch_size=32, gamma=1.0, lambda_=1.0, memory_size=4, entropy_strength=0.0,
-                 optimization_steps=(4//2, 4//2), policy_lr=3e-4, policy=policy, value=value, seed=42)
+    a = PPO(env='CartPole-v0', batch_size=32, gamma=1.0, lambda_=1.0, memory_size=4, entropy_strength=0.0,
+            optimization_steps=(4//2, 4//2), policy_lr=3e-4, policy=policy, value=value, seed=42)
     a.learn(1000, 200)
 
 

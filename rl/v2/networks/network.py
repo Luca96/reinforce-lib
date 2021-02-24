@@ -32,10 +32,6 @@ class Network(tf.keras.Model):
             self.target = TargetNetwork(self.__class__(agent, target=False, **kwargs))
             self.target.set_weights(weights=self.get_weights())
 
-    @tf.function
-    def call(self, inputs, training=None, mask=None):
-        return super().call(inputs, training=training, mask=mask)
-
     def compile(self, optimizer: str, clip_norm: utils.DynamicType = None, **kwargs):
         self.optimizer = utils.get_optimizer_by_name(optimizer, **kwargs)
 
@@ -70,6 +66,7 @@ class Network(tf.keras.Model):
 
         return dict(loss=loss, gradient_norm=tf.reduce_mean(debug['gradient_norm']))
 
+    # TODO: use `train_on_batch` instead
     @tf.function
     def _train_step(self, batch):
         with tf.GradientTape() as tape:
@@ -98,7 +95,7 @@ class Network(tf.keras.Model):
         return inputs
 
     def get_config(self):
-        raise NotImplementedError
+        pass
 
 
 class TargetNetwork:

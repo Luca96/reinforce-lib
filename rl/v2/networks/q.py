@@ -2,12 +2,11 @@
 import tensorflow as tf
 
 from tensorflow.keras.layers import *
-from tensorflow.keras.optimizers.schedules import LearningRateSchedule
 
 from rl import utils
 from rl.agents import Agent
+
 from rl.v2.networks import backbones, Network
-from rl.parameters import DynamicParameter
 
 from typing import Dict, Union
 

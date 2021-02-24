@@ -5,6 +5,7 @@ import numpy as np
 import scipy.signal
 import tensorflow as tf
 import matplotlib.pyplot as plt
+import multiprocessing as mp
 import random
 
 from typing import Union, List, Dict, Tuple, Optional
@@ -182,6 +183,11 @@ def clip_gradients(gradients: list, norm: float) -> list:
     return [tf.clip_by_norm(grad, clip_norm=norm) for grad in gradients]
 
 
+@tf.function
+def clip_gradients2(gradients: List[tf.Tensor], norm: float) -> tuple:
+    return tf.clip_by_global_norm(gradients, clip_norm=norm)  # returns: (grads, g_norm)
+
+
 def accumulate_gradients(grads1: list, grads2: Optional[list] = None) -> list:
     if grads2 is None:
         return grads1
@@ -234,7 +240,8 @@ def plot_images(images: list, title=None):
     plt.show()
 
 
-def plot_lr_schedule(lr_schedule: Union[DynamicParameter, LearningRateSchedule], iterations: int, initial_step=0,
+# TODO: rename
+def plot_lr_schedule(lr_schedule: DynamicType, iterations: int, initial_step=0,
                      show=True):
     assert iterations > 0
     lr_schedule = DynamicParameter.create(value=lr_schedule)
@@ -244,6 +251,21 @@ def plot_lr_schedule(lr_schedule: Union[DynamicParameter, LearningRateSchedule],
 
     if show:
         plt.show()
+
+
+def plot(colormap='Set3', **kwargs):  # Pastel1, Set3, tab20b, tab20c
+    """Colormaps: https://matplotlib.org/tutorials/colors/colormaps.html"""
+    num_plots = len(kwargs.keys())
+    cmap = plt.get_cmap(name=colormap)
+    rows = round(math.sqrt(num_plots))
+    cols = math.ceil(math.sqrt(num_plots))
+
+    for k, (key, value) in enumerate(kwargs.items()):
+        plt.subplot(rows, cols, k + 1)
+        plt.plot(value, color=cmap(k + 1))
+        plt.title(key)
+
+    plt.show()
 
 
 # -------------------------------------------------------------------------------------------------
@@ -492,6 +514,20 @@ def tf_minmax_norm(x, lower=0.0, upper=1.0, eps=EPSILON):
     x = to_float(x)
     x_min = tf.minimum(x) + eps
     return (x - x_min) / (tf.maximum(x) - x_min) * (upper - lower) + lower
+
+
+def tf_explained_variance(x, y, eps=EPSILON) -> float:
+    """Computes fraction of variance that `x` explains about `y`.
+       Interpretation:
+            - ev = 0  =>  might as well have predicted zero
+            - ev = 1  =>  perfect prediction
+            - ev < 0  =>  worse than just predicting zero
+
+        - Source: OpenAI Baselines (https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/common/math_util.py#L25)
+    """
+    assert tf.shape(x) == tf.shape(y)
+
+    return 1.0 - (tf.math.reduce_variance(y - x) / (tf.math.reduce_variance(y) + eps))
 
 
 def tf_shuffle_tensors(*tensors, indices=None):
@@ -787,66 +823,181 @@ def copy_folder(src: str, dst: str):
 # -- Statistics utils
 # -------------------------------------------------------------------------------------------------
 
-class Summary:
-    def __init__(self, mode='summary', name=None, summary_dir='logs', keys: List[str] = None):
-        self.stats = dict()
+# class Summary:
+#     def __init__(self, mode='summary', name=None, summary_dir='logs', keys: List[str] = None):
+#         self.stats = dict()
+#
+#         # filters what to log
+#         if isinstance(keys, list):
+#             self.allowed_keys = {k: True for k in keys}
+#         else:
+#             self.allowed_keys = None
+#
+#         if mode == 'summary':
+#             self.should_log = True
+#             self.use_summary = True
+#
+#         # TODO: review the usefulness of the "log" mode
+#         elif mode == 'log':
+#             self.should_log = True
+#             self.use_summary = False
+#         else:
+#             self.should_log = False
+#             self.use_summary = False
+#
+#         if self.use_summary:
+#             self.summary_dir = os.path.join(summary_dir, name, datetime.now().strftime("%Y%m%d-%H%M%S"))
+#             self.tf_summary_writer = tf.summary.create_file_writer(self.summary_dir)
+#
+#     def log(self, average=False, **kwargs):
+#         if not self.should_log:
+#             return
+#
+#         for key, value in kwargs.items():
+#             if not self.should_log_key(key):
+#                 continue
+#
+#             if key not in self.stats:
+#                 self.stats[key] = dict(step=0, list=[])
+#
+#             if tf.is_tensor(value):
+#                 if average:
+#                     self.stats[key]['list'].append(tf.reduce_mean(value))
+#
+#                 elif np.prod(value.shape) > 1:
+#                     self.stats[key]['list'].extend(value)
+#                 else:
+#                     self.stats[key]['list'].append(value)
+#
+#             elif hasattr(value, '__iter__'):
+#                 self.stats[key]['list'].extend(value)
+#             else:
+#                 self.stats[key]['list'].append(value)
+#
+#     def should_log_key(self, key: str) -> bool:
+#         if self.allowed_keys is None:
+#             return True
+#
+#         return key in self.allowed_keys
+#
+#     def write_summaries(self):
+#         if not self.use_summary:
+#             return
+#
+#         with self.tf_summary_writer.as_default():
+#             for summary_name, data in self.stats.items():
+#                 step = data['step']
+#                 values = data['list']
+#
+#                 if 'weight-' in summary_name or 'bias-' in summary_name:
+#                     tf.summary.histogram(name=summary_name, data=values, step=step)
+#
+#                 elif 'image_' in summary_name:
+#                     tf.summary.image(name=summary_name, data=tf.concat(values, axis=0), step=step)
+#                 else:
+#                     for i, value in enumerate(values):
+#                         tf.summary.scalar(name=summary_name, data=np.mean(value), step=step + i)
+#
+#                 # clear value_list, update step
+#                 self.stats[summary_name]['step'] += len(values)
+#                 self.stats[summary_name]['list'].clear()
+#
+#             self.tf_summary_writer.flush()
+#
+#     def plot(self, colormap='Set3'):  # Pastel1, Set3, tab20b, tab20c
+#         """Colormaps: https://matplotlib.org/tutorials/colors/colormaps.html"""
+#         num_plots = len(self.stats.keys())
+#         cmap = plt.get_cmap(name=colormap)
+#         rows = round(math.sqrt(num_plots))
+#         cols = math.ceil(math.sqrt(num_plots))
+#
+#         for k, (key, value) in enumerate(self.stats.items()):
+#             plt.subplot(rows, cols, k + 1)
+#             plt.plot(value, color=cmap(k + 1))
+#             plt.title(key)
+#
+#         plt.show()
+
+
+class SummaryProcess(mp.Process):
+    """Easy and efficient tf.summary with multiprocessing"""
+
+    def __init__(self, queue: mp.Queue, stop_event: mp.Event, mode='summary', name=None, folder='logs',
+                 keys: List[str] = None):
+        super().__init__(daemon=True)
+
+        self.steps = dict()
+        self.queue = queue
+        self.stop_event = stop_event
 
         # filters what to log
         if isinstance(keys, list):
             self.allowed_keys = {k: True for k in keys}
+            # init steps here?
         else:
             self.allowed_keys = None
 
         if mode == 'summary':
+            assert isinstance(name, str)
             self.should_log = True
-            self.use_summary = True
 
-        # TODO: review the usefulness of the "log" mode
-        elif mode == 'log':
-            self.should_log = True
-            self.use_summary = False
+            self.summary_dir = os.path.join(folder, name, datetime.now().strftime("%Y%m%d-%H%M%S"))
+            self.tf_summary_writer = None
         else:
             self.should_log = False
-            self.use_summary = False
 
-        if self.use_summary:
-            self.summary_dir = os.path.join(summary_dir, name, datetime.now().strftime("%Y%m%d-%H%M%S"))
-            self.tf_summary_writer = tf.summary.create_file_writer(self.summary_dir)
+    def run(self):
+        import time
 
-    def log(self, average=False, **kwargs):
         if not self.should_log:
             return
 
-        for key, value in kwargs.items():
-            if not self.should_log_key(key):
-                continue
+        while not self.stop_event.is_set():
+            if not self.queue.empty():
+                self.log(**self.queue.get())
 
-            # if 'action' in key:
-            #     if value.shape[-1] > 1:
-            #         for i, action in enumerate(value):
-            #             k = f'{key}_i'
-            #
-            #             if k not in self.stats:
-            #                 self.stats[k] = dict(step=0, list=[])
-            #
-            #
+            time.sleep(0.1)
 
-            if key not in self.stats:
-                self.stats[key] = dict(step=0, list=[])
+    def log(self, average=False, **kwargs):
+        import tensorflow as tf  # import here and lazy tf.summary.create is necessary for multiprocessing to work
 
-            if tf.is_tensor(value):
-                if average:
-                    self.stats[key]['list'].append(tf.reduce_mean(value))
+        if self.tf_summary_writer is None:
+            self.tf_summary_writer = tf.summary.create_file_writer(self.summary_dir)
 
-                elif np.prod(value.shape) > 1:
-                    self.stats[key]['list'].extend(value)
+        with self.tf_summary_writer.as_default():
+            for key, value in kwargs.items():
+                if not self.should_log_key(key):
+                    continue
+
+                if key not in self.steps:
+                    self.steps[key] = 0
+
+                step = self.steps[key]
+                value = tf.convert_to_tensor(value)
+
+                if 'weight-' in key or 'bias-' in key:
+                    tf.summary.histogram(name=key, data=value, step=step)
+                    self.steps[key] += 1
+
+                elif 'image_' in key:
+                    tf.summary.image(name=key, data=tf.concat(value, axis=0), step=step)
+                    self.steps[key] += 1
                 else:
-                    self.stats[key]['list'].append(value)
+                    value = tf.squeeze(value)
 
-            elif hasattr(value, '__iter__'):
-                self.stats[key]['list'].extend(value)
-            else:
-                self.stats[key]['list'].append(value)
+                    if average or len(value.shape) == 0:
+                        value = tf.reduce_mean(value)
+                        tf.summary.scalar(name=key, data=value, step=step)
+
+                        self.steps[key] += 1
+                        continue
+                    else:
+                        self.steps[key] += value.shape[0]
+
+                    for i, v in enumerate(value):
+                        tf.summary.scalar(name=key, data=tf.reduce_mean(v), step=step + i)
+
+            self.tf_summary_writer.flush()
 
     def should_log_key(self, key: str) -> bool:
         if self.allowed_keys is None:
@@ -854,49 +1005,10 @@ class Summary:
 
         return key in self.allowed_keys
 
-    def write_summaries(self):
-        if not self.use_summary:
-            return
-
-        with self.tf_summary_writer.as_default():
-            for summary_name, data in self.stats.items():
-                step = data['step']
-                values = data['list']
-
-                if 'weight-' in summary_name or 'bias-' in summary_name:
-                    tf.summary.histogram(name=summary_name, data=values, step=step)
-
-                elif 'image_' in summary_name:
-                    tf.summary.image(name=summary_name, data=tf.concat(values, axis=0), step=step)
-
-                # elif tf.is_tensor(data) and num_dims(data) == 4:
-                #     # array of images
-                #     tf.summary.image(name=summary_name, data=data, step=step)
-                else:
-                    for i, value in enumerate(values):
-                        # TODO: 'np.mean' is a temporary fix...
-                        tf.summary.scalar(name=summary_name, data=np.mean(value), step=step + i)
-                        # tf.summary.scalar(name=summary_name, data=tf.reduce_mean(value), step=step + i)
-
-                # clear value_list, update step
-                self.stats[summary_name]['step'] += len(values)
-                self.stats[summary_name]['list'].clear()
-
-            self.tf_summary_writer.flush()
-
-    def plot(self, colormap='Set3'):  # Pastel1, Set3, tab20b, tab20c
-        """Colormaps: https://matplotlib.org/tutorials/colors/colormaps.html"""
-        num_plots = len(self.stats.keys())
-        cmap = plt.get_cmap(name=colormap)
-        rows = round(math.sqrt(num_plots))
-        cols = math.ceil(math.sqrt(num_plots))
-
-        for k, (key, value) in enumerate(self.stats.items()):
-            plt.subplot(rows, cols, k + 1)
-            plt.plot(value, color=cmap(k + 1))
-            plt.title(key)
-
-        plt.show()
+    def close(self, timeout=2.0):
+        if self.is_alive():
+            self.join(timeout=timeout)
+            self.terminate()
 
 
 class IncrementalStatistics:

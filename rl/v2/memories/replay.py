@@ -1,7 +1,8 @@
-
+import numpy as np
 import tensorflow as tf
 
 from rl.v2.memories import Memory, TransitionSpec
+from rl.v2.memories.episodic import EpisodicMemory
 
 from typing import Union
 
@@ -59,3 +60,48 @@ class ReplayMemory(Memory):
             ensure(self.data, key, tensor)
 
         self.size = self.max_size
+
+
+class Replay2(ReplayMemory):
+
+    def __init__(self, transition_spec: TransitionSpec, size: int):
+        self.data = dict()
+        self.size = int(size)
+        self.index = 0
+        self.specs = transition_spec
+        self.full = False
+
+        for name, spec in self.specs.items():
+            self.data[name] = self._add_spec(spec)
+
+    def _add_spec(self, spec: dict):
+        if 'shape' in spec:
+            shape = spec['shape']
+            return np.zeros(shape=(self.size,) + shape[1:], dtype=np.float32)  # spec['dtype']
+
+    def store(self, transition: dict):
+        """Stores one transition"""
+        if self.index >= self.size:
+            self.full = True
+            self.index = 0
+
+        for k, v in transition.items():
+            if k not in self.specs:
+                continue
+
+            self._store(data=self.data, spec=self.specs[k], key=k, value=v)
+
+        self.index += 1
+
+    def _store(self, data, spec, key, value):
+        if not isinstance(value, dict):
+            tensor = tf.cast(value, dtype=spec['dtype'])
+            tensor = tf.reshape(tensor, shape=spec['shape'])
+
+            data[key][self.index] = tensor
+        else:
+            for k, v in value.items():
+                self._store(data=data[key], spec=spec[k], key=k, value=v)
+
+    def ensure_size(self):
+        pass
