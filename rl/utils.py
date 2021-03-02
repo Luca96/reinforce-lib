@@ -919,11 +919,12 @@ def copy_folder(src: str, dst: str):
 #         plt.show()
 
 
+# TODO(bug): summary process doesn't terminate
 class SummaryProcess(mp.Process):
     """Easy and efficient tf.summary with multiprocessing"""
 
-    def __init__(self, queue: mp.Queue, stop_event: mp.Event, mode='summary', name=None, folder='logs',
-                 keys: List[str] = None):
+    def __init__(self, queue: mp.Queue, stop_event: mp.Event, name=None, folder='logs', keys: List[str] = None):
+        assert isinstance(name, str)
         super().__init__(daemon=True)
 
         self.steps = dict()
@@ -937,32 +938,28 @@ class SummaryProcess(mp.Process):
         else:
             self.allowed_keys = None
 
-        if mode == 'summary':
-            assert isinstance(name, str)
-            self.should_log = True
-
-            self.summary_dir = os.path.join(folder, name, datetime.now().strftime("%Y%m%d-%H%M%S"))
-            self.tf_summary_writer = None
-        else:
-            self.should_log = False
+        self.summary_dir = os.path.join(folder, name, datetime.now().strftime("%Y%m%d-%H%M%S"))
+        self.tf_summary_writer = None
 
     def run(self):
         import time
-
-        if not self.should_log:
-            return
-
-        while not self.stop_event.is_set():
-            if not self.queue.empty():
-                self.log(**self.queue.get())
-
-            time.sleep(0.1)
-
-    def log(self, average=False, **kwargs):
         import tensorflow as tf  # import here and lazy tf.summary.create is necessary for multiprocessing to work
 
         if self.tf_summary_writer is None:
             self.tf_summary_writer = tf.summary.create_file_writer(self.summary_dir)
+
+        # wait for stuff to be logged
+        while not self.stop_event.is_set():
+            if not self.queue.empty():
+                self.log(**self.queue.get())
+
+            time.sleep(0.01)
+
+    def log(self, average=False, **kwargs):
+        # import tensorflow as tf  # import here and lazy tf.summary.create is necessary for multiprocessing to work
+        #
+        # if self.tf_summary_writer is None:
+        #     self.tf_summary_writer = tf.summary.create_file_writer(self.summary_dir)
 
         with self.tf_summary_writer.as_default():
             for key, value in kwargs.items():

@@ -8,7 +8,7 @@ class ParallelEnv(gym.Env):
     """A sequential environment that wraps multiple environments in parallel"""
 
     def __init__(self, env, num=2, **kwargs):
-        assert num >= 2
+        assert num >= 1
         self.num_envs = int(num)
 
         if callable(env):

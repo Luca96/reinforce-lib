@@ -138,7 +138,7 @@ class PPO(Agent):
         super().on_termination(last_transition, timestep, episode)
 
         if last_transition['terminal']:
-            value = tf.zeros(shape=(1, 2))
+            value = tf.zeros(shape=(1, 2), dtype=tf.float32)
         else:
             terminal_state = self.preprocess(state=last_transition['next_state'])
             value = self.value(terminal_state, training=False)
@@ -414,7 +414,7 @@ class GAEMemory(EpisodicMemory):
         return advantages, norm_adv
 
 
-def lunr_lner():
+def lunar_lander():
     policy = dict(activation=tf.nn.swish, num_layers=4, units=64)
     value = dict(activation=tf.nn.tanh, num_layers=4, units=64, exponent_scale=4.0)
 
@@ -431,9 +431,9 @@ def cartpole():
 
     a = PPO(env='CartPole-v0', batch_size=32, gamma=1.0, lambda_=1.0, memory_size=4, entropy_strength=0.0,
             optimization_steps=(4 // 2, 4 // 2), policy_lr=3e-4, policy=policy, value=value, seed=42)
-    a.learn(1000, 200)
+    a.learn(1000 // 50, 200)
 
 
 if __name__ == '__main__':
     cartpole()
-    # lunr_lner()
+    # lunar_lander()

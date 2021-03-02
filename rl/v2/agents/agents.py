@@ -15,6 +15,7 @@ from rl.v2.memories import Memory, TransitionSpec
 from typing import List, Dict, Union, Tuple
 
 
+# TODO: ParallelAgent interface (for A2C, PPO)
 # TODO: gym.env wrapper that supports "reproucible" sampling, and has suitable "specs" for state and action-spaces
 #  + basic pre-processing (e.g. conversion to numpy/tensor)?
 # TODO: evaluation callbacks?
@@ -22,7 +23,7 @@ class Agent:
     """Agent abstract class"""
     # TODO: load, ...
     def __init__(self, env: Union[gym.Env, str], batch_size: int, gamma=0.99, seed=None, weights_dir='weights',
-                 log_mode='summary', drop_batch_remainder=False, skip_data=0, consider_obs_every=1, shuffle=True,
+                 use_summary=True, drop_batch_remainder=False, skip_data=0, consider_obs_every=1, shuffle=True,
                  evaluation_dir='evaluation', shuffle_batches=False, traces_dir: str = None, repeat_action=1,
                  summary_keys: List[str] = None, name='agent'):
         assert batch_size >= 1
@@ -72,9 +73,14 @@ class Agent:
         self.config = dict()
 
         # Statistics (tf.summary):
-        self.queue = mp.Queue()
-        self.stop_event = mp.Event()
-        self.statistics = utils.SummaryProcess(self.queue, self.stop_event, mode=log_mode, name=name, keys=summary_keys)
+        if use_summary:
+            self.summary_queue = mp.Queue()
+            self.summary_stop_event = mp.Event()
+            self.statistics = utils.SummaryProcess(self.summary_queue, self.summary_stop_event, name=name,
+                                                   keys=summary_keys)
+            self.should_log = True
+        else:
+            self.should_log = False
 
     @property
     def transition_spec(self) -> TransitionSpec:
@@ -346,10 +352,8 @@ class Agent:
         return utils.to_tensor(state, expand_axis=0)
 
     def log(self, average=False, **kwargs):
-        if not self.statistics.should_log:
-            return
-
-        self.queue.put(dict(average=average, **kwargs))
+        if self.should_log:
+            self.summary_queue.put(dict(average=average, **kwargs))
 
     def log_transition(self, transition: dict):
         self.log(reward=transition['reward'], action=transition['action'])
@@ -438,7 +442,7 @@ class Agent:
 
     def on_start(self):
         """Called *before* the training loop commence"""
-        if not self.statistics.is_alive() and self.statistics.should_log:
+        if self.should_log and not self.statistics.is_alive():
             self.statistics.start()
 
     def on_close(self, should_close: bool):
@@ -451,8 +455,9 @@ class Agent:
 
     def close_summary(self, timeout=2.0):
         """Closes the SummaryProcess"""
-        self.stop_event.set()
-        self.statistics.close(timeout)
+        if self.should_log:
+            self.summary_stop_event.set()
+            self.statistics.close(timeout)
 
 
 class RandomAgent(Agent):

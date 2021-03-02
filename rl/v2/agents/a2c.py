@@ -19,7 +19,9 @@ from rl.environments.gym.parallel import ParallelEnv
 from typing import List, Tuple, Union, Dict
 
 
+# TODO: implement `evaluation` and `exploration`
 # TODO: check update method
+# TODO: `tf.reduce_sum` instead of `tf.reduce_mean` in both actor's and critic's objective?
 class A2C(Agent):
     """Sequential (single-process) implementation of A2C"""
 
@@ -28,7 +30,7 @@ class A2C(Agent):
                  critic: dict = None, advantage_scale: utils.DynamicType = 1.0, actor_lr: utils.DynamicType = 7e-4,
                  clip_norm: Tuple[utils.DynamicType] = (1.0, 1.0), critic_lr: utils.DynamicType = 7e-4, **kwargs):
         assert n_steps >= 1
-        assert parallel_actors >= 0
+        assert parallel_actors >= 1
 
         self.n_actors = int(parallel_actors)
         self.n_steps = int(n_steps)
@@ -36,6 +38,7 @@ class A2C(Agent):
         super().__init__(env=ParallelEnv(env, num=self.n_actors), batch_size=self.n_steps, name=name, **kwargs)
 
         self._init_action_space()
+        self.max_timesteps = 0  # being init in `self.learn(...)`
 
         self.lambda_ = tf.constant(lambda_, dtype=tf.float32)
         self.entropy_strength = DynamicParameter.create(value=entropy)
@@ -204,6 +207,7 @@ class A2C(Agent):
         # # Exploration:
         # self.explore(steps=int(exploration_steps))
 
+        self.max_timesteps = timesteps
         self.on_start()
 
         # Learning-loop:
@@ -293,11 +297,10 @@ class A2C(Agent):
     def on_transition(self, transition: Dict[str, list], timestep: int, episode: int):
         super().on_transition(transition, timestep, episode)
 
-        if any(transition['terminal']) or timestep % self.n_steps == 0:
+        if any(transition['terminal']) or (timestep % self.n_steps == 0) or (timestep == self.max_timesteps):
             terminal_states = self.preprocess(transition['next_state'])
 
             values = self.critic(terminal_states, training=False)
-            # values = values * utils.to_tensor(tf.logical_not(transition['terminal']), expand_axis=-1)
             values = values * utils.to_float(tf.logical_not(transition['terminal']))
 
             debug = self.memory.end_trajectory(last_values=values)
@@ -485,5 +488,5 @@ class ParallelGAEMemory(EpisodicMemory):
 
 
 if __name__ == '__main__':
-    a2c = A2C(env='CartPole-v0', n_steps=5, log_mode=None, seed=42)
+    a2c = A2C(env='CartPole-v0', n_steps=5, use_summary=True, seed=42)
     a2c.learn(1000//4, 200)
