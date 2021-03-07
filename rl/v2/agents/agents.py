@@ -9,13 +9,14 @@ import numpy as np
 
 from rl import utils
 from rl.parameters import DynamicParameter
+from rl.environments import ParallelEnv
 
 from rl.v2.memories import Memory, TransitionSpec
 
 from typing import List, Dict, Union, Tuple
 
 
-# TODO: ParallelAgent interface (for A2C, PPO)
+# TODO: provide a "fake" agent just for debugging components?
 # TODO: gym.env wrapper that supports "reproucible" sampling, and has suitable "specs" for state and action-spaces
 #  + basic pre-processing (e.g. conversion to numpy/tensor)?
 # TODO: evaluation callbacks?
@@ -23,7 +24,7 @@ class Agent:
     """Agent abstract class"""
     # TODO: load, ...
     def __init__(self, env: Union[gym.Env, str], batch_size: int, gamma=0.99, seed=None, weights_dir='weights',
-                 use_summary=True, drop_batch_remainder=False, skip_data=0, consider_obs_every=1, shuffle=True,
+                 use_summary=True, drop_batch_remainder=True, skip_data=0, consider_obs_every=1, shuffle=True,
                  evaluation_dir='evaluation', shuffle_batches=False, traces_dir: str = None, repeat_action=1,
                  summary_keys: List[str] = None, name='agent'):
         assert batch_size >= 1
@@ -44,6 +45,8 @@ class Agent:
         self._memory = None
         self._dynamic_parameters = None
         self.repeat_action = int(repeat_action)
+
+        self._init_action_space()
 
         # Record:
         if isinstance(traces_dir, str):
@@ -104,7 +107,31 @@ class Agent:
         return self._dynamic_parameters
 
     def _init_action_space(self):
-        pass
+        action_space = self.env.action_space
+
+        if isinstance(action_space, gym.spaces.Box):
+            self.num_actions = action_space.shape[0]
+
+            # continuous:
+            if action_space.is_bounded():
+                self.distribution_type = 'beta'
+
+                self.action_low = tf.constant(action_space.low, dtype=tf.float32)
+                self.action_high = tf.constant(action_space.high, dtype=tf.float32)
+                self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
+
+                self.convert_action = lambda a: tf.squeeze(a * self.action_range + self.action_low).numpy()
+            else:
+                self.distribution_type = 'gaussian'
+                self.convert_action = lambda a: tf.squeeze(a).numpy()
+        else:
+            # discrete:
+            assert isinstance(action_space, gym.spaces.Discrete)
+            self.distribution_type = 'categorical'
+
+            self.num_actions = 1
+            self.num_classes = action_space.n
+            self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
     def set_random_seed(self, seed):
         """Sets the random seed for tensorflow, numpy, python's random, and the environment"""
@@ -122,7 +149,7 @@ class Agent:
     def act(self, state) -> Tuple[tf.Tensor, dict, dict]:
         """Agent prediction.
             - Returns a tuple: (action, other: dict, debug: dict)
-            - `other` can contain any useful stuff e.g. about action like its 'value' or 'log_prob'...
+            - `other` can contain any useful stuff (e.g.) about action, like its 'value' or 'log_prob'...
         """
         raise NotImplementedError
 
@@ -249,6 +276,7 @@ class Agent:
                 self.log(action_env=action_env, **debug)
 
                 if terminal or (t == timesteps):
+                    # TODO: put message in `on_episode_end`
                     print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
                           f'with reward {round(episode_reward, 3)}.')
 
@@ -458,6 +486,190 @@ class Agent:
         if self.should_log:
             self.summary_stop_event.set()
             self.statistics.close(timeout)
+
+
+# TODO: better name SynchronousAgent or SyncAgent?
+class ParallelAgent(Agent):
+    """Base class for Agents that uses parallel environments (e.g. A2C, PPO, ...)"""
+    def __init__(self, env, *args, num_actors: int, name='parallel-agent', **kwargs):
+        assert num_actors >= 1
+
+        self.num_actors = int(num_actors)
+        self.max_timesteps = 0  # being init in `self.learn(...)`
+
+        super().__init__(env=ParallelEnv(env, num=self.num_actors), *args, name=name, **kwargs)
+
+    def _init_action_space(self):
+        action_space = self.env.action_space
+
+        if isinstance(action_space, gym.spaces.Box):
+            self.num_actions = action_space.shape[0]
+
+            # continuous:
+            if action_space.is_bounded():
+                self.distribution_type = 'beta'
+
+                self.action_low = tf.constant(action_space.low, dtype=tf.float32)
+                self.action_high = tf.constant(action_space.high, dtype=tf.float32)
+                self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
+
+                def convert_action(actions) -> list:
+                    return [tf.squeeze(a * self.action_range + self.action_low).numpy() for a in actions]
+
+                self.convert_action = convert_action
+            else:
+                self.distribution_type = 'gaussian'
+                self.convert_action = lambda actions: [tf.squeeze(a).numpy() for a in actions]
+        else:
+            # discrete:
+            assert isinstance(action_space, gym.spaces.Discrete)
+            self.distribution_type = 'categorical'
+
+            self.num_actions = 1
+            self.num_classes = action_space.n
+            self.convert_action = lambda actions: [tf.cast(tf.squeeze(a), dtype=tf.int32).numpy() for a in actions]
+
+    # TODO: `evaluation` and `exploration`
+    def learn(self, episodes: int, timesteps: int, render: Union[bool, int, None] = False, should_close=True,
+              evaluation: Union[dict, bool] = None, exploration_steps=0, save=True):
+        """Training loop"""
+        assert episodes > 0
+        assert timesteps > 0
+
+        tk = time.time()
+        tot_rew = 0.0
+
+        # Render:
+        if render is True:
+            render_freq = 1  # render each episode
+
+        elif render is False or render is None:
+            render_freq = episodes + 1  # never render
+        else:
+            render_freq = int(render)  # render at specified frequency
+
+        # # Evaluation:
+        # if isinstance(evaluation, dict):
+        #     eval_freq = evaluation.pop('freq', episodes + 1)  # default: never evaluate
+        #     assert isinstance(eval_freq, int)
+        #
+        #     evaluation['should_close'] = False
+        #     evaluation.setdefault('episodes', 1)  # default: evaluate on just 1 episode
+        #     evaluation.setdefault('timesteps', timesteps)  # default: evaluate on the same number of timesteps
+        #     evaluation.setdefault('render', render)  # default: same rendering options
+        # else:
+        #     eval_freq = episodes + 1  # never evaluate
+
+        # # Saving:
+        # if save:
+        #     # track 'average return' to determine best agent, also prefer newer agents (if equally good)
+        #     best_return = -2 ** 32
+        #     should_save = True
+        # else:
+        #     should_save = False
+
+        # # Exploration:
+        # self.explore(steps=int(exploration_steps))
+
+        self.max_timesteps = timesteps
+        self.on_start()
+
+        # Learning-loop:
+        for episode in range(1, episodes + 1):
+            self.on_episode_start(episode)
+
+            should_render = episode % render_freq == 0
+            # should_evaluate = episode % eval_freq == 0
+
+            episode_reward = 0.0
+            t0 = time.time()
+
+            states = self.env.reset()
+            states = self.preprocess(states)
+
+            for t in range(1, timesteps + 1):
+                if should_render:
+                    self.env.render()
+
+                # Agent prediction
+                actions, other, debug = self.act(states)
+                actions_env = self.convert_action(actions)
+
+                # Environment step
+                for _ in range(self.repeat_action):
+                    next_states, rewards, terminals, info = self.env.step(actions=actions_env)
+                    episode_reward += np.mean(rewards)
+
+                    if any(terminals):
+                        break
+
+                transition = dict(state=states, action=actions, reward=rewards, next_state=next_states,
+                                  terminal=terminals, **(info or {}), **(other or {}))
+
+                self.on_transition(transition, timestep=t, episode=episode)
+                self.log(action_env=actions_env, **debug)
+
+                if any(terminals) or (t == timesteps):
+                    print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
+                          f'with reward {round(episode_reward, 3)}.')
+                    tot_rew += episode_reward
+
+                    self.log(timestep=t)
+                    self.on_termination(last_transition=transition, timestep=t, episode=episode)
+                    break
+                else:
+                    states = next_states
+                    states = self.preprocess(states)
+
+            self.on_episode_end(episode, episode_reward)
+
+            # if should_evaluate:
+            #     eval_rewards = self.evaluate(**evaluation)
+            #
+            #     self.log(eval_rewards=eval_rewards)
+            #     print(f'[Evaluation] average return: {np.round(np.mean(eval_rewards), 2)}, '
+            #           f'std: {np.round(np.std(eval_rewards), 2)}')
+            #
+            #     if should_save:
+            #         average_return = np.floor(np.mean(eval_rewards))
+            #
+            #         # TODO: when saving also save 'best_return' into the agent's config
+            #         if average_return >= best_return:
+            #             self.save()
+            #             best_return = average_return
+            #             print(f'Saved [{round(best_return, 2)}]')
+
+            if self.should_record:
+                self.record(episode)
+
+        print(f'Time taken {round(time.time() - tk, 3)}s.')
+        print(f'Total episodic reward: {round(tot_rew, 3)}')
+        self.on_close(should_close)
+
+    def preprocess(self, states, evaluation=False):
+        if isinstance(states[0], dict):
+            states_ = {f'state_{k}': [v] for k, v in states[0].items()}
+
+            for state in states:
+                for k, v in state.items():
+                    states_[f'state_{k}'].append(v)
+
+            return states_
+
+        return states
+
+    def log_transition(self, transition: Dict[str, list]):
+        data = dict()
+
+        for i, (reward, action) in enumerate(zip(transition['reward'], transition['action'])):
+            data[f'reward_{i}'] = reward
+            data[f'action_{i}'] = action
+
+        self.log(**data)
+
+
+class AsyncAgent(Agent):
+    pass
 
 
 class RandomAgent(Agent):

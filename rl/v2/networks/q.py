@@ -11,7 +11,7 @@ from rl.v2.networks import backbones, Network
 from typing import Dict, Union
 
 
-class DQNetwork(Network):
+class QNetwork(Network):
 
     def __init__(self, agent: Agent, target=True, log_prefix='q', **kwargs):
         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
@@ -34,8 +34,6 @@ class DQNetwork(Network):
         return tf.argmax(q_values, axis=-1)
 
     def structure(self, inputs: Dict[str, Input], name='Deep-Q-Network', **kwargs) -> tuple:
-        assert self.agent.num_actions == 1
-
         inputs = inputs['state']
         x = backbones.dense(layer=inputs, **kwargs)
 
@@ -43,14 +41,15 @@ class DQNetwork(Network):
         return inputs, output, name
 
     def output_layer(self) -> Layer:
-        return Dense(units=self.agent.num_classes, name='q-values')
+        assert self.agent.num_actions == 1
+        return Dense(units=self.agent.num_classes, name='q-values', **self.output_args)
 
     @tf.function
-    def objective(self, batch: dict) -> tuple:
+    def objective(self, batch: dict, reduction=tf.reduce_mean) -> tuple:
         q_values = self(inputs=batch['state'], actions=batch['action'], training=True)
         q_targets = self.targets(batch)
 
-        loss = tf.reduce_mean(0.5 * tf.square(q_values - q_targets))
+        loss = 0.5 * reduction(tf.square(q_values - q_targets))
         debug = dict(loss=loss, q_targets=q_targets, q_values=q_values)
 
         return loss, debug

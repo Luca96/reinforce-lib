@@ -16,6 +16,7 @@ class Network(tf.keras.Model):
     def __init__(self, agent: Agent, target=False, log_prefix='network', **kwargs):
         self.agent = agent
         self.prefix = str(log_prefix)
+        self.output_args = kwargs.pop('output', {})
 
         # Optimization:
         self.optimizer = None
@@ -47,7 +48,10 @@ class Network(tf.keras.Model):
         """Specified the network's structure (i.e. layers)"""
         raise NotImplementedError
 
-    def objective(self, batch) -> tuple:
+    def output_layer(self, *args, **kwargs) -> tf.keras.layers.Layer:
+        raise NotImplementedError
+
+    def objective(self, batch, reduction=tf.reduce_mean) -> tuple:
         raise NotImplementedError
 
     def update_target_network(self, copy_weights=False, polyak=0.995):
@@ -60,15 +64,14 @@ class Network(tf.keras.Model):
         if isinstance(batch, tuple):
             batch = batch[0]
 
-        loss, debug = self._train_step(batch)
+        loss, debug = self.train_on_batch(batch)
 
         self.agent.log(average=True, **({f'{self.prefix}_{k}': v for k, v in debug.items()}))
 
         return dict(loss=loss, gradient_norm=tf.reduce_mean(debug['gradient_norm']))
 
-    # TODO: use `train_on_batch` instead
     @tf.function
-    def _train_step(self, batch):
+    def train_on_batch(self, batch):
         with tf.GradientTape() as tape:
             loss, debug = self.objective(batch)
 
@@ -78,12 +81,21 @@ class Network(tf.keras.Model):
         debug['gradient_norm'] = [tf.norm(g) for g in gradients]
 
         if self.should_clip_gradients:
-            gradients = utils.clip_gradients(gradients, norm=self.clip_norm())
-            debug['gradient_clipped_norm'] = [tf.norm(g) for g in gradients]
-            debug['clip_norm'] = self.clip_norm.value
+            # gradients = utils.clip_gradients(gradients, norm=self.clip_norm())
+            # debug['gradient_clipped_norm'] = [tf.norm(g) for g in gradients]
+            # debug['clip_norm'] = self.clip_norm.value
+            gradients = self.clip_gradients(gradients, debug)
 
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
         return loss, debug
+
+    @tf.function
+    def clip_gradients(self, gradients: List[tf.Tensor], debug: dict) -> List[tf.Tensor]:
+        gradients, global_norm = utils.clip_gradients2(gradients, norm=self.clip_norm())
+        debug['gradient_clipped_norm'] = [tf.norm(g) for g in gradients]
+        debug['gradient_global_norm'] = global_norm
+        debug['clip_norm'] = self.clip_norm.value
+        return gradients
 
     def get_inputs(self) -> Dict[str, tf.keras.layers.Input]:
         """Transforms an arbitrary complex state-space as `tf.keras.layers.Input` layers"""

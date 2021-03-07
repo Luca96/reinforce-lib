@@ -23,14 +23,14 @@ class ValueNetwork(Network):
         return inputs, output, name
 
     def output_layer(self, layer: Layer) -> Layer:
-        return Dense(units=1, activation='linear', name='value')(layer)
+        return Dense(units=1, activation='linear', name='value', **self.output_args)(layer)
 
     @tf.function
-    def objective(self, batch) -> tuple:
+    def objective(self, batch, reduction=tf.reduce_mean) -> tuple:
         states, returns = batch['state'], batch['return']
         values = self(states, training=True)
 
-        loss = 0.5 * tf.reduce_mean(tf.square(returns - values))
+        loss = 0.5 * reduction(tf.square(returns - values))
         return loss, dict(loss=loss)
 
 
@@ -46,18 +46,19 @@ class DecomposedValueNetwork(ValueNetwork):
         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
 
     def output_layer(self, layer: Layer) -> Layer:
-        base = Dense(units=1, activation=tf.nn.tanh, name='v-base')(layer)
-        exp = Dense(units=1, activation=lambda x: self.exp_scale * tf.nn.sigmoid(x), name='v-exp')(layer)
+        base = Dense(units=1, activation=tf.nn.tanh, name='v-base', **self.output_args)(layer)
+        exp = Dense(units=1, activation=lambda x: self.exp_scale * tf.nn.sigmoid(x), name='v-exp',
+                    **self.output_args)(layer)
 
         return concatenate([base, exp], axis=1)
 
     @tf.function
-    def objective(self, batch) -> tuple:
+    def objective(self, batch, reduction=tf.reduce_mean) -> tuple:
         states, returns = batch['state'], batch['return']
         values = self(states, training=True)
 
-        base_loss = 0.5 * tf.reduce_mean(tf.square(returns[:, 0] - values[:, 0]))
-        exp_loss = 0.5 * tf.reduce_mean(tf.square(returns[:, 1] - values[:, 1]))
+        base_loss = 0.5 * reduction(tf.square(returns[:, 0] - values[:, 0]))
+        exp_loss = 0.5 * reduction(tf.square(returns[:, 1] - values[:, 1]))
 
         if self.normalize_loss:
             loss = 0.25 * base_loss + exp_loss / (self.exp_scale ** 2)

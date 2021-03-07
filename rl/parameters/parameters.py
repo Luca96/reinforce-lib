@@ -15,16 +15,18 @@ class DynamicParameter:
         self.step = 0
 
     @staticmethod
-    def create(value: Union[float, LearningRateSchedule], **kwargs):
+    def create(value: Union[float, int, LearningRateSchedule], **kwargs):
         """Converts a floating or LearningRateSchedule `value` into a DynamicParameter object"""
-        if isinstance(value, DynamicParameter) or isinstance(value, ScheduleWrapper):
+        if isinstance(value, (DynamicParameter, ScheduleWrapper)):
             return value
 
-        if isinstance(value, float):
+        if isinstance(value, (float, int)):
             return ConstantParameter(value)
 
         if isinstance(value, LearningRateSchedule):
             return ScheduleWrapper(schedule=value, **kwargs)
+
+        raise ValueError(f'Parameter "value" should be not {type(value)}.')
 
     def __call__(self, *args, **kwargs):
         return self.value

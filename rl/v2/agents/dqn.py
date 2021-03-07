@@ -13,7 +13,7 @@ from rl.parameters import DynamicParameter
 
 from rl.v2.agents import Agent
 from rl.v2.memories import ReplayMemory, TransitionSpec
-from rl.v2.networks.q import DQNetwork
+from rl.v2.networks.q import QNetwork
 
 
 class DQN(Agent):
@@ -37,13 +37,11 @@ class DQN(Agent):
             self.update_target_freq = int(update_target_network)
             self._update_target_freq = self.update_target_freq  # copy
 
-        self._init_action_space()
-
         self.lr = DynamicParameter.create(value=lr)
 
         self.weights_path = dict(dqn=os.path.join(self.base_path, 'dqn'))
 
-        self.dqn = DQNetwork(agent=self, **(network or {}))
+        self.dqn = QNetwork(agent=self, **(network or {}))
         self.dqn.compile(optimizer, clip_norm=clip_norm, learning_rate=self.lr)
 
         if load:
@@ -59,6 +57,14 @@ class DQN(Agent):
             self._memory = ReplayMemory(self.transition_spec, size=self.memory_size)
 
         return self._memory
+
+    def _init_action_space(self):
+        assert isinstance(self.env.action_space, gym.spaces.Discrete)
+
+        self.num_actions = 1
+        self.num_classes = self.env.action_space.n
+
+        self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
     def act(self, state):
         other, debug = None, {}
@@ -117,14 +123,6 @@ class DQN(Agent):
 
         # print(f'Update in {round(time.time() - t0, 3)}s')
 
-    def _init_action_space(self):
-        assert isinstance(self.env.action_space, gym.spaces.Discrete)
-
-        self.num_actions = 1
-        self.num_classes = self.env.action_space.n
-
-        self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
-
     def update_target_network(self):
         if self.should_update_target:
             self.update_target_freq -= 1
@@ -161,7 +159,7 @@ class DQN(Agent):
 
 if __name__ == '__main__':
     agent = DQN(env='CartPole-v0', batch_size=32, policy='e-greedy', lr=1e-3*2,
-                log_mode=False, update_on_timestep=False, seed=42)
+                use_summary=False, update_on_timestep=False, seed=42)
     agent.summary()
 
     agent.learn(episodes=500, timesteps=200, render=False,

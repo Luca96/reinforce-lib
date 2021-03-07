@@ -1,7 +1,6 @@
 """Synchronous Advantage Actor-Critic (A2C)"""
 
 import os
-import gym
 import time
 import numpy as np
 import multiprocessing as mp
@@ -23,7 +22,7 @@ from typing import Tuple, Union
 # TODO: memory intensive (N+1 copies of networks' weights)
 class A3C(Agent):
     def __init__(self, env, name='a3c-agent', parallel_actors=None, n_steps=5, load=False, entropy=0.01,
-                 optimizer='rmsprop', lambda_=0.95, actor: dict = None, wait_time=0.001,
+                 optimizer='rmsprop', lambda_=1.0, actor: dict = None, wait_time=0.001, gamma=0.99,
                  normalize_advantages: Union[None, str] = 'sign', critic: dict = None,
                  advantage_scale: utils.DynamicType = 1.0, actor_lr: utils.DynamicType = 7e-4,
                  clip_norm: Tuple[utils.DynamicType] = (1.0, 1.0), critic_lr: utils.DynamicType = 7e-4, **kwargs):
@@ -34,7 +33,7 @@ class A3C(Agent):
         self.n_steps = int(n_steps)
         self.wait_time = float(wait_time)
 
-        super().__init__(env, batch_size=n_steps, name=name, **kwargs)
+        super().__init__(env, batch_size=n_steps, gamma=gamma, name=name, **kwargs)
         self.super = super()
         kwargs.pop('use_summary', None)
 
@@ -44,7 +43,6 @@ class A3C(Agent):
             assert parallel_actors >= 1
 
         self.num_actors = int(parallel_actors)
-        self._init_action_space()
 
         # Hyper-parameters
         self.lambda_ = tf.constant(lambda_, dtype=tf.float32)
@@ -93,33 +91,6 @@ class A3C(Agent):
             self._memory = GAEMemory(self.transition_spec, agent=self, size=self.n_steps)
 
         return self._memory
-
-    def _init_action_space(self):
-        action_space = self.env.action_space
-
-        if isinstance(action_space, gym.spaces.Box):
-            self.num_actions = action_space.shape[0]
-
-            # continuous:
-            if action_space.is_bounded():
-                self.distribution_type = 'beta'
-
-                self.action_low = tf.constant(action_space.low, dtype=tf.float32)
-                self.action_high = tf.constant(action_space.high, dtype=tf.float32)
-                self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
-
-                self.convert_action = lambda a: tf.squeeze(a * self.action_range + self.action_low).numpy()
-            else:
-                self.distribution_type = 'gaussian'
-                self.convert_action = lambda a: tf.squeeze(a).numpy()
-        else:
-            # discrete:
-            assert isinstance(action_space, gym.spaces.Discrete)
-            self.distribution_type = 'categorical'
-
-            self.num_actions = 1
-            self.num_classes = action_space.n
-            self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
     def _init_networks(self):
         if self.actor is not None:
@@ -332,6 +303,7 @@ class GAEMemory(EpisodicMemory):
         value = last_value[:, 0] * tf.pow(10.0, last_value[:, 1])
         value = tf.expand_dims(value, axis=-1)
 
+        # TODO: use `np.concatenate`
         rewards = tf.concat([self.data['reward'][:self.index], value], axis=0)
         values = tf.concat([self.data['value'][:self.index], last_value], axis=0)
 
@@ -379,25 +351,8 @@ class ActorNetwork(PolicyNetwork):
 
         return grads
 
-    @tf.function
-    def objective(self, batch) -> tuple:
-        advantages = batch['advantage']
-
-        log_prob, entropy = self(batch['state'], actions=batch['action'], training=True)
-
-        # Entropy
-        entropy = tf.reduce_sum(entropy)
-        entropy_loss = entropy * self.agent.entropy_strength()
-
-        # Loss
-        policy_loss = -tf.reduce_sum(log_prob * advantages)
-        total_loss = policy_loss - entropy_loss
-
-        # Debug
-        debug = dict(log_prob=log_prob, entropy=entropy, loss=policy_loss, loss_entropy=entropy_loss,
-                     loss_total=total_loss)
-
-        return total_loss, debug
+    def objective(self, batch, reduction=tf.reduce_sum) -> tuple:
+        return super().objective(batch, reduction=reduction)
 
     @tf.function
     def train_on_batch(self, batch):
@@ -408,10 +363,7 @@ class ActorNetwork(PolicyNetwork):
         debug['gradient_norm'] = [tf.norm(g) for g in gradients]
 
         if self.should_clip_gradients:
-            gradients, global_norm = utils.clip_gradients2(gradients, norm=self.clip_norm())
-            debug['gradient_clipped_norm'] = [tf.norm(g) for g in gradients]
-            debug['gradient_global_norm'] = global_norm
-            debug['clip_norm'] = self.clip_norm.value
+            gradients = self.clip_gradients(gradients, debug)
 
         return debug, gradients
 
@@ -432,20 +384,8 @@ class CriticNetwork(DecomposedValueNetwork):
 
         return grads
 
-    @tf.function
-    def objective(self, batch) -> tuple:
-        states, returns = batch['state'], batch['return']
-        values = self(states, training=True)
-
-        base_loss = 0.5 * tf.reduce_mean(tf.square(returns[:, 0] - values[:, 0]))
-        exp_loss = 0.5 * tf.reduce_mean(tf.square(returns[:, 1] - values[:, 1]))
-
-        if self.normalize_loss:
-            loss = 0.25 * base_loss + exp_loss / (self.exp_scale ** 2)
-        else:
-            loss = base_loss + exp_loss
-
-        return loss, dict(loss_base=base_loss, loss_exp=exp_loss, loss=loss)
+    def objective(self, batch, reduction=tf.reduce_sum) -> tuple:
+        return super().objective(batch, reduction=reduction)
 
     @tf.function
     def train_on_batch(self, batch):
@@ -456,10 +396,7 @@ class CriticNetwork(DecomposedValueNetwork):
         debug['gradient_norm'] = [tf.norm(g) for g in gradients]
 
         if self.should_clip_gradients:
-            gradients, global_norm = utils.clip_gradients2(gradients, norm=self.clip_norm())
-            debug['gradient_clipped_norm'] = [tf.norm(g) for g in gradients]
-            debug['gradient_global_norm'] = global_norm
-            debug['clip_norm'] = self.clip_norm.value
+            gradients = self.clip_gradients(gradients, debug)
 
         return debug, gradients
 

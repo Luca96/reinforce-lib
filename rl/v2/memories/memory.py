@@ -20,6 +20,7 @@ class Memory:
         for name, spec in self.specs.items():
             self.data[name] = self._add_spec(spec)
 
+    # TODO: should be recursive?
     def _add_spec(self, spec: dict):
         if 'shape' in spec:
             shape = spec['shape']
@@ -67,14 +68,28 @@ class Memory:
 
     def to_batches(self, batch_size: int, **kwargs):
         """Returns a tf.data.Dataset iterator over batches of transitions"""
-        if self.full:
-            return utils.data_to_batches(tensors=self.data, batch_size=batch_size, **kwargs)
-
-        return utils.data_to_batches(tensors=self.data, batch_size=batch_size, take=self.index, **kwargs)
+        return utils.data_to_batches(tensors=self.get_data(), batch_size=batch_size, **kwargs)
 
     def get_data(self) -> dict:
         """Returns the whole data in memory as a single batch"""
-        pass
+        if self.full:
+            return self.data
+
+        def _get(data, k_, val):
+            if not isinstance(val, dict):
+                data[k_] = val[:self.index]
+            else:
+                data[k_] = dict()
+
+                for k, v in val.items():
+                    _get(data[k_], k, v)
+
+        all_data = dict()
+
+        for key, value in self.data.items():
+            _get(all_data, key, value)
+
+        return all_data
 
     def clear(self):
         """Empties the memory"""
@@ -83,6 +98,25 @@ class Memory:
 
     def __delete__(self, instance):
         pass
+
+    def summary(self):
+        """Summarizes the structure of the current memory"""
+        print('-' * 80)
+        print(f'Memory: "{self.__class__.__name__}"')
+        print('-' * 80)
+
+        def _summary(key, value, nesting=0):
+            if isinstance(value, dict):
+                print('  ' * nesting + f' - {key}:')
+
+                for k_, v_ in value.items():
+                    _summary(key=k_, value=v_, nesting=nesting + 1)
+            else:
+                print('  ' * nesting + f' - {key}: shape {value.shape}, dtype {value.dtype}')
+                print('-' * 80)
+
+        for k, v in self.data.items():
+            _summary(key=k, value=v, nesting=0)
 
     def serialize(self, path: str):
         """Saves the entire content of the memory into a numpy's npz file"""

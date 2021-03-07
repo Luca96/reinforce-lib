@@ -17,7 +17,6 @@ class PolicyNetwork(Network):
     def __init__(self, agent: Agent, eps=utils.EPSILON, log_prefix='policy', **kwargs):
         self._base_model_initialized = True  # weird hack
 
-        self.dist_args = kwargs.pop('distribution', {})
         self.distribution = agent.distribution_type
         self.eps = eps
 
@@ -61,20 +60,20 @@ class PolicyNetwork(Network):
         return inputs, output, name
 
     def output_layer(self, layer: Layer) -> Layer:
-        return self.get_distribution_layer(layer, **self.dist_args)
+        return self.get_distribution_layer(layer, **self.output_args)
 
     @tf.function
-    def objective(self, batch) -> tuple:
+    def objective(self, batch, reduction=tf.reduce_mean) -> tuple:
         advantages = batch['advantage']
 
         log_prob, entropy = self(batch['state'], actions=batch['action'], training=True)
 
         # Entropy
-        entropy = tf.reduce_mean(entropy)
+        entropy = reduction(entropy)
         entropy_loss = entropy * self.agent.entropy_strength()
 
         # Loss
-        policy_loss = -tf.reduce_mean(log_prob * advantages)
+        policy_loss = -reduction(log_prob * advantages)
         total_loss = policy_loss - entropy_loss
 
         # Debug
@@ -83,6 +82,7 @@ class PolicyNetwork(Network):
 
         return total_loss, debug
 
+    # TODO: make_concrete_distribution: lambda p: p.sample(1, seed=SEED) ?
     def get_distribution_layer(self, layer: Layer, min_std=0.02, unimodal=False,
                                **kwargs) -> tfp.layers.DistributionLambda:
         """

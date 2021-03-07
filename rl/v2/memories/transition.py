@@ -63,13 +63,11 @@ class TransitionSpec:
 
     def get_spec(self, spec) -> dict:
         if isinstance(spec, tuple):
-            # return dict(shape=(1,) + spec, dtype=tf.float32)
             return dict(shape=spec, dtype=np.float32)
 
         elif isinstance(spec, dict):
             if 'shape' in spec:
                 assert isinstance(spec['shape'], tuple)
-                # return dict(shape=(1,) + spec['shape'], dtype=spec.get('dtype', tf.float32))
                 return dict(shape=spec['shape'], dtype=spec.get('dtype', np.float32))
             else:
                 new_spec = dict()

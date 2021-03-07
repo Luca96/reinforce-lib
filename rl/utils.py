@@ -87,6 +87,44 @@ def get_normalization_fn(name: str, **kwargs):
         return lambda x: tf_minmax_norm(x, **kwargs)
 
 
+def pooling_2d(layer: tf.keras.layers.Layer, args: Union[str, dict]) -> tf.keras.layers.Layer:
+    if args is None:
+        return layer
+
+    if isinstance(args, dict):
+        which = args.pop('which', args.pop('name', args.pop('type', 'max')))
+    else:
+        which = args
+        args = {}
+
+    assert isinstance(which, str)
+    which = which.lower()
+
+    if which == 'max':
+        return tf.keras.layers.MaxPooling2D(**args)(layer)
+
+    if which == 'avg':
+        return tf.keras.layers.AveragePooling2D(**args)(layer)
+
+    raise ValueError(f'Unknown Pooling layer with name "{which}", use "max" or "avg" only.')
+
+
+def global_pool2d_or_flatten(arg: Union[str, bool]) -> tf.keras.layers.Layer:
+    if (arg is None) or (arg is False):
+        return tf.keras.layers.Flatten()
+
+    assert isinstance(arg, str)
+    arg = arg.lower()
+
+    if arg == 'max':
+        return tf.keras.layers.GlobalMaxPooling2D()
+
+    if arg == 'avg':
+        return tf.keras.layers.GlobalAveragePooling2D()
+
+    raise ValueError(f'Unknown GlobalPooling layer with name "{arg}", use "max" or "avg" only.')
+
+
 # -------------------------------------------------------------------------------------------------
 # -- Misc
 # -------------------------------------------------------------------------------------------------
@@ -180,11 +218,13 @@ def polyak_averaging2(model, target, alpha: float):
 
 
 def clip_gradients(gradients: list, norm: float) -> list:
+    """Clips each gradient in the given list by w.r.t. their own norm"""
     return [tf.clip_by_norm(grad, clip_norm=norm) for grad in gradients]
 
 
 @tf.function
 def clip_gradients2(gradients: List[tf.Tensor], norm: float) -> tuple:
+    """Clip given list of gradients w.r.t their `global norm`"""
     return tf.clip_by_global_norm(gradients, clip_norm=norm)  # returns: (grads, g_norm)
 
 
@@ -668,6 +708,11 @@ def tf_dot_product(x, y, axis=0, keepdims=False):
     return tf.reduce_sum(tf.multiply(x, y), axis=axis, keepdims=keepdims)
 
 
+@tf.function
+def stop_gradient(args: tuple, **kwargs) -> tuple:
+    return tf.nest.map_structure(tf.stop_gradient, args, **kwargs)
+
+
 def tf_flatten(x):
     """Reshapes the given input as a 1-D array"""
     return tf.reshape(x, shape=[-1])
@@ -823,103 +868,7 @@ def copy_folder(src: str, dst: str):
 # -- Statistics utils
 # -------------------------------------------------------------------------------------------------
 
-# class Summary:
-#     def __init__(self, mode='summary', name=None, summary_dir='logs', keys: List[str] = None):
-#         self.stats = dict()
-#
-#         # filters what to log
-#         if isinstance(keys, list):
-#             self.allowed_keys = {k: True for k in keys}
-#         else:
-#             self.allowed_keys = None
-#
-#         if mode == 'summary':
-#             self.should_log = True
-#             self.use_summary = True
-#
-#         # TODO: review the usefulness of the "log" mode
-#         elif mode == 'log':
-#             self.should_log = True
-#             self.use_summary = False
-#         else:
-#             self.should_log = False
-#             self.use_summary = False
-#
-#         if self.use_summary:
-#             self.summary_dir = os.path.join(summary_dir, name, datetime.now().strftime("%Y%m%d-%H%M%S"))
-#             self.tf_summary_writer = tf.summary.create_file_writer(self.summary_dir)
-#
-#     def log(self, average=False, **kwargs):
-#         if not self.should_log:
-#             return
-#
-#         for key, value in kwargs.items():
-#             if not self.should_log_key(key):
-#                 continue
-#
-#             if key not in self.stats:
-#                 self.stats[key] = dict(step=0, list=[])
-#
-#             if tf.is_tensor(value):
-#                 if average:
-#                     self.stats[key]['list'].append(tf.reduce_mean(value))
-#
-#                 elif np.prod(value.shape) > 1:
-#                     self.stats[key]['list'].extend(value)
-#                 else:
-#                     self.stats[key]['list'].append(value)
-#
-#             elif hasattr(value, '__iter__'):
-#                 self.stats[key]['list'].extend(value)
-#             else:
-#                 self.stats[key]['list'].append(value)
-#
-#     def should_log_key(self, key: str) -> bool:
-#         if self.allowed_keys is None:
-#             return True
-#
-#         return key in self.allowed_keys
-#
-#     def write_summaries(self):
-#         if not self.use_summary:
-#             return
-#
-#         with self.tf_summary_writer.as_default():
-#             for summary_name, data in self.stats.items():
-#                 step = data['step']
-#                 values = data['list']
-#
-#                 if 'weight-' in summary_name or 'bias-' in summary_name:
-#                     tf.summary.histogram(name=summary_name, data=values, step=step)
-#
-#                 elif 'image_' in summary_name:
-#                     tf.summary.image(name=summary_name, data=tf.concat(values, axis=0), step=step)
-#                 else:
-#                     for i, value in enumerate(values):
-#                         tf.summary.scalar(name=summary_name, data=np.mean(value), step=step + i)
-#
-#                 # clear value_list, update step
-#                 self.stats[summary_name]['step'] += len(values)
-#                 self.stats[summary_name]['list'].clear()
-#
-#             self.tf_summary_writer.flush()
-#
-#     def plot(self, colormap='Set3'):  # Pastel1, Set3, tab20b, tab20c
-#         """Colormaps: https://matplotlib.org/tutorials/colors/colormaps.html"""
-#         num_plots = len(self.stats.keys())
-#         cmap = plt.get_cmap(name=colormap)
-#         rows = round(math.sqrt(num_plots))
-#         cols = math.ceil(math.sqrt(num_plots))
-#
-#         for k, (key, value) in enumerate(self.stats.items()):
-#             plt.subplot(rows, cols, k + 1)
-#             plt.plot(value, color=cmap(k + 1))
-#             plt.title(key)
-#
-#         plt.show()
-
-
-# TODO(bug): summary process doesn't terminate
+# TODO(bug): summary process doesn't terminate (error: ACCESS DENIED?!)
 class SummaryProcess(mp.Process):
     """Easy and efficient tf.summary with multiprocessing"""
 
@@ -950,17 +899,13 @@ class SummaryProcess(mp.Process):
 
         # wait for stuff to be logged
         while not self.stop_event.is_set():
-            if not self.queue.empty():
+            while not self.queue.empty():
                 self.log(**self.queue.get())
 
             time.sleep(0.01)
 
+    # TODO: use histogram() to log discrete actions
     def log(self, average=False, **kwargs):
-        # import tensorflow as tf  # import here and lazy tf.summary.create is necessary for multiprocessing to work
-        #
-        # if self.tf_summary_writer is None:
-        #     self.tf_summary_writer = tf.summary.create_file_writer(self.summary_dir)
-
         with self.tf_summary_writer.as_default():
             for key, value in kwargs.items():
                 if not self.should_log_key(key):
