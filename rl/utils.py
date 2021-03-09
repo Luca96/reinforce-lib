@@ -902,7 +902,7 @@ class SummaryProcess(mp.Process):
             while not self.queue.empty():
                 self.log(**self.queue.get())
 
-            time.sleep(0.01)
+            # time.sleep(0.01)
 
     # TODO: use histogram() to log discrete actions
     def log(self, average=False, **kwargs):

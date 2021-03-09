@@ -21,7 +21,6 @@ from typing import Dict, Tuple, Union
 # TODO: try "original" implementation for policy
 class SAC(Agent):
     # TODO: noise for exploration
-    # TODO: `clip_reward` and/or `reward_scale` do it in `on_transition()`
     # TODO: initial_Random_steps (or batches), deterministic
     def __init__(self, *args, optimizer='adam', lr: utils.DynamicType = 3e-4, memory_size=1024, name='sac-agent',
                  actor: dict = None, critic: dict = None, clip_norm: utils.DynamicType = None, load=False,
@@ -219,7 +218,7 @@ class CriticNetwork(QNetwork):
     def act(self, inputs):
         raise NotImplementedError
 
-    def structure(self, inputs: Dict[str, Input], name='Q-Network', **kwargs) -> tuple:
+    def structure(self, inputs: Dict[str, Input], name='SAC-Q-Network', **kwargs) -> tuple:
         state_in = inputs['state']
         action_in = Input(shape=(self.agent.num_actions,), name='action', dtype=tf.float32)
 

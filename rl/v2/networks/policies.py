@@ -133,3 +133,32 @@ class PolicyNetwork(Network):
 
             return tfp.layers.DistributionLambda(
                 make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[0], scale=t[1]))([mu, sigma])
+
+
+class DeterministicPolicyNetwork(Network):
+
+    def __init__(self, agent: Agent, *args, log_prefix='deterministic_policy', **kwargs):
+        self._base_model_initialized = True
+        super().__init__(agent, *args, log_prefix=log_prefix, **kwargs)
+
+    def structure(self, inputs: Dict[str, Input], name='DeterministicPolicyNetwork', **kwargs) -> tuple:
+        inputs = inputs['state']
+        x = backbones.dense(layer=inputs, **kwargs)
+
+        output = self.output_layer(x)
+        return inputs, output, name
+
+    def output_layer(self, layer: Layer) -> Layer:
+        action_space_type = self.agent.distribution_type
+        num_actions = self.agent.num_actions
+
+        if action_space_type == 'categorical':
+            # output is discrete
+            return Dense(units=self.agent.num_classes, name='action_logits', **self.output_args)(layer)
+
+        if action_space_type == 'beta':
+            # output is continuous and bounded
+            return Dense(units=num_actions, activation='tanh', name='actions', **self.output_args)(layer)
+
+        # output is continuous (and not bounded)
+        return Dense(units=num_actions, activation='linear', name='actions', **self.output_args)(layer)

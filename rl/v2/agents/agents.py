@@ -26,7 +26,7 @@ class Agent:
     def __init__(self, env: Union[gym.Env, str], batch_size: int, gamma=0.99, seed=None, weights_dir='weights',
                  use_summary=True, drop_batch_remainder=True, skip_data=0, consider_obs_every=1, shuffle=True,
                  evaluation_dir='evaluation', shuffle_batches=False, traces_dir: str = None, repeat_action=1,
-                 summary_keys: List[str] = None, name='agent'):
+                 summary_keys: List[str] = None, name='agent', reward_scale=1.0, clip_rewards: tuple = None):
         assert batch_size >= 1
         assert repeat_action >= 1
 
@@ -47,6 +47,10 @@ class Agent:
         self.repeat_action = int(repeat_action)
 
         self._init_action_space()
+
+        # Reward stuff:
+        self.reward_scale = DynamicParameter.create(value=reward_scale)
+        self._init_reward_clipping(clip_rewards)
 
         # Record:
         if isinstance(traces_dir, str):
@@ -133,6 +137,41 @@ class Agent:
             self.num_classes = action_space.n
             self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
+    def _init_reward_clipping(self, clip_rewards):
+        if clip_rewards is None:
+            self.reward_clip_range = (-np.inf, np.inf)
+
+        elif isinstance(clip_rewards, (tuple, list)) and len(clip_rewards) >= 1:
+            low = clip_rewards[0]
+
+            if (low is None) or (low == -np.inf) or (low == np.nan):
+                clip_low = -np.inf
+
+            elif isinstance(low, (int, float)):
+                low = float(low)
+            else:
+                raise ValueError(f'Lower-bound for reward clipping should be [None, -np.inf, np.nan, int, float] not'
+                                 f' {type(low)}.')
+
+            if len(clip_rewards) >= 2:
+                high = clip_rewards[1]
+
+                if (high is None) or (high == np.inf) or (high == np.nan):
+                    clip_high = np.inf
+
+                elif isinstance(high, (int, float)):
+                    high = float(high)
+                else:
+                    raise ValueError(
+                        f'Higher-bound for reward clipping should be [None, np.inf, np.nan, int, float] not'
+                        f' {type(high)}.')
+            else:
+                high = np.inf
+
+            self.reward_clip_range = (low, high)
+        else:
+            raise ValueError(f'Parameter "clip_rewards" should be None, list or tuple not {type(clip_rewards)}.')
+
     def set_random_seed(self, seed):
         """Sets the random seed for tensorflow, numpy, python's random, and the environment"""
         if seed is not None:
@@ -186,6 +225,7 @@ class Agent:
             transition = dict(state=state, action=action, reward=reward, next_state=next_state,
                               terminal=terminal, **(info or {}), **(other or {}))
 
+            self.preprocess_transition(transition, exploration=True)
             self.memory.store(transition)
             self.log(random_action_env=action_env, random_action=action, **debug)
 
@@ -266,12 +306,10 @@ class Agent:
                         break
 
                 # TODO: next_state not pre-processes, pre-process or avoid storing them!
-                # TODO: provide `preprocess_transition()` fn?
-                # transition = dict(state=state, action=action, reward=reward, next_state=next_state,
-                #                   terminal=terminal, info=info, other=other)
                 transition = dict(state=state, action=action, reward=reward, next_state=next_state,
                                   terminal=terminal, **(info or {}), **(other or {}))
 
+                self.preprocess_transition(transition)
                 self.on_transition(transition, timestep=t, episode=episode)
                 self.log(action_env=action_env, **debug)
 
@@ -379,6 +417,16 @@ class Agent:
 
         return utils.to_tensor(state, expand_axis=0)
 
+    def preprocess_reward(self, reward):
+        self.log(reward_original=reward)
+
+        # reward clipping
+        r_min, r_max = self.reward_clip_range
+        return np.clip(reward, a_min=r_min, a_max=r_max) * self.reward_scale()
+
+    def preprocess_transition(self, transition: dict, exploration=False):
+        transition['reward'] = self.preprocess_reward(transition['reward'])
+
     def log(self, average=False, **kwargs):
         if self.should_log:
             self.summary_queue.put(dict(average=average, **kwargs))
@@ -453,6 +501,7 @@ class Agent:
             - Also for storing transition in memory, also conditional on actual timestep/episode num.
             - Or, updating the agent (e.g. DQN)
         """
+        self.preprocess_transition(transition)
         self.log_transition(transition)
         self.memory.store(transition)
 

@@ -89,7 +89,6 @@ class Network(tf.keras.Model):
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
         return loss, debug
 
-    @tf.function
     def clip_gradients(self, gradients: List[tf.Tensor], debug: dict) -> List[tf.Tensor]:
         gradients, global_norm = utils.clip_gradients2(gradients, norm=self.clip_norm())
         debug['gradient_clipped_norm'] = [tf.norm(g) for g in gradients]

@@ -9,4 +9,4 @@ from rl.v2.networks.q import QNetwork
 from rl.v2.networks.values import ValueNetwork, DecomposedValueNetwork
 
 # Policy Networks
-from rl.v2.networks.policies import PolicyNetwork
+from rl.v2.networks.policies import PolicyNetwork, DeterministicPolicyNetwork

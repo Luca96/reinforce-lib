@@ -14,6 +14,7 @@ from typing import Dict, Union
 class QNetwork(Network):
 
     def __init__(self, agent: Agent, target=True, log_prefix='q', **kwargs):
+        self._base_model_initialized = True
         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
 
         self.gamma = self.agent.gamma
