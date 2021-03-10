@@ -258,6 +258,11 @@ def decompose_number(num: float) -> (float, float):
     return num, float(exponent)
 
 
+def remove_keys(d: dict, keys: List[str]):
+    for key in keys:
+        d.pop(key)
+
+
 # -------------------------------------------------------------------------------------------------
 # -- Plot utils
 # -------------------------------------------------------------------------------------------------
@@ -441,30 +446,6 @@ def space_to_flat_spec2(space: gym.Space, name: str) -> Dict[str, dict]:
 # -------------------------------------------------------------------------------------------------
 # -- TF utils
 # -------------------------------------------------------------------------------------------------
-
-# TODO: @tf.function
-# def to_tensor(x, expand_axis: Union[int, None, False] = 0):
-#     if isinstance(x, dict):
-#         t = dict()
-#         should_expand = isinstance(expand_axis, int)
-#
-#         for k, v in x.items():
-#             if should_expand:
-#                 t[k] = tf.expand_dims(to_float(v), axis=expand_axis)
-#             else:
-#                 t[k] = to_float(v)
-#
-#         tf.nest.map_structure
-#
-#         return t
-#     else:
-#         x = to_float(x)
-#         # x = tf.convert_to_tensor(x)
-#
-#         if isinstance(expand_axis, int):
-#             x = tf.expand_dims(x, axis=expand_axis)
-#
-#         return x
 
 @tf.function
 def to_tensor(x, expand_axis=0):

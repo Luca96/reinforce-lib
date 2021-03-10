@@ -13,14 +13,14 @@ from rl.parameters import DynamicParameter
 
 from rl.v2.agents import Agent
 from rl.v2.memories import ReplayMemory, TransitionSpec
-from rl.v2.networks.q import QNetwork
+from rl.v2.networks.q import QNetwork, DoubleQNetwork
 
 
 class DQN(Agent):
     def __init__(self, *args, name='dqn-agent', lr: utils.DynamicType = 3e-4, optimizer='adam', memory_size=1024,
                  policy='e-greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = 1.0, load=False,
-                 update_target_network: Union[bool, int] = False, polyak: utils.DynamicType = 0.995,
-                 network: dict = None, update_on_timestep=True, **kwargs):
+                 update_target_network: Union[bool, int] = False, polyak: utils.DynamicType = 0.995, double=True,
+                 network: dict = None, dueling=True, update_on_timestep=True, **kwargs):
         assert policy.lower() in ['boltzmann', 'softmax', 'e-greedy', 'greedy']
         super().__init__(*args, name=name, **kwargs)
 
@@ -41,7 +41,11 @@ class DQN(Agent):
 
         self.weights_path = dict(dqn=os.path.join(self.base_path, 'dqn'))
 
-        self.dqn = QNetwork(agent=self, **(network or {}))
+        if double:
+            self.dqn = DoubleQNetwork(agent=self, dueling=dueling, **(network or {}))
+        else:
+            self.dqn = QNetwork(agent=self, dueling=dueling, **(network or {}))
+
         self.dqn.compile(optimizer, clip_norm=clip_norm, learning_rate=self.lr)
 
         if load:
@@ -159,8 +163,8 @@ class DQN(Agent):
 
 if __name__ == '__main__':
     agent = DQN(env='CartPole-v0', batch_size=32, policy='e-greedy', lr=1e-3*2,
-                use_summary=False, update_on_timestep=False, seed=42)
+                use_summary=False, update_on_timestep=False, double=True, dueling=True, seed=42)
     agent.summary()
-
+    breakpoint()
     agent.learn(episodes=500, timesteps=200, render=False,
                 evaluation=dict(episodes=100, freq=500))

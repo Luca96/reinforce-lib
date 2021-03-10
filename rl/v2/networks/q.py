@@ -13,9 +13,17 @@ from typing import Dict, Union
 
 class QNetwork(Network):
 
-    def __init__(self, agent: Agent, target=True, log_prefix='q', **kwargs):
+    def __init__(self, agent: Agent, target=True, dueling=False, operator='avg', log_prefix='q', **kwargs):
         self._base_model_initialized = True
-        super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
+
+        if dueling:
+            assert isinstance(operator, str) and operator.lower() in ['avg', 'max']
+            self.operator = operator.lower()
+            self.use_dueling = True
+        else:
+            self.use_dueling = False
+
+        super().__init__(agent, target=target, dueling=dueling, operator=operator, log_prefix=log_prefix, **kwargs)
 
         self.gamma = self.agent.gamma
 
@@ -35,15 +43,36 @@ class QNetwork(Network):
         return tf.argmax(q_values, axis=-1)
 
     def structure(self, inputs: Dict[str, Input], name='Deep-Q-Network', **kwargs) -> tuple:
+        utils.remove_keys(kwargs, keys=['dueling', 'operator'])
+
         inputs = inputs['state']
         x = backbones.dense(layer=inputs, **kwargs)
 
-        output = self.output_layer()(x)
+        output = self.output_layer(layer=x)
         return inputs, output, name
 
-    def output_layer(self) -> Layer:
+    def output_layer(self, layer: Layer) -> Layer:
         assert self.agent.num_actions == 1
-        return Dense(units=self.agent.num_classes, name='q-values', **self.output_args)
+
+        if self.use_dueling:
+            return self.dueling_architecture(layer)
+
+        return Dense(units=self.agent.num_classes, name='q-values', **self.output_args)(layer)
+
+    def dueling_architecture(self, layer: Layer) -> Layer:
+        num_actions = self.agent.num_actions
+
+        # two streams (branches)
+        value = Dense(units=1, name='value', **self.output_args)(layer)
+        advantage = Dense(units=num_actions, name='advantage', **self.output_args)(layer)
+
+        if self.operator == 'max':
+            k = tf.reduce_max(advantage, axis=-1, keepdims=True)
+        else:
+            k = tf.reduce_mean(advantage, axis=-1, keepdims=True)
+
+        q_values = value + (advantage - k)
+        return q_values
 
     @tf.function
     def objective(self, batch: dict, reduction=tf.reduce_mean) -> tuple:
@@ -61,7 +90,48 @@ class QNetwork(Network):
         rewards = batch['reward']
         q_values = self.target(inputs=batch['next_state'], training=False)
 
-        targets = rewards * self.gamma * tf.reduce_max(q_values, axis=1, keepdims=True)
-        targets = tf.where(batch['terminal'] == 0, x=rewards, y=targets)
-
+        targets = rewards + self.gamma * (1.0 - batch['terminal']) * tf.reduce_max(q_values, axis=1, keepdims=True)
         return tf.stop_gradient(targets)
+
+
+class DoubleQNetwork(QNetwork):
+
+    @tf.function
+    def targets(self, batch: dict):
+        rewards = batch['reward']
+        next_states = batch['next_state']
+
+        # double q-learning rule
+        q_target = self(inputs=next_states, training=False)
+        argmax_a = tf.expand_dims(tf.argmax(q_target, axis=-1), axis=-1)
+        q_values = self.target(inputs=next_states, actions=argmax_a, training=False)
+
+        targets = rewards + self.gamma * (1.0 - batch['terminal']) * q_values
+        return tf.stop_gradient(targets)
+
+
+# class DuelingNetwork(QNetwork):
+#
+#     def __init__(self, agent: Agent, target=True, operator='avg', log_prefix='dueling_q', **kwargs):
+#         assert isinstance(operator, str) and operator.lower() in ['avg', 'max']
+#
+#         self.operator = operator.lower()
+#         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
+#
+#     def structure(self, inputs: Dict[str, Input], name='Dueling-Network', **kwargs) -> tuple:
+#         return super().structure(inputs, name=name, **kwargs)
+#
+#     def output_layer(self, layer: Layer) -> Layer:
+#         num_actions = self.agent.num_actions
+#
+#         # two streams (branches)
+#         value = Dense(units=1, **self.output_args)(layer)
+#         advantage = Dense(units=num_actions, **self.output_args)(layer)
+#
+#         if self.operator == 'max':
+#             k = tf.reduce_max(advantage, axis=-1, keepdims=True)
+#         else:
+#             k = tf.reduce_mean(advantage, axis=-1, keepdims=True)
+#
+#         q_values = value + (advantage - k)
+#         return q_values
