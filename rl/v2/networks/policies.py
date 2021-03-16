@@ -82,6 +82,7 @@ class PolicyNetwork(Network):
 
         return total_loss, debug
 
+    # TODO: investigate ghostly "seed" argument in tfp.DistributionLambda
     def get_distribution_layer(self, layer: Layer, min_std=0.02, unimodal=False,
                                **kwargs) -> tfp.layers.DistributionLambda:
         """
@@ -94,8 +95,6 @@ class PolicyNetwork(Network):
         :return: tfp.layers.DistributionLambda instance.
         """
         assert min_std >= 0.0
-
-        seed = self.agent.seed
         min_std = tf.constant(min_std, dtype=tf.float32)
 
         # Discrete actions:
@@ -107,7 +106,7 @@ class PolicyNetwork(Network):
             logits = Reshape((num_actions, num_classes), name='logits')(logits)
 
             return tfp.layers.DistributionLambda(
-                make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t), seed=seed)(logits)
+                make_distribution_fn=lambda t: tfp.distributions.Categorical(logits=t))(logits)
 
         # Bounded continuous 1-dimensional actions:
         # for activations choice refer to chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
@@ -121,7 +120,7 @@ class PolicyNetwork(Network):
             beta = Dense(units=num_actions, activation=utils.softplus(min_std), name='beta', **kwargs)(layer)
 
             return tfp.layers.DistributionLambda(
-                make_distribution_fn=lambda t: tfp.distributions.Beta(t[0], t[1]), seed=seed)([alpha, beta])
+                make_distribution_fn=lambda t: tfp.distributions.Beta(t[0], t[1]))([alpha, beta])
 
         # Unbounded continuous actions)
         # for activations choice see chapter 4 of http://proceedings.mlr.press/v70/chou17a/chou17a.pdf
@@ -132,7 +131,7 @@ class PolicyNetwork(Network):
             sigma = Dense(units=num_actions, activation=utils.softplus(min_std), name='sigma', **kwargs)(layer)
 
             return tfp.layers.DistributionLambda(
-                make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[0], scale=t[1]), seed=seed)([mu, sigma])
+                make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[0], scale=t[1]))([mu, sigma])
 
 
 class DeterministicPolicyNetwork(Network):

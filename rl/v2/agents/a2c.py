@@ -233,13 +233,24 @@ class ParallelGAEMemory(EpisodicMemory):
             raise ValueError('Key "advantage" is reserved!')
 
         self.data['return'] = np.zeros_like(self.data['value'])
-        self.data['advantage'] = np.zeros(shape=(self.size, agent.horizon, 1), dtype=np.float32)
+        # self.data['advantage'] = np.zeros(shape=(self.size, agent.horizon, 1), dtype=np.float32)
+        self.data['advantage'] = np.zeros(shape=self.shape + (1,), dtype=np.float32)
         self.agent = agent
+
+    def is_full(self) -> bool:
+        if self.full:
+            return True
+
+        if self.index * self.shape[0] >= self.size:
+            self.full = True
+
+        return self.full
 
     def _store(self, data, spec, key, value):
         if not isinstance(value, dict):
             array = np.asanyarray(value, dtype=np.float32)
-            array = np.reshape(array, newshape=(self.size, spec['shape'][-1]))  # TODO: check spec['shape']
+            # array = np.reshape(array, newshape=(self.size, spec['shape'][-1]))  # TODO: check spec['shape']
+            array = np.reshape(array, newshape=(self.shape[0], spec['shape'][-1]))  # TODO: check spec['shape']
 
             # indexing: key, env, index (timestep)
             #   - `array` has shape (n_envs, horizon)
@@ -288,7 +299,7 @@ class ParallelGAEMemory(EpisodicMemory):
     def get_data(self) -> List[dict]:
         """Returns a batch of data for each environment/actor"""
         if self.full:
-            index = self.size
+            index = self.agent.horizon
         else:
             index = self.index
 

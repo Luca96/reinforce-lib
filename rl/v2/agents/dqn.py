@@ -58,7 +58,7 @@ class DQN(Agent):
     @property
     def memory(self) -> ReplayMemory:
         if self._memory is None:
-            self._memory = ReplayMemory(self.transition_spec, size=self.memory_size)
+            self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size)
 
         return self._memory
 
@@ -70,10 +70,10 @@ class DQN(Agent):
 
         self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
+    # TODO: implement explorative policies directly into dqn.act?
     def act(self, state):
         other, debug = None, {}
 
-        # TODO: implement explorative policies directly into dqn.act?
         if self.policy == 'boltzmann':
             q_values = self.dqn(state, training=False)
             exp_q = tf.exp(q_values)
@@ -111,21 +111,19 @@ class DQN(Agent):
         return actions, {}, {}
 
     def learn(self, *args, **kwargs):
-        t0 = time.time()
-        super().learn(*args, **kwargs)
-        print(f'Time {round(time.time() - t0, 3)}s.')
+        with utils.Timed(msg='Learn'):
+            super().learn(*args, **kwargs)
 
     def update(self):
         if not self.memory.full_enough(amount=self.batch_size):
             print('Not updated: memory too small!')
             return
 
-        t0 = time.time()
-        batch = self.memory.get_batch(batch_size=self.batch_size, seed=self.seed)
+        with utils.Timed(msg='Update', silent=True):
+            batch = self.memory.get_batch(batch_size=self.batch_size, seed=self.seed)
+            self.dqn.train_step(batch)
 
-        self.dqn.fit(x=batch, y=None, batch_size=self.batch_size, shuffle=False, verbose=0)
-
-        # print(f'Update in {round(time.time() - t0, 3)}s')
+        # self.dqn.fit(x=batch, y=None, batch_size=self.batch_size, shuffle=False, verbose=0)
 
     def update_target_network(self):
         if self.should_update_target:
@@ -162,9 +160,14 @@ class DQN(Agent):
 
 
 if __name__ == '__main__':
-    agent = DQN(env='CartPole-v0', batch_size=32, policy='e-greedy', lr=1e-3*2,
-                use_summary=False, update_on_timestep=False, double=True, dueling=True, seed=42)
+    from rl.parameters import StepDecay, ExponentialDecay
+
+    agent = DQN(env='CartPole-v0', batch_size=32, policy='boltzmann', memory_size=4096,
+                name='dqn-cart', clip_norm=5.0, network=dict(num_layers=3),
+                lr=StepDecay(1.5e-5, decay_steps=250, decay_rate=0.5),
+                reward_scale=0.5,
+                use_summary=True, update_on_timestep=True, double=True, dueling=True, seed=42)
     agent.summary()
-    breakpoint()
-    agent.learn(episodes=500, timesteps=200, render=False,
-                evaluation=dict(episodes=100, freq=500))
+
+    agent.learn(episodes=1500, timesteps=200, render=False, exploration_steps=4096 * 0,
+                evaluation=dict(episodes=50, freq=100))

@@ -16,8 +16,7 @@ from rl.v2.agents.a2c import ParallelGAEMemory
 from typing import Dict, Tuple, Union
 
 
-# TODO: should memory be reset on episode end?
-# TODO: parallel environments
+# TODO: deprecate
 class PPO(Agent):
     def __init__(self, *args, name='ppo-agent', policy_lr: utils.DynamicType = 1e-3, value_lr: utils.DynamicType = 3e-4,
                  optimization_steps=(1, 1), lambda_=0.95, optimizer='adam', load=False, policy: dict = None,
@@ -241,22 +240,22 @@ class GAEMemory(EpisodicMemory):
         return advantages, norm_adv
 
 
-# TODO: jointly optimize `policy` and `value` networks, such that \pi does not have outdated values estimates
 # TODO: share features among the two networks??
 # TODO(bug): probable memory leak!
 class PPO2(ParallelAgent):
-    def __init__(self, env, horizon: int, batch_size: int, optimization_epochs=(1, 1), gamma=0.99, load=False,
+    def __init__(self, env, horizon: int, batch_size: int, optimization_epochs=10, gamma=0.99, load=False,
                  policy_lr: utils.DynamicType = 1e-3, value_lr: utils.DynamicType = 3e-4, optimizer='adam',
                  lambda_=0.95, num_actors=16, name='ppo2-agent', clip_ratio: utils.DynamicType = 0.2,
                  policy: dict = None, value: dict = None, entropy: utils.DynamicType = 0.01, clip_norm=(1.0, 1.0),
                  advantage_scale: utils.DynamicType = 2.0, normalize_advantages: Union[None, str] = 'sign', **kwargs):
         assert horizon >= 1
+        assert optimization_epochs >= 1
 
         super().__init__(env, num_actors=num_actors, batch_size=batch_size, gamma=gamma, name=name, **kwargs)
 
         # Hyper-parameters:
         self.horizon = int(horizon)
-        self.opt_epochs = self._init_optimization_epochs(optimization_epochs)
+        self.opt_epochs = int(optimization_epochs)
         self.lambda_ = tf.constant(lambda_, dtype=tf.float32)
         self.clip_ratio = DynamicParameter.create(value=clip_ratio)
         self.entropy_strength = DynamicParameter.create(value=entropy)
@@ -279,37 +278,44 @@ class PPO2(ParallelAgent):
         if load:
             self.load()
 
-    def _init_optimization_epochs(self, opt_epochs: Union[tuple, utils.DynamicType]) -> dict:
-        if isinstance(opt_epochs, int) or isinstance(opt_epochs, float):
-            return dict(policy=DynamicParameter.create(value=int(opt_epochs)),
-                        value=DynamicParameter.create(value=int(opt_epochs)))
+    # def _init_optimization_epochs(self, opt_epochs: Union[tuple, utils.DynamicType]) -> dict:
+    #     if isinstance(opt_epochs, int) or isinstance(opt_epochs, float):
+    #         return dict(policy=DynamicParameter.create(value=int(opt_epochs)),
+    #                     value=DynamicParameter.create(value=int(opt_epochs)))
+    #
+    #     if isinstance(opt_epochs, tuple):
+    #         assert 1 <= len(opt_epochs) <= 2
+    #
+    #         if len(opt_epochs) == 1:
+    #             opt_epochs = opt_epochs[0]
+    #             return dict(policy=DynamicParameter.create(value=int(opt_epochs)),
+    #                         value=DynamicParameter.create(value=int(opt_epochs)))
+    #         else:
+    #             return dict(policy=DynamicParameter.create(value=int(opt_epochs[0])),
+    #                         value=DynamicParameter.create(value=int(opt_epochs[1])))
+    #     else:
+    #         # default value
+    #         return self._init_optimization_epochs(opt_epochs=(1, 1))
 
-        if isinstance(opt_epochs, tuple):
-            assert 1 <= len(opt_epochs) <= 2
-
-            if len(opt_epochs) == 1:
-                opt_epochs = opt_epochs[0]
-                return dict(policy=DynamicParameter.create(value=int(opt_epochs)),
-                            value=DynamicParameter.create(value=int(opt_epochs)))
-            else:
-                return dict(policy=DynamicParameter.create(value=int(opt_epochs[0])),
-                            value=DynamicParameter.create(value=int(opt_epochs[1])))
-        else:
-            # default value
-            return self._init_optimization_epochs(opt_epochs=(1, 1))
+    # @property
+    # def transition_spec(self) -> TransitionSpec:
+    #     state_spec = {k: (self.horizon,) + shape for k, shape in self.state_spec.items()}
+    #
+    #     return TransitionSpec(state=state_spec, action=(self.horizon, self.num_actions), next_state=False,
+    #                           terminal=False, reward=(self.horizon, 1),
+    #                           other=dict(log_prob=(self.horizon, self.num_actions), value=(self.horizon, 2)))
 
     @property
     def transition_spec(self) -> TransitionSpec:
-        state_spec = {k: (self.horizon,) + shape for k, shape in self.state_spec.items()}
-
-        return TransitionSpec(state=state_spec, action=(self.horizon, self.num_actions), next_state=False,
-                              terminal=False, reward=(self.horizon, 1),
-                              other=dict(log_prob=(self.horizon, self.num_actions), value=(self.horizon, 2)))
+        return TransitionSpec(state=self.state_spec, action=(self.num_actions,), next_state=False,
+                              terminal=False, reward=(1,),
+                              other=dict(log_prob=(self.num_actions,), value=(2,)))
 
     @property
     def memory(self) -> 'GAEMemory2':
         if self._memory is None:
-            self._memory = GAEMemory2(self.transition_spec, agent=self, size=self.num_actors)
+            # self._memory = GAEMemory2(self.transition_spec, agent=self, size=self.num_actors)
+            self._memory = GAEMemory2(self.transition_spec, agent=self, shape=(self.num_actors, self.horizon))
 
         return self._memory
 
@@ -327,25 +333,33 @@ class PPO2(ParallelAgent):
 
         return actions, other, debug
 
+    # TODO: implement early stop based on kl-divergence?
     def update(self):
         if not self.memory.full_enough(amount=self.batch_size):
-            print('Not updated: memory not enough full!')
+            print(f'[Not updated] Memory not enough full: {self.memory.index}/{self.batch_size}.')
             return
 
-        t0 = time.time()
-        data = self.memory.get_data()
+        with utils.Timed(msg='Update'):
+            # data = self.memory.get_data()
+            #
+            # self.policy.fit(x=data, y=None, batch_size=self.batch_size, epochs=self.opt_epochs['policy'],
+            #                 shuffle=True, verbose=0)
+            # self.value.fit(x=data, y=None, batch_size=self.batch_size, epochs=self.opt_epochs['value'],
+            #                shuffle=True, verbose=0)
 
-        self.policy.fit(x=data, y=None, batch_size=self.batch_size, epochs=self.opt_epochs['policy'](),
-                        shuffle=True, verbose=0)
-        self.value.fit(x=data, y=None, batch_size=self.batch_size, epochs=self.opt_epochs['value'](),
-                       shuffle=True, verbose=0)
+            batches = self.memory.to_batches(repeat=self.opt_epochs, **self.data_args)
 
-        print(f'Update in {round(time.time() - t0, 3)}s')
+            for batch in batches:
+                self.policy.train_step(batch)
+                self.value.train_step(batch)
+
+            self.memory.clear()
 
     def on_transition(self, transition: Dict[str, list], timestep: int, episode: int):
         super().on_transition(transition, timestep, episode)
 
-        if any(transition['terminal']) or (timestep % self.horizon == 0) or (timestep == self.max_timesteps):
+        if any(transition['terminal']) or (timestep % self.horizon == 0) or (timestep == self.max_timesteps) \
+                or self.memory.is_full():
             terminal_states = self.preprocess(transition['next_state'])
 
             values = self.value(terminal_states, training=False)
@@ -355,7 +369,6 @@ class PPO2(ParallelAgent):
             self.log(average=True, **debug)
 
             self.update()
-            self.memory.clear()
 
     def load_weights(self):
         self.policy.load_weights(filepath=self.weights_path['policy'], by_name=False)
@@ -372,8 +385,12 @@ class PPO2(ParallelAgent):
 
 class GAEMemory2(ParallelGAEMemory):
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.start = 0
+
     def full_enough(self, amount: int) -> bool:
-        return self.full or self.index * self.agent.num_actors >= amount
+        return self.full or self.index * self.shape[0] >= amount
 
     def end_trajectory(self, last_values: tf.Tensor):
         last_v = last_values[:, 0] * tf.pow(10.0, last_values[:, 1])
@@ -385,8 +402,8 @@ class GAEMemory2(ParallelGAEMemory):
         for i in range(self.agent.num_actors):
             last_value = tf.expand_dims(last_values[i], axis=0)
 
-            rewards = np.concatenate([data_reward[i][:self.index], tf.reshape(last_v[i], shape=(1, 1))], axis=0)
-            values = np.concatenate([data_value[i][:self.index], last_value], axis=0)
+            rewards = np.concatenate([data_reward[i][self.start:self.index], tf.reshape(last_v[i], shape=(1, 1))], axis=0)
+            values = np.concatenate([data_value[i][self.start:self.index], last_value], axis=0)
 
             # value = base * 10^exponent
             v_base, v_exp = values[:, 0], values[:, 1]
@@ -398,15 +415,21 @@ class GAEMemory2(ParallelGAEMemory):
             adv, advantages = self.compute_advantages(rewards, values)
 
             # store them
-            data_return[i][:self.index] = returns
-            data_adv[i][:self.index] = advantages
+            data_return[i][self.start:self.index] = returns
+            data_adv[i][self.start:self.index] = advantages
 
             # debug
             debug.update({f'returns_{i}': returns[:, 0] * tf.pow(10.0, returns[:, 1]),
                           f'returns_base_{i}': returns[:, 0], f'returns_exp_{i}': returns[:, 1],
                           f'advantages_normalized_{i}': advantages, f'advantages_{i}': adv,
                           f'values_{i}': values, f'values_base_{i}': v_base, f'values_exp_{i}': v_exp})
+
+        self.start = self.index
         return debug
+
+    def clear(self):
+        super().clear()
+        self.start = 0
 
     def compute_returns(self, rewards):
         returns = utils.rewards_to_go(rewards, discount=self.agent.gamma)
@@ -418,7 +441,7 @@ class GAEMemory2(ParallelGAEMemory):
 
     def get_data(self) -> dict:
         if self.full:
-            index = self.size
+            index = self.shape[1]  # shape[1] = agent.horizon
         else:
             index = self.index
 
@@ -467,12 +490,25 @@ def cartpole2():
     value = dict(activation=tf.nn.tanh, exponent_scale=3.0, bias_initializer='glorot_uniform',
                  kernel_initializer='glorot_normal')
 
-    a = PPO2(env='CartPole-v0', batch_size=32, horizon=200, num_actors=16//2, lambda_=0.95, entropy=0.0,
-             optimization_epochs=(10, 1), policy_lr=3e-4, policy=policy, value=value, seed=42, use_summary=True)
+    a = PPO2(env='CartPole-v0', batch_size=32, horizon=200, num_actors=1, lambda_=0.95, entropy=0.0,
+             name='ppo2-cart',
+             optimization_epochs=10, policy_lr=3e-4, policy=policy, value=value, seed=42, use_summary=True)
     a.learn(500, 200)
+
+
+def lunar2():
+    policy = dict(activation=tf.nn.swish, num_layers=4, units=64)
+    value = dict(activation=tf.nn.tanh, num_layers=4, units=64, exponent_scale=4.0)
+
+    a = PPO2(env='LunarLanderContinuous-v2', batch_size=32, horizon=200, num_actors=4, lambda_=0.95,
+             entropy=0.001, name='ppo2-lunar',
+             optimization_epochs=10, policy_lr=3e-4, policy=policy, value=value, seed=42, use_summary=True)
+    a.learn(500, 200, render=25)
 
 
 if __name__ == '__main__':
     # cartpole()
-    cartpole2()
     # lunar_lander()
+
+    # cartpole2()
+    lunar2()

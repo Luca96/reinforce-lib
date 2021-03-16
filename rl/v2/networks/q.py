@@ -60,11 +60,9 @@ class QNetwork(Network):
         return Dense(units=self.agent.num_classes, name='q-values', **self.output_args)(layer)
 
     def dueling_architecture(self, layer: Layer) -> Layer:
-        num_actions = self.agent.num_actions
-
         # two streams (branches)
         value = Dense(units=1, name='value', **self.output_args)(layer)
-        advantage = Dense(units=num_actions, name='advantage', **self.output_args)(layer)
+        advantage = Dense(units=self.agent.num_classes, name='advantage', **self.output_args)(layer)
 
         if self.operator == 'max':
             k = tf.reduce_max(advantage, axis=-1, keepdims=True)
@@ -80,7 +78,7 @@ class QNetwork(Network):
         q_targets = self.targets(batch)
 
         loss = 0.5 * reduction(tf.square(q_values - q_targets))
-        debug = dict(loss=loss, q_targets=q_targets, q_values=q_values)
+        debug = dict(loss=loss, targets=q_targets, values=q_values)
 
         return loss, debug
 
@@ -110,28 +108,7 @@ class DoubleQNetwork(QNetwork):
         return tf.stop_gradient(targets)
 
 
-# class DuelingNetwork(QNetwork):
-#
-#     def __init__(self, agent: Agent, target=True, operator='avg', log_prefix='dueling_q', **kwargs):
-#         assert isinstance(operator, str) and operator.lower() in ['avg', 'max']
-#
-#         self.operator = operator.lower()
-#         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
-#
-#     def structure(self, inputs: Dict[str, Input], name='Dueling-Network', **kwargs) -> tuple:
-#         return super().structure(inputs, name=name, **kwargs)
-#
-#     def output_layer(self, layer: Layer) -> Layer:
-#         num_actions = self.agent.num_actions
-#
-#         # two streams (branches)
-#         value = Dense(units=1, **self.output_args)(layer)
-#         advantage = Dense(units=num_actions, **self.output_args)(layer)
-#
-#         if self.operator == 'max':
-#             k = tf.reduce_max(advantage, axis=-1, keepdims=True)
-#         else:
-#             k = tf.reduce_mean(advantage, axis=-1, keepdims=True)
-#
-#         q_values = value + (advantage - k)
-#         return q_values
+class TwinQNetwork(QNetwork):
+    """Wraps two q-networks"""
+    # TODO: issues with having two models??
+    pass

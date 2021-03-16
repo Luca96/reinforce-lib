@@ -7,6 +7,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import multiprocessing as mp
 import random
+import time
 
 from typing import Union, List, Dict, Tuple, Optional
 from distutils import dir_util
@@ -244,10 +245,15 @@ def average_gradients(gradients: list, n: int) -> list:
     return [g / n for g in gradients]
 
 
-def decompose_number(num: float) -> (float, float):
-    """Decomposes a given number [n] in a scientific-like notation:
-       - n = fractional_part * 10^exponent
-       - e.g. 2.34 could be represented as (0.234, 1) such that 0.234 * 10^1 = 2.34
+def decompose_number(num: float) -> Tuple[float, float]:
+    """Decomposes a given number `n` in a `base` (b) and `exponent` (e), such that:
+       - n = b * 10^e
+       - NOTE: b in [-1.0, 1.0], and e in [0.0, +inf]
+
+       Examples:
+       - 2.34 = (0.234, 1), such that 0.234 * 10^1 = 2.34
+       - 0.034 = (0.034, 0.0), such that 0.034 * 10^0 = 0.034
+       - -12 = (-0.12, 2.0), such that -0.12 * 10^2 = -12
     """
     exponent = 0
 
@@ -261,6 +267,24 @@ def decompose_number(num: float) -> (float, float):
 def remove_keys(d: dict, keys: List[str]):
     for key in keys:
         d.pop(key)
+
+
+class Timed:
+    """Measures time. Usage:
+        with Timed():
+            code()
+    """
+    def __init__(self, msg='Code', silent=False):
+        self.t0 = None
+        self.msg = str(msg)
+        self.is_silent = bool(silent)
+
+    def __enter__(self):
+        self.t0 = time.time()
+
+    def __exit__(self, *args):
+        if not self.is_silent:
+            print(f'{self.msg} took {round(time.time() - self.t0, 3)}s.')
 
 
 # -------------------------------------------------------------------------------------------------
@@ -530,6 +554,17 @@ def tf_sp_norm(x, eps=1e-3):
     return (positives / (tf.reduce_max(x) + eps)) + (negatives / -(tf.reduce_min(x) - eps))
 
 
+def tf_magnitude_norm(x):
+    """Magnitude normalization"""
+    x = to_float(x)
+
+    # decompose `x` such that `x = base * 10^exp`
+    base, exp = tf.map_fn(fn=decompose_number, elems=x, dtype=(tf.float32, tf.float32))
+    exp = tf.reshape(exp, shape=base.shape)
+
+    return tf.where(base > 0.0, x=base + exp, y=base - exp)
+
+
 def tf_minmax_norm(x, lower=0.0, upper=1.0, eps=EPSILON):
     """Min-Max normalization, which scales `x` to be in range [lower, upper]"""
     x = to_float(x)
@@ -544,7 +579,7 @@ def tf_explained_variance(x, y, eps=EPSILON) -> float:
             - ev = 1  =>  perfect prediction
             - ev < 0  =>  worse than just predicting zero
 
-        - Source: OpenAI Baselines (https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/common/math_util.py#L25)
+        - Source: https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/common/math_util.py#L25
     """
     assert tf.shape(x) == tf.shape(y)
 
@@ -885,7 +920,6 @@ class SummaryProcess(mp.Process):
 
             # time.sleep(0.01)
 
-    # TODO: use histogram() to log discrete actions
     def log(self, average=False, **kwargs):
         with self.tf_summary_writer.as_default():
             for key, value in kwargs.items():
@@ -905,22 +939,79 @@ class SummaryProcess(mp.Process):
                 elif 'image_' in key:
                     tf.summary.image(name=key, data=tf.concat(value, axis=0), step=step)
                     self.steps[key] += 1
+
+                # elif 'action' in key:
+                #     dtype = value.dtype
+                #
+                #     if dtype in [tf.int32, tf.int64]:
+                #         tf.summary.histogram(name=key, data=value, step=step)
+                #     else:
+                #         dims = value.shape[-1]
+                #
+                #         if dims > 1:
+                #             for i in range(dims):
+                #                 new_key = f'{key}-{i}'
+                #
+                #                 if new_key not in self.steps:
+                #                     self.steps[new_key] = 0
+                #                     step = 0
+                #                 else:
+                #                     step = self.steps[new_key]
+                #
+                #                 self._scalar_summary(average, key=new_key, value=value[:, i], step=step)
+                #         else:
+                #             self._scalar_summary(average, key, value, step)
                 else:
-                    value = tf.squeeze(value)
+                    self._scalar_summary(average, key, value, step)
 
-                    if average or len(value.shape) == 0:
-                        value = tf.reduce_mean(value)
-                        tf.summary.scalar(name=key, data=value, step=step)
+        self.tf_summary_writer.flush()
 
-                        self.steps[key] += 1
-                        continue
-                    else:
-                        self.steps[key] += value.shape[0]
+    def _scalar_summary(self, average: bool, key: str, value, step: int):
+        value = tf.squeeze(value)
 
-                    for i, v in enumerate(value):
-                        tf.summary.scalar(name=key, data=tf.reduce_mean(v), step=step + i)
+        if ('image' in key) or ('prob' in key):
+            if len(value.shape) == 0:
+                # scalar (=> one action)
+                tf.summary.scalar(name=key, data=value, step=step)
+                self.steps[key] += 1
 
-            self.tf_summary_writer.flush()
+            elif len(value.shape) >= 1:
+                # (N,)-shaped array (=> N different actions)
+
+                if (len(value.shape) == 2) and average:
+                    value = tf.reduce_mean(value, axis=0)
+
+                for i, action in enumerate(value):
+                    new_key = f'{key}-{i}'
+
+                    if new_key not in self.steps:
+                        self.steps[new_key] = 0
+
+                    tf.summary.scalar(name=new_key, data=action, step=self.steps[new_key])
+                    self.steps[new_key] += 1
+
+            if len(value.shape) == 2:
+                # (M, N)-shaped array of actions
+                for i in range(value.shape[1]):
+                    new_key = f'{key}-{i}'
+                    actions = value[:, i]
+                    step = self.steps.get(new_key, 0)
+
+                    for j, action in enumerate(actions):
+                        tf.summary.scalar(name=new_key, data=action, step=step + j)
+
+                    self.steps[new_key] = step + value.shape[0]
+
+        elif average or len(value.shape) == 0:
+            value = tf.reduce_mean(value)
+            tf.summary.scalar(name=key, data=value, step=step)
+
+            self.steps[key] += 1
+        else:
+            self.steps[key] += value.shape[0]
+
+            for i, v in enumerate(value):
+                tf.summary.scalar(name=key, data=tf.reduce_mean(v), step=step + i)
 
     def should_log_key(self, key: str) -> bool:
         if self.allowed_keys is None:

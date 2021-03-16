@@ -4,15 +4,26 @@ import numpy as np
 from rl import utils
 from rl.v2.memories import TransitionSpec
 
+from typing import Union, Tuple
+
 
 class Memory:
     """A circular buffer that supports uniform replying"""
 
-    def __init__(self, transition_spec: TransitionSpec, size: int):
-        assert size >= 1
+    def __init__(self, transition_spec: TransitionSpec, shape: Union[int, Tuple]):
+        if isinstance(shape, tuple):
+            self.size = np.prod(shape)
+            self.shape = shape
+
+        elif isinstance(shape, (int, float)):
+            self.shape = (int(shape),)
+            self.size = self.shape[0]
+        else:
+            raise ValueError(f'Argument "shape" must be a `tuple`, `int`, or `float` not {type(shape)}.')
+
+        assert self.size >= 1
 
         self.data = dict()
-        self.size = int(size)
         self.index = 0
         self.specs = transition_spec
         self.full = False
@@ -24,7 +35,17 @@ class Memory:
     def _add_spec(self, spec: dict):
         if 'shape' in spec:
             shape = spec['shape']
-            return np.zeros(shape=(self.size,) + shape, dtype=spec['dtype'])
+            # return np.zeros(shape=(self.size,) + shape, dtype=spec['dtype'])
+            return np.zeros(shape=self.shape + shape, dtype=spec['dtype'])
+
+    def is_full(self) -> bool:
+        if self.full:
+            return True
+
+        if self.index >= self.size:
+            self.full = True
+
+        return self.full
 
     def full_enough(self, amount: int) -> bool:
         """Tests whether the memory contains at least `amount` elements."""
@@ -33,8 +54,7 @@ class Memory:
 
     def store(self, transition: dict):
         """Stores one transition"""
-        if self.index >= self.size:
-            self.full = True
+        if self.is_full():
             self.index = 0
 
         for k, v in transition.items():
@@ -66,9 +86,14 @@ class Memory:
         for _ in range(amount):
             yield self.get_batch(batch_size, **kwargs)
 
-    def to_batches(self, batch_size: int, **kwargs):
+    def to_batches(self, batch_size: int, repeat=0, **kwargs):
         """Returns a tf.data.Dataset iterator over batches of transitions"""
-        return utils.data_to_batches(tensors=self.get_data(), batch_size=batch_size, **kwargs)
+        batches = utils.data_to_batches(tensors=self.get_data(), batch_size=batch_size, **kwargs)
+
+        if repeat > 0:
+            return batches.repeat(count=repeat)
+
+        return batches
 
     def get_data(self) -> dict:
         """Returns the whole data in memory as a single batch"""
