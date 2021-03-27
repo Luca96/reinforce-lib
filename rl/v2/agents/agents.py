@@ -17,7 +17,7 @@ from typing import List, Dict, Union, Tuple
 
 
 # TODO: provide a "fake" agent just for debugging components?
-# TODO: gym.env wrapper that supports "reproucible" sampling, and has suitable "specs" for state and action-spaces
+# TODO: gym.env wrapper that supports "reproducible" sampling, and has suitable "specs" for state and action-spaces
 #  + basic pre-processing (e.g. conversion to numpy/tensor)?
 # TODO: evaluation callbacks?
 class Agent:
@@ -26,7 +26,7 @@ class Agent:
     def __init__(self, env: Union[gym.Env, str], batch_size: int, gamma=0.99, seed=None, weights_dir='weights',
                  use_summary=True, drop_batch_remainder=True, skip_data=0, consider_obs_every=1, shuffle=True,
                  evaluation_dir='evaluation', shuffle_batches=False, traces_dir: str = None, repeat_action=1,
-                 summary_keys: List[str] = None, name='agent', reward_scale=1.0, clip_rewards: tuple = None):
+                 summary: dict = None, name='agent', reward_scale=1.0, clip_rewards: tuple = None):
         assert batch_size >= 1
         assert repeat_action >= 1
 
@@ -41,6 +41,7 @@ class Agent:
         self.state_spec = utils.space_to_flat_spec(space=self.env.observation_space, name='state')
         self.action_spec = utils.space_to_flat_spec(space=self.env.action_space, name='action')
 
+        self.max_timesteps = None  # being init in `on_start()`
         self.gamma = tf.constant(gamma, dtype=tf.float32)
         self._memory = None
         self._dynamic_parameters = None
@@ -84,7 +85,7 @@ class Agent:
             self.summary_queue = mp.Queue()
             self.summary_stop_event = mp.Event()
             self.statistics = utils.SummaryProcess(self.summary_queue, self.summary_stop_event, name=name,
-                                                   keys=summary_keys)
+                                                   **(summary or {}))
             self.should_log = True
         else:
             self.should_log = False
@@ -242,7 +243,7 @@ class Agent:
         assert episodes > 0
         assert timesteps > 0
 
-        self.on_start()
+        self.on_start(episodes, timesteps)
 
         # Render:
         if render is True:
@@ -517,8 +518,10 @@ class Agent:
         """
         pass
 
-    def on_start(self):
+    def on_start(self, episodes: int, timesteps: int):
         """Called *before* the training loop commence"""
+        self.max_timesteps = timesteps
+
         if self.should_log and not self.statistics.is_alive():
             self.statistics.start()
 
@@ -527,14 +530,15 @@ class Agent:
         self.close_summary()
 
         if should_close:
-            print('closing...')
+            print('Closing env...')
             self.env.close()
 
-    def close_summary(self, timeout=2.0):
+    def close_summary(self):
         """Closes the SummaryProcess"""
         if self.should_log:
+            print('Writing summaries...')
             self.summary_stop_event.set()
-            self.statistics.close(timeout)
+            self.statistics.close()
 
 
 # TODO: better name SynchronousAgent or SyncAgent?
@@ -544,7 +548,7 @@ class ParallelAgent(Agent):
         assert num_actors >= 1
 
         self.num_actors = int(num_actors)
-        self.max_timesteps = 0  # being init in `self.learn(...)`
+        # self.max_timesteps = 0  # being init in `self.learn(...)`
 
         super().__init__(env=ParallelEnv(env, num=self.num_actors), *args, name=name, **kwargs)
 
@@ -620,8 +624,8 @@ class ParallelAgent(Agent):
         # # Exploration:
         # self.explore(steps=int(exploration_steps))
 
-        self.max_timesteps = timesteps
-        self.on_start()
+        self.on_start(episodes, timesteps)
+        # self.max_timesteps = timesteps
 
         # Learning-loop:
         for episode in range(1, episodes + 1):

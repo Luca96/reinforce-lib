@@ -11,10 +11,18 @@ from rl.v2.networks import backbones, Network
 from typing import Dict, Union
 
 
+@Network.register(name='Q-Network')
 class QNetwork(Network):
+    """Deep Q-Network (DQN) with support for:
+        - `target` network,
+        - `dueling` architecture, and
+        - `prioritized` memory.
+    """
 
-    def __init__(self, agent: Agent, target=True, dueling=False, operator='avg', log_prefix='q', **kwargs):
+    def __init__(self, agent: Agent, target=True, dueling=False, operator='avg', log_prefix='q', prioritized=False,
+                 **kwargs):
         self._base_model_initialized = True
+        self.has_prioritized_mem = bool(prioritized)
 
         if dueling:
             assert isinstance(operator, str) and operator.lower() in ['avg', 'max']
@@ -33,7 +41,8 @@ class QNetwork(Network):
 
         if tf.is_tensor(actions):
             # index q-values by given actions
-            return utils.index_tensor(tensor=q_values, indices=actions)
+            q_values = utils.index_tensor(tensor=q_values, indices=actions)
+            return tf.expand_dims(q_values, axis=-1)
 
         return q_values
 
@@ -43,7 +52,7 @@ class QNetwork(Network):
         return tf.argmax(q_values, axis=-1)
 
     def structure(self, inputs: Dict[str, Input], name='Deep-Q-Network', **kwargs) -> tuple:
-        utils.remove_keys(kwargs, keys=['dueling', 'operator'])
+        utils.remove_keys(kwargs, keys=['dueling', 'operator', 'prioritized'])
 
         inputs = inputs['state']
         x = backbones.dense(layer=inputs, **kwargs)
@@ -77,9 +86,17 @@ class QNetwork(Network):
         q_values = self(inputs=batch['state'], actions=batch['action'], training=True)
         q_targets = self.targets(batch)
 
-        loss = 0.5 * reduction(tf.square(q_values - q_targets))
-        debug = dict(loss=loss, targets=q_targets, values=q_values)
+        if self.has_prioritized_mem:
+            td_error = q_targets - q_values
 
+            # inform agent's memory about td-error, to later update priorities
+            self.agent.memory.td_error.assign(tf.squeeze(td_error))
+
+            loss = reduction(td_error * batch['weights'])
+        else:
+            loss = 0.5 * reduction(tf.square(q_values - q_targets))
+
+        debug = dict(loss=loss, targets=q_targets, values=q_values, td_error=q_targets - q_values)
         return loss, debug
 
     @tf.function
@@ -92,6 +109,7 @@ class QNetwork(Network):
         return tf.stop_gradient(targets)
 
 
+@Network.register(name='DoubleQNetwork')
 class DoubleQNetwork(QNetwork):
 
     @tf.function
@@ -106,9 +124,3 @@ class DoubleQNetwork(QNetwork):
 
         targets = rewards + self.gamma * (1.0 - batch['terminal']) * q_values
         return tf.stop_gradient(targets)
-
-
-class TwinQNetwork(QNetwork):
-    """Wraps two q-networks"""
-    # TODO: issues with having two models??
-    pass

@@ -11,7 +11,7 @@ from rl.parameters import DynamicParameter
 
 from rl.v2.agents import Agent
 from rl.v2.memories import ReplayMemory, TransitionSpec
-from rl.v2.networks import DeterministicPolicyNetwork, QNetwork, backbones
+from rl.v2.networks import Network, DeterministicPolicyNetwork, QNetwork, backbones
 
 from typing import Dict, Tuple
 
@@ -39,8 +39,12 @@ class DDPG(Agent):
         self.weights_path = dict(actor=os.path.join(self.base_path, 'actor'),
                                  critic=os.path.join(self.base_path, 'critic'))
 
-        self.actor = ActorNetwork(agent=self, target=True, log_prefix='actor', **(actor or {}))
-        self.critic = CriticNetwork(agent=self, log_prefix='critic', **(critic or {}))
+        # self.actor = ActorNetwork(agent=self, target=True, log_prefix='actor', **(actor or {}))
+        # self.critic = CriticNetwork(agent=self, log_prefix='critic', **(critic or {}))
+
+        self.actor = Network.create(agent=self, target=True, log_prefix='actor', **(actor or {}),
+                                    base_class='DDPG-ActorNetwork')
+        self.critic = Network.create(agent=self, log_prefix='critic', **(critic or {}), base_class='DDPG-CriticNetwork')
 
         self.actor.compile(optimizer, clip_norm=self.clip_norm[0], learning_rate=self.actor_lr)
         self.critic.compile(optimizer, clip_norm=self.clip_norm[1], learning_rate=self.critic_lr)
@@ -60,7 +64,7 @@ class DDPG(Agent):
     @property
     def memory(self) -> ReplayMemory:
         if self._memory is None:
-            self._memory = ReplayMemory(self.transition_spec, size=self.memory_size)
+            self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size)
 
         return self._memory
 
@@ -97,28 +101,41 @@ class DDPG(Agent):
 
             def convert_action(action):
                 # action comes from a `tanh` output, so lying within [-1, 1]
+                action = tf.clip_by_value(action, -1.0, 1.0)
                 action = (action + 1.0) / 2.0  # transform to [0, 1] (as Beta would do)
                 return tf.squeeze(action * action_range + action_low).numpy()
 
             self.convert_action = convert_action
 
-    @tf.function
+    # @tf.function
     def act(self, state) -> Tuple[tf.Tensor, dict, dict]:
         action = self.actor(state, training=True)
 
         if self.noise.value > 0.0:
             noise = tf.random.normal(shape=action.shape, stddev=self.noise(), seed=self.seed)
-            debug = dict(noise=noise, noise_std=self.noise.value, action_not_noise=action)
+            debug = dict(noise=noise, noise_std=self.noise.value, action_without_noise=action)
         else:
-            noise = 0.0
             debug = {}
+            noise = 0.0
 
         # TODO: should clip actions + noise?
         return action + noise, {}, debug
 
+    def act_randomly(self, state) -> Tuple[tf.Tensor, dict, dict]:
+        if self.distribution_type == 'categorical':
+            # sample `logits` instead of actions
+            action = tf.random.uniform(shape=(self.num_classes,), seed=self.seed)
+
+        elif self.distribution_type == 'beta':
+            action = tf.random.uniform(shape=(self.num_actions,), minval=-1.0, maxval=1.0, seed=self.seed)
+        else:
+            action = tf.random.normal(shape=(self.num_actions,), seed=self.seed)
+
+        return action, {}, {}
+
     def update(self):
         if not self.memory.full_enough(amount=self.batch_size):
-            print('Not updated: memory not enough full.')
+            return self.memory.update_warning(self.batch_size)
 
         for _ in range(self.optimization_steps):
             batch = self.memory.sample(batch_size=self.batch_size, seed=self.seed)
@@ -134,9 +151,8 @@ class DDPG(Agent):
             self.critic.update_target_network(polyak=self.polyak.value)
 
     def learn(self, *args, **kwargs):
-        t0 = time.time()
-        super().learn(*args, **kwargs)
-        print(f'Time {round(time.time() - t0, 3)}s.')
+        with utils.Timed('Learn'):
+            super().learn(*args, **kwargs)
 
     def on_transition(self, transition: dict, timestep: int, episode: int):
         super().on_transition(transition, timestep, episode)
@@ -155,6 +171,7 @@ class DDPG(Agent):
         self.critic.summary()
 
 
+@Network.register(name='DDPG-ActorNetwork')
 class ActorNetwork(DeterministicPolicyNetwork):
 
     @tf.function
@@ -168,6 +185,7 @@ class ActorNetwork(DeterministicPolicyNetwork):
         return loss, dict(loss=loss, actions=actions, q_values=q_values)
 
 
+@Network.register(name='DDPG-CriticNetwork')
 class CriticNetwork(QNetwork):
 
     def call(self, *inputs, training=None, **kwargs):
@@ -177,6 +195,7 @@ class CriticNetwork(QNetwork):
         raise NotImplementedError
 
     def structure(self, inputs: Dict[str, Input], name='CriticNetwork', **kwargs) -> tuple:
+        utils.remove_keys(kwargs, ['dueling', 'operator', 'prioritized'])
         state_in = inputs['state']
 
         if self.agent.distribution_type == 'categorical':
@@ -218,6 +237,10 @@ class CriticNetwork(QNetwork):
 if __name__ == '__main__':
     env1 = 'LunarLanderContinuous-v2'
     env2 = 'CartPole-v0'
-    a = DDPG(env=env2, batch_size=64, actor=dict(units=64), critic=dict(units=[64, 16]), name='ddpg-cart', noise=0.0,
-             use_summary=True, optimization_steps=1, clip_norm=1.0, critic_lr=1e-3, reward_scale=1.0, seed=42)
-    a.learn(300, 200, render=10)
+
+    actor = dict(units=32, output=dict(kernel_initializer='glorot_uniform', bias_initializer='zeros'))
+
+    a = DDPG(env=env2, batch_size=64, name='ddpg-cart', noise=0.01, use_summary=True,
+             actor=actor, critic=dict(units=[64, 16]), memory_size=4096, polyak=0.995,
+             optimization_steps=1, clip_norm=1.0, critic_lr=1e-3, reward_scale=1.0 / 4, seed=42)
+    a.learn(250, 200, exploration_steps=4096)

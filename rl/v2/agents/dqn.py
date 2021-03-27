@@ -12,15 +12,16 @@ from rl import utils
 from rl.parameters import DynamicParameter
 
 from rl.v2.agents import Agent
-from rl.v2.memories import ReplayMemory, TransitionSpec
-from rl.v2.networks.q import QNetwork, DoubleQNetwork
+from rl.v2.memories import TransitionSpec, ReplayMemory, PrioritizedMemory
+from rl.v2.networks.q import Network, QNetwork, DoubleQNetwork
 
 
 class DQN(Agent):
     def __init__(self, *args, name='dqn-agent', lr: utils.DynamicType = 3e-4, optimizer='adam', memory_size=1024,
                  policy='e-greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = 1.0, load=False,
                  update_target_network: Union[bool, int] = False, polyak: utils.DynamicType = 0.995, double=True,
-                 network: dict = None, dueling=True, update_on_timestep=True, **kwargs):
+                 network: dict = None, dueling=True, update_on_timestep=True, alpha: utils.DynamicType = 0.6,
+                 beta: utils.DynamicType = 0.4, replay_period=1, prioritized=False, **kwargs):
         assert policy.lower() in ['boltzmann', 'softmax', 'e-greedy', 'greedy']
         super().__init__(*args, name=name, **kwargs)
 
@@ -28,6 +29,16 @@ class DQN(Agent):
         self.policy = policy.lower()
         self.epsilon = DynamicParameter.create(value=epsilon)
         self.polyak = DynamicParameter.create(value=polyak)
+        self.prioritized = bool(prioritized)
+
+        # PER memory params:
+        if self.prioritized:
+            self.alpha = DynamicParameter.create(value=alpha)
+            self.beta = DynamicParameter.create(value=beta)
+            self.replay_period = int(replay_period)
+        else:
+            self.replay_period = 1  # to avoid additional bool flags
+
         self.update_on_timestep = bool(update_on_timestep)
 
         if not update_target_network and self.polyak.value == 1.0:
@@ -42,9 +53,13 @@ class DQN(Agent):
         self.weights_path = dict(dqn=os.path.join(self.base_path, 'dqn'))
 
         if double:
-            self.dqn = DoubleQNetwork(agent=self, dueling=dueling, **(network or {}))
+            self.dqn = Network.create(agent=self, dueling=dueling, prioritized=self.prioritized, **(network or {}),
+                                      base_class=DoubleQNetwork)
+            # self.dqn = DoubleQNetwork(agent=self, dueling=dueling, **(network or {}))
         else:
-            self.dqn = QNetwork(agent=self, dueling=dueling, **(network or {}))
+            self.dqn = Network.create(agent=self, dueling=dueling, prioritized=self.prioritized, **(network or {}),
+                                      base_class=QNetwork)
+            # self.dqn = QNetwork(agent=self, dueling=dueling, **(network or {}))
 
         self.dqn.compile(optimizer, clip_norm=clip_norm, learning_rate=self.lr)
 
@@ -56,9 +71,13 @@ class DQN(Agent):
         return TransitionSpec(state=self.state_spec, next_state=True, action=(self.num_actions,))
 
     @property
-    def memory(self) -> ReplayMemory:
+    def memory(self) -> Union[ReplayMemory, PrioritizedMemory]:
         if self._memory is None:
-            self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size)
+            if self.prioritized:
+                self._memory = PrioritizedMemory(self.transition_spec, shape=self.memory_size, alpha=self.alpha,
+                                                 beta=self.beta)
+            else:
+                self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size)
 
         return self._memory
 
@@ -111,19 +130,19 @@ class DQN(Agent):
         return actions, {}, {}
 
     def learn(self, *args, **kwargs):
-        with utils.Timed(msg='Learn'):
+        with utils.Timed('Learn'):
             super().learn(*args, **kwargs)
 
     def update(self):
         if not self.memory.full_enough(amount=self.batch_size):
-            print('Not updated: memory too small!')
-            return
+            return self.memory.update_warning(self.batch_size)
 
-        with utils.Timed(msg='Update', silent=True):
+        with utils.Timed('Update', silent=True):
             batch = self.memory.get_batch(batch_size=self.batch_size, seed=self.seed)
             self.dqn.train_step(batch)
 
-        # self.dqn.fit(x=batch, y=None, batch_size=self.batch_size, shuffle=False, verbose=0)
+            if self.prioritized:
+                self.memory.update_priorities()
 
     def update_target_network(self):
         if self.should_update_target:
@@ -138,7 +157,8 @@ class DQN(Agent):
     def on_transition(self, transition: dict, timestep: int, episode: int):
         super().on_transition(transition, timestep, episode)
 
-        if self.update_on_timestep:
+        if self.update_on_timestep and ((timestep % self.replay_period == 0) or transition['terminal'] or
+                                        (timestep == self.max_timesteps)):
             self.update()
             self.update_target_network()
 
@@ -164,9 +184,9 @@ if __name__ == '__main__':
 
     agent = DQN(env='CartPole-v0', batch_size=32, policy='boltzmann', memory_size=4096,
                 name='dqn-cart', clip_norm=5.0, network=dict(num_layers=3),
-                lr=StepDecay(1.5e-5, decay_steps=250, decay_rate=0.5),
-                reward_scale=0.5,
-                use_summary=True, update_on_timestep=True, double=True, dueling=True, seed=42)
+                lr=StepDecay(1.5e-5, steps=250, rate=0.5),
+                reward_scale=0.5, prioritized=True, replay_period=4,
+                use_summary=False, update_on_timestep=True, double=True, dueling=True, seed=42)
     agent.summary()
 
     agent.learn(episodes=1500, timesteps=200, render=False, exploration_steps=4096 * 0,

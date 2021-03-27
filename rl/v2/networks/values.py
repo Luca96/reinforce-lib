@@ -9,10 +9,12 @@ from rl.v2.networks import Network, backbones
 from typing import Dict
 
 
+@Network.register(name='ValueNetwork')
 class ValueNetwork(Network):
     """A standard ValueNetwork that predicts values for given states"""
 
     def __init__(self, agent: Agent, target=False, log_prefix='value', **kwargs):
+        self._base_model_initialized = True
         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
 
     def structure(self, inputs: Dict[str, Input], name='ValueNetwork', **kwargs) -> tuple:
@@ -34,6 +36,7 @@ class ValueNetwork(Network):
         return loss, dict(loss=loss)
 
 
+@Network.register(name='DecomposedValueNetwork')
 class DecomposedValueNetwork(ValueNetwork):
     """A ValueNetwork that predicts values (v) decomposed into bases (b) and exponents (e), such that: v = b * 10^e"""
 

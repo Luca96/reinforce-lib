@@ -10,7 +10,7 @@ from rl.parameters import DynamicParameter
 from rl.v2.agents import ParallelAgent
 from rl.v2.memories import TransitionSpec
 from rl.v2.memories.episodic import EpisodicMemory
-from rl.v2.networks import ValueNetwork, PolicyNetwork
+from rl.v2.networks import Network, ValueNetwork, PolicyNetwork
 
 from typing import List, Tuple, Union, Dict
 
@@ -31,14 +31,17 @@ class A2C(ParallelAgent):
         self.lambda_ = tf.constant(lambda_, dtype=tf.float32)
         self.entropy_strength = DynamicParameter.create(value=entropy)
         self.adv_scale = DynamicParameter.create(value=advantage_scale)
-        self.adv_normalization_fn = utils.get_normalization_fn(name=normalize_advantages)
+        self.adv_normalization_fn = utils.get_normalization_fn(arg=normalize_advantages)
 
         self.actor_lr = DynamicParameter.create(value=actor_lr)
         self.critic_lr = DynamicParameter.create(value=critic_lr)
 
         # shared networks (and optimizer)
-        self.actor = ActorNetwork(agent=self, log_prefix='actor', **(actor or {}))
-        self.critic = CriticNetwork(agent=self, log_prefix='critic', **(critic or {}))
+        self.actor = Network.create(agent=self, log_prefix='actor', **(actor or {}), base_class='A2C-ActorNetwork')
+        self.critic = Network.create(agent=self, log_prefix='critic', **(critic or {}), base_class='A2C-CriticNetwork')
+
+        # self.actor = ActorNetwork(agent=self, log_prefix='actor', **(actor or {}))
+        # self.critic = CriticNetwork(agent=self, log_prefix='critic', **(critic or {}))
 
         if isinstance(optimizer, dict):
             opt_args = optimizer
@@ -65,7 +68,7 @@ class A2C(ParallelAgent):
     @property
     def memory(self) -> 'ParallelGAEMemory':
         if self._memory is None:
-            self._memory = ParallelGAEMemory(self.transition_spec, agent=self, size=self.num_actors)
+            self._memory = ParallelGAEMemory(self.transition_spec, agent=self, shape=self.num_actors)
 
         return self._memory
 
@@ -96,17 +99,6 @@ class A2C(ParallelAgent):
                 gradients[j] += g
 
         return [g * n for g in gradients]
-
-    # def update(self):
-    #     batches = self.memory.get_data()
-    #
-    #     # get gradients for each batch (actor's data)
-    #     actor_grads = [self.actor.train_step(batch) for batch in batches]
-    #     critic_grads = [self.critic.train_step(batch) for batch in batches]
-    #
-    #     # update weights on averaged gradients across actors
-    #     self.actor.update(gradients=self.average_gradients(actor_grads))
-    #     self.critic.update(gradients=self.average_gradients(critic_grads))
 
     def update(self):
         batches = self.memory.get_data()
@@ -151,6 +143,7 @@ class A2C(ParallelAgent):
         self.critic.summary()
 
 
+@Network.register(name='A2C-ActorNetwork')
 class ActorNetwork(PolicyNetwork):
 
     def train_step(self, batch: dict):
@@ -171,12 +164,12 @@ class ActorNetwork(PolicyNetwork):
             loss, debug = self.objective(batch)
 
         gradients = tape.gradient(loss, self.trainable_variables)
-        debug['gradient_norm'] = [tf.norm(g) for g in gradients]
+        debug['gradient_norm'] = utils.tf_norm(gradients)
+        debug['gradient_global_norm'] = utils.tf_global_norm(debug['gradient_norm'])
 
         if self.should_clip_gradients:
-            gradients, global_norm = utils.clip_gradients2(gradients, norm=self.clip_norm())
-            debug['gradient_clipped_norm'] = [tf.norm(g) for g in gradients]
-            debug['gradient_global_norm'] = global_norm
+            gradients, _ = utils.clip_gradients2(gradients, norm=self.clip_norm())
+            debug['gradient_clipped_norm'] = utils.tf_norm(gradients)
             debug['clip_norm'] = self.clip_norm.value
 
         return debug, gradients
@@ -186,6 +179,7 @@ class ActorNetwork(PolicyNetwork):
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
 
 
+@Network.register(name='A2C-CriticNetwork')
 class CriticNetwork(ValueNetwork):
 
     def train_step(self, batch: dict):
@@ -206,12 +200,12 @@ class CriticNetwork(ValueNetwork):
             loss, debug = self.objective(batch)
 
         gradients = tape.gradient(loss, self.trainable_variables)
-        debug['gradient_norm'] = [tf.norm(g) for g in gradients]
+        debug['gradient_norm'] = utils.tf_norm(gradients)
+        debug['gradient_global_norm'] = utils.tf_global_norm(debug['gradient_norm'])
 
         if self.should_clip_gradients:
-            gradients, global_norm = utils.clip_gradients2(gradients, norm=self.clip_norm())
-            debug['gradient_clipped_norm'] = [tf.norm(g) for g in gradients]
-            debug['gradient_global_norm'] = global_norm
+            gradients, _ = utils.clip_gradients2(gradients, norm=self.clip_norm())
+            debug['gradient_clipped_norm'] = utils.tf_norm(gradients)
             debug['clip_norm'] = self.clip_norm.value
 
         return debug, gradients
@@ -233,7 +227,6 @@ class ParallelGAEMemory(EpisodicMemory):
             raise ValueError('Key "advantage" is reserved!')
 
         self.data['return'] = np.zeros_like(self.data['value'])
-        # self.data['advantage'] = np.zeros(shape=(self.size, agent.horizon, 1), dtype=np.float32)
         self.data['advantage'] = np.zeros(shape=self.shape + (1,), dtype=np.float32)
         self.agent = agent
 
@@ -249,7 +242,6 @@ class ParallelGAEMemory(EpisodicMemory):
     def _store(self, data, spec, key, value):
         if not isinstance(value, dict):
             array = np.asanyarray(value, dtype=np.float32)
-            # array = np.reshape(array, newshape=(self.size, spec['shape'][-1]))  # TODO: check spec['shape']
             array = np.reshape(array, newshape=(self.shape[0], spec['shape'][-1]))  # TODO: check spec['shape']
 
             # indexing: key, env, index (timestep)

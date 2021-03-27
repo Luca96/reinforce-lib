@@ -1,6 +1,7 @@
 """Some pre-defined NNs architectures"""
 
 from tensorflow.keras.layers import *
+from tensorflow.keras import regularizers
 
 from rl import utils
 from rl.layers import NoisyDense
@@ -10,18 +11,24 @@ from typing import Union, List
 
 def dense(layer: Layer, units=32, num_layers=2, activation='relu', normalization='layer', normalize_input=True,
           use_bias=True, bias_initializer='glorot_uniform', kernel_initializer='glorot_normal', dropout=0.0,
-          **kwargs) -> Layer:
+          weight_decay=0.0, **kwargs) -> Layer:
     """Feed-Forward Neural Network architecture with one input"""
     assert num_layers >= 1
+    assert weight_decay >= 0.0
 
     if normalize_input:
         x = utils.apply_normalization(layer, name=normalization)
     else:
         x = layer
 
+    if weight_decay > 0.0:
+        weight_decay = regularizers.l2(float(weight_decay))
+    else:
+        weight_decay = None
+
     for _ in range(num_layers):
         x = Dense(units, activation=activation, use_bias=use_bias, bias_initializer=bias_initializer,
-                  kernel_initializer=kernel_initializer, **kwargs)(x)
+                  kernel_initializer=kernel_initializer, kernel_regularizer=weight_decay, **kwargs)(x)
 
         if dropout > 0.0:
             x = Dropout(rate=dropout)(x)
@@ -34,7 +41,7 @@ def dense(layer: Layer, units=32, num_layers=2, activation='relu', normalization
 def dense_branched(*layers: List[Layer], units: Union[int, List[int]] = 32, num_layers: Union[int, List[int]] = 2,
                    activation: Union[str, List[str]] = 'relu', normalization: Union[str, List[str]] = 'layer',
                    normalize_input: Union[bool, List[bool]] = True, use_bias: Union[bool, List[bool]] = True,
-                   bias_initializer='glorot_uniform', kernel_initializer='glorot_normal',
+                   bias_initializer='glorot_uniform', kernel_initializer='glorot_normal', weight_decay=0.0,
                    dropout: Union[float, List[float]] = 0.0, **kwargs) -> Layer:
     """Applies the `dense` backbone over each `layer` in given list of layers.
         - Returns the concatenation of each branch: i.e. concatenate([dense(layer, ...) for layer in layers]).
@@ -45,25 +52,25 @@ def dense_branched(*layers: List[Layer], units: Union[int, List[int]] = 32, num_
         if isinstance(param, type_):
             return [param] * num_branches
         else:
-            assert len(units) == num_branches
+            assert len(param) == num_branches
             return param
 
     units = init_param(units, int)
     num_layers = init_param(num_layers, int)
     activation = init_param(activation, str)
-    normalization = init_param(normalization, str)
+    normalization = [None] * num_branches if normalization is None else init_param(normalization, str)
     normalize_input = init_param(normalize_input, bool)
     use_bias = init_param(use_bias, bool)
     dropout = init_param(dropout, float)
 
-    # apply `dense` backbone over each layer
+    # apply `dense` backbone for each branch
     outputs = []
 
     for i in range(num_branches):
         out = dense(layer=layers[i], units=units[i], num_layers=num_layers[i], activation=activation[i],
                     normalization=normalization[i], normalize_input=normalize_input[i], use_bias=use_bias[i],
                     bias_initializer=bias_initializer, kernel_initializer=kernel_initializer, dropout=dropout[i],
-                    **kwargs)
+                    weight_decay=weight_decay or 0.0, **kwargs)
         outputs.append(out)
 
     return concatenate(outputs)

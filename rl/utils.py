@@ -9,7 +9,7 @@ import multiprocessing as mp
 import random
 import time
 
-from typing import Union, List, Dict, Tuple, Optional
+from typing import Union, List, Dict, Tuple, Optional, Callable
 from distutils import dir_util
 from datetime import datetime
 
@@ -71,21 +71,27 @@ def apply_normalization(layer: tf.keras.layers.Layer, name: str, **kwargs) -> tf
     return layer
 
 
-def get_normalization_fn(name: str, **kwargs):
-    assert name in [None, 'identity', 'standard', 'sign', 'min_max', 'minmax']
-    name = name.lower()
+def get_normalization_fn(arg: Union[str, Callable], **kwargs):
+    if callable(arg):
+        return arg
 
-    if name == 'identity' or name is None:
+    arg = str(arg or 'identity').lower()
+    assert arg in ['identity', 'standard', 'sign', 'min_max', 'minmax', 'magnitude']
+
+    if arg == 'identity':
         return lambda x: x
 
-    if name == 'standard':
+    if arg == 'standard':
         return lambda x: tf_normalize(x, **kwargs)
 
-    if name == 'sign':
+    if arg == 'sign':
         return lambda x: tf_sp_norm(x, **kwargs)
 
-    if name == 'min_max' or name == 'minmax':
+    if arg == 'min_max' or arg == 'minmax':
         return lambda x: tf_minmax_norm(x, **kwargs)
+
+    if arg == 'magnitude':
+        return tf_magnitude_norm
 
 
 def pooling_2d(layer: tf.keras.layers.Layer, args: Union[str, dict]) -> tf.keras.layers.Layer:
@@ -266,7 +272,7 @@ def decompose_number(num: float) -> Tuple[float, float]:
 
 def remove_keys(d: dict, keys: List[str]):
     for key in keys:
-        d.pop(key)
+        d.pop(key, None)
 
 
 class Timed:
@@ -285,6 +291,48 @@ class Timed:
     def __exit__(self, *args):
         if not self.is_silent:
             print(f'{self.msg} took {round(time.time() - self.t0, 3)}s.')
+
+
+class Registry:
+    """A "Manager" class for easily retrieving registered classes:
+        - Classes must be registered upon definition.
+    """
+
+    def __init__(self):
+        self.registry = dict()
+        self._cls_reg = dict()
+
+    def register(self, name: str, class_):
+        assert callable(class_)
+
+        if name in self.registry:
+            other_class = self.registry[name]
+
+            if class_ == other_class:
+                raise ValueError(f'Name "{name}" already registered for class: "{class_}".')
+            else:
+                raise ValueError(f'Trying to register the same name "{name}" for two different classes: 1. '
+                                 f'{other_class}", 2. "{class_}".')
+
+        self.registry[name] = class_
+        self._cls_reg[class_] = name
+
+    def is_registered(self, class_) -> bool:
+        return class_ in self._cls_reg
+
+    def retrieve(self, name: str) -> Callable:
+        assert isinstance(name, str)
+
+        if name not in self.registry:
+            raise ValueError(f'Name "{name}" not registered.')
+
+        return self.registry[name]
+
+    def registered_name(self, class_) -> str:
+        return self._cls_reg[class_]
+
+    def registered_classes(self) -> list:
+        return list(self.registry.items())
 
 
 # -------------------------------------------------------------------------------------------------
@@ -309,20 +357,25 @@ def plot_images(images: list, title=None):
     plt.show()
 
 
-# TODO: rename
-def plot_lr_schedule(lr_schedule: DynamicType, iterations: int, initial_step=0,
-                     show=True):
+def plot_parameter(parameter: DynamicType, iterations: int, initial_step=0, show=True):
     assert iterations > 0
-    lr_schedule = DynamicParameter.create(value=lr_schedule)
+    parameter = DynamicParameter.create(value=parameter)
 
-    data = [lr_schedule(step=i + initial_step) for i in range(iterations)]
+    for _ in range(initial_step):
+        parameter.on_episode()
+
+    data = []
+    for _ in range(iterations):
+        data.append(parameter())
+        parameter.on_episode()
+
     plt.plot(data)
 
     if show:
         plt.show()
 
 
-def plot(colormap='Set3', **kwargs):  # Pastel1, Set3, tab20b, tab20c
+def plot(colormap='Set3', **kwargs):  # Pastel1, Set3, tab20b, tab20c, ...
     """Colormaps: https://matplotlib.org/tutorials/colors/colormaps.html"""
     num_plots = len(kwargs.keys())
     cmap = plt.get_cmap(name=colormap)
@@ -734,6 +787,15 @@ def tf_flatten(x):
     return tf.reshape(x, shape=[-1])
 
 
+def tf_norm(items: list, **kwargs) -> list:
+    return [tf.norm(x, **kwargs) for x in items]
+
+
+def tf_global_norm(norms: list):
+    return tf.sqrt(tf.reduce_sum([norm * norm for norm in norms]))
+
+
+# TODO: remove or edit
 class DynamicArray:
     """Dynamic-growing np.array meant to be used for agent's Memory"""
 
@@ -884,134 +946,136 @@ def copy_folder(src: str, dst: str):
 # -- Statistics utils
 # -------------------------------------------------------------------------------------------------
 
-# TODO(bug): summary process doesn't terminate (error: ACCESS DENIED?!)
 class SummaryProcess(mp.Process):
     """Easy and efficient tf.summary with multiprocessing"""
 
-    def __init__(self, queue: mp.Queue, stop_event: mp.Event, name=None, folder='logs', keys: List[str] = None):
+    def __init__(self, queue: mp.Queue, stop_event: mp.Event, name=None, folder='logs', keys: List[str] = None,
+                 log_every=10, flush_millis=30, max_queue=20):
         assert isinstance(name, str)
         super().__init__(daemon=True)
 
         self.steps = dict()
         self.queue = queue
         self.stop_event = stop_event
+        self.log_freq = 1 if log_every <= 1 else int(log_every)
 
         # filters what to log
         if isinstance(keys, list):
             self.allowed_keys = {k: True for k in keys}
-            # init steps here?
         else:
             self.allowed_keys = None
 
         self.summary_dir = os.path.join(folder, name, datetime.now().strftime("%Y%m%d-%H%M%S"))
         self.tf_summary_writer = None
+        self.summary_args = dict(flush_millis=flush_millis, max_queue=max_queue)
 
     def run(self):
-        import time
         import tensorflow as tf  # import here and lazy tf.summary.create is necessary for multiprocessing to work
 
         if self.tf_summary_writer is None:
-            self.tf_summary_writer = tf.summary.create_file_writer(self.summary_dir)
+            self.tf_summary_writer = tf.summary.create_file_writer(self.summary_dir, **self.summary_args)
 
         # wait for stuff to be logged
         while not self.stop_event.is_set():
-            while not self.queue.empty():
-                self.log(**self.queue.get())
 
-            # time.sleep(0.01)
+            with self.tf_summary_writer.as_default():
+
+                while not self.queue.empty():
+                    self.log(**self.queue.get())
+
+                if self.stop_event.is_set():
+                    self.tf_summary_writer.close()
+
+        self.tf_summary_writer.close()  # maybe redundant
 
     def log(self, average=False, **kwargs):
-        with self.tf_summary_writer.as_default():
-            for key, value in kwargs.items():
-                if not self.should_log_key(key):
-                    continue
+        for key, value in kwargs.items():
+            if not self.should_log_key(key):
+                continue
 
-                if key not in self.steps:
-                    self.steps[key] = 0
+            if key not in self.steps:
+                self.steps[key] = 0
 
-                step = self.steps[key]
-                value = tf.convert_to_tensor(value)
+            step = self.steps[key]
+            value = tf.convert_to_tensor(value)
 
-                if 'weight-' in key or 'bias-' in key:
+            if 'weight-' in key or 'bias-' in key:
+                if self.should_log(step):
                     tf.summary.histogram(name=key, data=value, step=step)
-                    self.steps[key] += 1
 
-                elif 'image_' in key:
+                self.steps[key] += 1
+
+            elif 'image_' in key:
+                if self.should_log(step):
                     tf.summary.image(name=key, data=tf.concat(value, axis=0), step=step)
-                    self.steps[key] += 1
 
-                # elif 'action' in key:
-                #     dtype = value.dtype
-                #
-                #     if dtype in [tf.int32, tf.int64]:
-                #         tf.summary.histogram(name=key, data=value, step=step)
-                #     else:
-                #         dims = value.shape[-1]
-                #
-                #         if dims > 1:
-                #             for i in range(dims):
-                #                 new_key = f'{key}-{i}'
-                #
-                #                 if new_key not in self.steps:
-                #                     self.steps[new_key] = 0
-                #                     step = 0
-                #                 else:
-                #                     step = self.steps[new_key]
-                #
-                #                 self._scalar_summary(average, key=new_key, value=value[:, i], step=step)
-                #         else:
-                #             self._scalar_summary(average, key, value, step)
-                else:
-                    self._scalar_summary(average, key, value, step)
-
-        self.tf_summary_writer.flush()
+                self.steps[key] += 1
+            else:
+                self._scalar_summary(average, key, value, step)
 
     def _scalar_summary(self, average: bool, key: str, value, step: int):
         value = tf.squeeze(value)
 
-        if ('image' in key) or ('prob' in key):
+        if ('action' in key) or ('prob' in key):
             if len(value.shape) == 0:
                 # scalar (=> one action)
-                tf.summary.scalar(name=key, data=value, step=step)
+                if self.should_log(step):
+                    tf.summary.scalar(name=key, data=value, step=step)
+
                 self.steps[key] += 1
 
-            elif len(value.shape) >= 1:
-                # (N,)-shaped array (=> N different actions)
+            elif len(value.shape) == 1:
+                # (N,)-shaped array (=> 1-d actions)
+                if average:
+                    tf.summary.scalar(name=key, data=tf.reduce_mean(value), step=step)
+                    self.steps[key] += 1
+                else:
+                    for i, v in enumerate(value):
+                        if self.should_log(step + i):
+                            tf.summary.scalar(name=key, data=v, step=step + i)
 
-                if (len(value.shape) == 2) and average:
-                    value = tf.reduce_mean(value, axis=0)
+                    self.steps[key] += value.shape[0]
 
-                for i, action in enumerate(value):
-                    new_key = f'{key}-{i}'
+            elif len(value.shape) == 2:
+                # (M, N)-shaped array of actions (=> N-dim actions)
+                if average:
+                    value = tf.reduce_mean(value, axis=0, keepdims=True)  # mean across batch-axis
 
-                    if new_key not in self.steps:
-                        self.steps[new_key] = 0
-
-                    tf.summary.scalar(name=new_key, data=action, step=self.steps[new_key])
-                    self.steps[new_key] += 1
-
-            if len(value.shape) == 2:
-                # (M, N)-shaped array of actions
+                # loop over action-axis (i)
                 for i in range(value.shape[1]):
-                    new_key = f'{key}-{i}'
-                    actions = value[:, i]
-                    step = self.steps.get(new_key, 0)
+                    action_key = f'{key}-{i}'
 
-                    for j, action in enumerate(actions):
-                        tf.summary.scalar(name=new_key, data=action, step=step + j)
+                    if action_key not in self.steps:
+                        self.steps[action_key] = 0
 
-                    self.steps[new_key] = step + value.shape[0]
+                    step = self.steps[action_key]
+
+                    # loop over batch-axis (j)
+                    for j in range(value.shape[0]):
+                        if average or self.should_log(step + j):
+                            tf.summary.scalar(name=action_key, data=value[j][i], step=step + j)
+
+                    self.steps[action_key] += value.shape[0]
 
         elif average or len(value.shape) == 0:
             value = tf.reduce_mean(value)
-            tf.summary.scalar(name=key, data=value, step=step)
+
+            if ('reward' in key) and (key != 'episode_reward'):
+                if self.should_log(step):
+                    tf.summary.scalar(name=key, data=value, step=step)
+            else:
+                tf.summary.scalar(name=key, data=value, step=step)
 
             self.steps[key] += 1
         else:
             self.steps[key] += value.shape[0]
 
             for i, v in enumerate(value):
-                tf.summary.scalar(name=key, data=tf.reduce_mean(v), step=step + i)
+                if self.should_log(step + i):
+                    tf.summary.scalar(name=key, data=tf.reduce_mean(v), step=step + i)
+
+    def should_log(self, step: int) -> bool:
+        return step % self.log_freq == 0
 
     def should_log_key(self, key: str) -> bool:
         if self.allowed_keys is None:
@@ -1019,9 +1083,9 @@ class SummaryProcess(mp.Process):
 
         return key in self.allowed_keys
 
-    def close(self, timeout=2.0):
+    def close(self):
         if self.is_alive():
-            self.join(timeout=timeout)
+            self.join()
             self.terminate()
 
 

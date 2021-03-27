@@ -11,12 +11,11 @@ from rl.parameters import DynamicParameter
 
 from rl.v2.agents import Agent
 from rl.v2.memories import TransitionSpec, EpisodicMemory
-from rl.v2.networks import PolicyNetwork, DecomposedValueNetwork
+from rl.v2.networks import Network, PolicyNetwork, DecomposedValueNetwork
 
 from typing import Tuple, Union
 
 
-# TODO(bug): workers does not terminate (= processes doesn't join)
 # TODO: `exploration` and `evaluation` only on A3C not workers
 # TODO: loading and saving
 # TODO: memory intensive (N+1 copies of networks' weights)
@@ -48,7 +47,7 @@ class A3C(Agent):
         self.lambda_ = tf.constant(lambda_, dtype=tf.float32)
         self.entropy_strength = DynamicParameter.create(value=entropy)
         self.adv_scale = DynamicParameter.create(value=advantage_scale)
-        self.adv_normalization_fn = utils.get_normalization_fn(name=normalize_advantages)
+        self.adv_normalization_fn = utils.get_normalization_fn(arg=normalize_advantages)
 
         self.actor_lr = DynamicParameter.create(value=actor_lr)
         self.critic_lr = DynamicParameter.create(value=critic_lr)
@@ -88,7 +87,7 @@ class A3C(Agent):
     @property
     def memory(self) -> 'GAEMemory':
         if self._memory is None:
-            self._memory = GAEMemory(self.transition_spec, agent=self, size=self.n_steps)
+            self._memory = GAEMemory(self.transition_spec, agent=self, shape=self.n_steps)
 
         return self._memory
 
@@ -96,8 +95,12 @@ class A3C(Agent):
         if self.actor is not None:
             return
 
-        self.actor = ActorNetwork(agent=self, log_prefix=f'actor', **self.actor_args)
-        self.critic = CriticNetwork(agent=self, log_prefix=f'critic', **self.critic_args)
+        self.actor = Network.create(agent=self, log_prefix=f'actor', **self.actor_args, base_class='A3C-ActorNetwork')
+        self.critic = Network.create(agent=self, log_prefix=f'critic', **self.critic_args,
+                                     base_class='A3C-CriticNetwork')
+
+        # self.actor = ActorNetwork(agent=self, log_prefix=f'actor', **self.actor_args)
+        # self.critic = CriticNetwork(agent=self, log_prefix=f'critic', **self.critic_args)
 
         optimizer = self.optimizer_args.pop('name', 'rmsprop')
         self.actor.compile(optimizer, clip_norm=self.clip_norm[0], learning_rate=self.actor_lr, **self.optimizer_args)
@@ -244,7 +247,6 @@ class Worker(mp.Process):
 
     def run(self):
         self._init_agent()
-
         self.agent.super.learn(*self.args, **self.kwargs)
 
     def sync_parameters(self):
@@ -303,7 +305,6 @@ class GAEMemory(EpisodicMemory):
         value = last_value[:, 0] * tf.pow(10.0, last_value[:, 1])
         value = tf.expand_dims(value, axis=-1)
 
-        # TODO: use `np.concatenate`
         rewards = tf.concat([self.data['reward'][:self.index], value], axis=0)
         values = tf.concat([self.data['value'][:self.index], last_value], axis=0)
 
@@ -339,6 +340,7 @@ class GAEMemory(EpisodicMemory):
         return advantages, norm_adv
 
 
+@Network.register(name='A3C-ActorNetwork')
 class ActorNetwork(PolicyNetwork):
 
     def train_step(self, batch: dict):
@@ -360,7 +362,7 @@ class ActorNetwork(PolicyNetwork):
             loss, debug = self.objective(batch)
 
         gradients = tape.gradient(loss, self.trainable_variables)
-        debug['gradient_norm'] = [tf.norm(g) for g in gradients]
+        debug['gradient_norm'] = utils.tf_norm(gradients)
 
         if self.should_clip_gradients:
             gradients = self.clip_gradients(gradients, debug)
@@ -373,6 +375,7 @@ class ActorNetwork(PolicyNetwork):
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
 
 
+@Network.register(name='A3C-CriticNetwork')
 class CriticNetwork(DecomposedValueNetwork):
 
     def train_step(self, batch: dict):
@@ -393,7 +396,7 @@ class CriticNetwork(DecomposedValueNetwork):
             loss, debug = self.objective(batch)
 
         gradients = tape.gradient(loss, self.trainable_variables)
-        debug['gradient_norm'] = [tf.norm(g) for g in gradients]
+        debug['gradient_norm'] = utils.tf_norm(gradients)
 
         if self.should_clip_gradients:
             gradients = self.clip_gradients(gradients, debug)

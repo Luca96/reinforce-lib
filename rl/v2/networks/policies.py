@@ -12,6 +12,7 @@ from rl.v2.networks import Network, backbones
 from typing import Dict
 
 
+@Network.register(name='PolicyNetwork')
 class PolicyNetwork(Network):
 
     def __init__(self, agent: Agent, eps=utils.EPSILON, log_prefix='policy', **kwargs):
@@ -134,6 +135,7 @@ class PolicyNetwork(Network):
                 make_distribution_fn=lambda t: tfp.distributions.Normal(loc=t[0], scale=t[1]))([mu, sigma])
 
 
+@Network.register(name='DeterministicPolicyNetwork')
 class DeterministicPolicyNetwork(Network):
 
     def __init__(self, agent: Agent, *args, log_prefix='deterministic_policy', **kwargs):

@@ -7,12 +7,13 @@ from rl.v2.memories import TransitionSpec
 from typing import Union, Tuple
 
 
+# TODO: implement serialization/deserialization
 class Memory:
     """A circular buffer that supports uniform replying"""
 
     def __init__(self, transition_spec: TransitionSpec, shape: Union[int, Tuple]):
         if isinstance(shape, tuple):
-            self.size = np.prod(shape)
+            self.size = np.prod(shape)  # max size
             self.shape = shape
 
         elif isinstance(shape, (int, float)):
@@ -35,8 +36,15 @@ class Memory:
     def _add_spec(self, spec: dict):
         if 'shape' in spec:
             shape = spec['shape']
-            # return np.zeros(shape=(self.size,) + shape, dtype=spec['dtype'])
             return np.zeros(shape=self.shape + shape, dtype=spec['dtype'])
+
+    @property
+    def current_size(self) -> int:
+        """Returns the "effective" number of stored elements"""
+        if self.is_full():
+            return self.size
+
+        return self.index
 
     def is_full(self) -> bool:
         if self.full:
@@ -151,3 +159,6 @@ class Memory:
     def deserialize(path: str) -> 'Memory':
         """Creates a Memory instance from a numpy's nps file"""
         pass
+
+    def update_warning(self, batch_size: int):
+        print(f'[Not updated] Memory not enough full: {self.current_size}/{batch_size}.')

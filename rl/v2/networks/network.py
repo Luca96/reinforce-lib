@@ -2,16 +2,16 @@
 import tensorflow as tf
 
 from rl import utils
-from rl.agents import Agent
+from rl.v2.agents import Agent
 from rl.parameters import DynamicParameter
 
-from typing import Union, List, Dict
+from typing import Union, List, Dict, Callable
 
 
-# TODO: 'custom' metrics?
 # TODO: distributed strategy
 class Network(tf.keras.Model):
     """Base class for agent's networks (e.g. Q, Policy, Value, ...)"""
+    _REGISTRY = utils.Registry()
 
     def __init__(self, agent: Agent, target=False, log_prefix='network', **kwargs):
         self.agent = agent
@@ -32,6 +32,65 @@ class Network(tf.keras.Model):
         if target:
             self.target = TargetNetwork(self.__class__(agent, target=False, **kwargs))
             self.target.set_weights(weights=self.get_weights())
+
+    @staticmethod
+    def create(*args, base_class: Union[str, Callable] = None, **kwargs) -> 'Network':
+        """Instantiates a subclass of Network"""
+        class_or_name = kwargs.pop('class', None)
+
+        if class_or_name is None:
+            # use `base_class`
+            assert base_class is not None
+
+            if isinstance(base_class, str):
+                base_class = Network._REGISTRY.retrieve(name=base_class)
+
+            elif not callable(base_class):
+                raise ValueError(f'Parameter "base_class" should be `str` or `callable` not {type(base_class)}.')
+
+            class_ = base_class
+
+        elif isinstance(class_or_name, str):
+            class_ = Network._REGISTRY.retrieve(name=class_or_name)
+
+        elif callable(class_or_name):
+            class_ = class_or_name
+        else:
+            raise ValueError(f'Provided "class" should be `str` or `callable` not {type(class_or_name)}.')
+
+        if base_class is None:
+            base_class = Network
+
+        elif isinstance(base_class, str):
+            base_class = Network._REGISTRY.retrieve(name=base_class)
+
+        elif not callable(base_class):
+            raise ValueError(f'Parameter "base_class" should be `str` or `callable` not {type(base_class)}.')
+
+        instance = class_(*args, **kwargs)
+
+        assert isinstance(instance, base_class)
+        return instance
+
+    @staticmethod
+    def register(name: str):
+        # Based on: https://stackoverflow.com/questions/5929107/decorators-with-parameters
+
+        def decorator(cls):
+            assert issubclass(cls, Network)
+
+            if '__main__' in str(cls) or '__mp_main__' in str(cls):
+                # This avoid some weird errors if there is a __main__ guard in the same module where the network
+                # (i.e. `cls`) is defined => @Network.register gets triggered more than once, thus causing troubles.
+                # Also, `cls` is seen as defined two times, i.e:
+                #   - rl.agents.<some>.cls (first trigger: OK),
+                #   - __main__.cls (another trigger: WHY?!)
+                return
+
+            Network._REGISTRY.register(name, class_=cls)
+            return cls
+
+        return lambda cls: decorator(cls)
 
     def compile(self, optimizer: str, clip_norm: utils.DynamicType = None, **kwargs):
         self.optimizer = utils.get_optimizer_by_name(optimizer, **kwargs)
@@ -78,21 +137,18 @@ class Network(tf.keras.Model):
         trainable_vars = self.trainable_variables
 
         gradients = tape.gradient(loss, trainable_vars)
-        debug['gradient_norm'] = [tf.norm(g) for g in gradients]
+        debug['gradient_norm'] = utils.tf_norm(gradients)
+        debug['gradient_global_norm'] = utils.tf_global_norm(debug['gradient_norm'])
 
         if self.should_clip_gradients:
-            # gradients = utils.clip_gradients(gradients, norm=self.clip_norm())
-            # debug['gradient_clipped_norm'] = [tf.norm(g) for g in gradients]
-            # debug['clip_norm'] = self.clip_norm.value
             gradients = self.clip_gradients(gradients, debug)
 
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
         return loss, debug
 
     def clip_gradients(self, gradients: List[tf.Tensor], debug: dict) -> List[tf.Tensor]:
-        gradients, global_norm = utils.clip_gradients2(gradients, norm=self.clip_norm())
-        debug['gradient_clipped_norm'] = [tf.norm(g) for g in gradients]
-        debug['gradient_global_norm'] = global_norm
+        gradients, _ = utils.clip_gradients2(gradients, norm=self.clip_norm())
+        debug['gradient_clipped_norm'] = utils.tf_norm(gradients)
         debug['clip_norm'] = self.clip_norm.value
         return gradients
 

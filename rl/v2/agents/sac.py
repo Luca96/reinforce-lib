@@ -12,12 +12,11 @@ from rl.parameters import DynamicParameter
 
 from rl.v2.agents import Agent
 from rl.v2.memories import ReplayMemory, TransitionSpec
-from rl.v2.networks import PolicyNetwork, QNetwork, backbones
+from rl.v2.networks import Network, PolicyNetwork, QNetwork, backbones
 
 from typing import Dict, Tuple, Union
 
 
-# TODO: strange (time-consuming) issue during back-propagation (may be related to stop_gradient)
 # TODO: try "original" implementation for policy
 class SAC(Agent):
     # TODO: noise for exploration
@@ -48,7 +47,8 @@ class SAC(Agent):
                 target_entropy = 0.98 * np.log(self.num_actions)
 
             elif target_entropy == 'original':
-                target_entropy = -self.num_actions
+                # target_entropy = -self.num_actions
+                target_entropy = self.num_actions
 
             self.target_entropy = DynamicParameter.create(value=target_entropy)
             self.temperature_lr = DynamicParameter.create(value=lr)
@@ -60,9 +60,13 @@ class SAC(Agent):
                                  q1=os.path.join(self.base_path, 'q1'),
                                  q2=os.path.join(self.base_path, 'q2'))
 
-        self.actor = ActorNetwork(agent=self, **(actor or {}))
-        self.q1 = CriticNetwork(agent=self, **(critic or {}))
-        self.q2 = CriticNetwork(agent=self, **(critic or {}))
+        # self.actor = ActorNetwork(agent=self, **(actor or {}))
+        # self.q1 = CriticNetwork(agent=self, **(critic or {}))
+        # self.q2 = CriticNetwork(agent=self, **(critic or {}))
+
+        self.actor = Network.create(agent=self, **(actor or {}), base_class='SAC-ActorNetwork')
+        self.q1 = Network.create(agent=self, **(critic or {}), base_class='SAC-CriticNetwork')
+        self.q2 = Network.create(agent=self, **(critic or {}), base_class='SAC-CriticNetwork')
 
         self.actor.compile(optimizer, clip_norm=self.clip_norm[0], learning_rate=self.actor_lr)
         self.q1.compile(optimizer, clip_norm=self.clip_norm[1], learning_rate=self.critic_lr)
@@ -78,7 +82,7 @@ class SAC(Agent):
     @property
     def memory(self) -> ReplayMemory:
         if self._memory is None:
-            self._memory = ReplayMemory(self.transition_spec, size=self.memory_size)
+            self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size)
 
         return self._memory
 
@@ -90,7 +94,7 @@ class SAC(Agent):
             return clip_norm, clip_norm
 
         if isinstance(clip_norm, tuple):
-            assert len(clip_norm) > 0
+            assert 0 < len(clip_norm) <= 2
 
             if len(clip_norm) < 2:
                 return clip_norm[0], clip_norm[0]
@@ -99,7 +103,7 @@ class SAC(Agent):
 
         raise ValueError(f'Parameter "clip_norm" should be `int`, `float` or `tuple` not {type(clip_norm)}.')
 
-    # @tf.function
+    @tf.function
     def act(self, state) -> Tuple[tf.Tensor, dict, dict]:
         action, log_prob, mean, std = self.actor(state, training=True)
 
@@ -110,42 +114,39 @@ class SAC(Agent):
 
     def update(self):
         if not self.memory.full_enough(amount=self.batch_size):
-            print('Not updated: memory is not full enough.')
-            return
+            return self.memory.update_warning(self.batch_size)
 
-        t0 = time.time()
-        # batches = self.memory.to_batches(**self.data_args).repeat(count=self.opt_steps)
-        batches = [self.memory.sample(batch_size=self.batch_size, seed=self.seed) for _ in range(self.opt_steps)]
+        with utils.Timed('Update'):
+            batches = [self.memory.sample(batch_size=self.batch_size, seed=self.seed) for _ in range(self.opt_steps)]
 
-        for batch in batches:
-            # Update Q-networks
-            self.q1.train_step(batch)  # also updates `q2`
+            for batch in batches:
+                # update Q-networks
+                self.q1.train_step(batch)  # also updates `q2`
 
-            # Update Policy
-            self.actor.train_step(batch)
+                # update Policy
+                self.actor.train_step(batch)
 
-            # update target-nets
-            self.update_target_networks()
+                # update target-nets
+                self.update_target_networks()
 
-            # update temperature
-            debug = self.update_temperature(batch)
-            self.log(average=True, **debug)
-
-        print(f'Update took {round(time.time() - t0, 3)}s.')
+                # update temperature
+                debug = self.update_temperature(batch)
+                self.log(average=True, **debug)
 
     @tf.function
     def update_temperature(self, batch: dict) -> dict:
         if not self.should_learn_temperature:
             return {}
 
-        alpha = tf.constant(self.temperature.value, dtype=tf.float32)
+        # alpha = tf.constant(self.temperature.value, dtype=tf.float32)
         log_prob, _ = self.actor(batch['state'], actions=batch['action'], training=False)
 
         with tf.GradientTape() as tape:
-            tape.watch(alpha)
-            loss = -alpha * (log_prob - self.target_entropy())
+            # tape.watch(alpha)
+            tape.watch(self.temperature.variable)
+            loss = -self.temperature.value * tf.stop_gradient(log_prob - self.target_entropy())
 
-        grad = tape.gradient(loss, alpha)
+        grad = tape.gradient(loss, self.temperature.variable)
         self.temperature.value -= self.temperature_lr() * grad
 
         return dict(temperature_loss=loss, temperature_gradient=grad, temperature_lr=self.temperature_lr.value,
@@ -158,9 +159,8 @@ class SAC(Agent):
             self.q2.update_target_network(polyak=self.polyak.value)
 
     def learn(self, *args, **kwargs):
-        t0 = time.time()
-        super().learn(*args, **kwargs)
-        print(f'Time {round(time.time() - t0, 3)}s.')
+        with utils.Timed('Learn'):
+            super().learn(*args, **kwargs)
 
     def on_termination(self, last_transition, timestep: int, episode: int):
         super().on_termination(last_transition, timestep, episode)
@@ -182,6 +182,7 @@ class SAC(Agent):
         # q2 is same as q1
 
 
+@Network.register(name='SAC-ActorNetwork')
 class ActorNetwork(PolicyNetwork):
 
     @tf.function
@@ -189,23 +190,20 @@ class ActorNetwork(PolicyNetwork):
         states = batch['state']
         actions, log_prob, _, _ = self(states, training=True)
 
-        # TODO: stop_gradient?
         # predict Q-values from both Q-functions and then take the minimum of the two
         q1 = self.agent.q1(states, actions, training=True)
         q2 = self.agent.q2(states, actions, training=True)
-        # q_values = tf.expand_dims(tf.minimum(q1, q2), axis=1)
         q_values = tf.minimum(q1, q2)
 
         # Loss
-        # entropy = tf.reduce_mean(self.agent.temperature() * log_prob)
-        entropy = log_prob * self.agent.temperature()
+        entropy = log_prob * self.agent.temperature.value
         loss = reduction(entropy - q_values)
 
         return loss, dict(loss=loss, obj_entropy=entropy, q1=q1, q2=q2, q_values=q_values, obj_log_prob=log_prob,
                           temperature=self.agent.temperature.value, obj_actions=actions)
 
 
-# TODO: single class that wraps two Q-networks (more elegant)
+@Network.register(name='SAC-CriticNetwork')
 class CriticNetwork(QNetwork):
     def __init__(self, agent: SAC, log_prefix='critic', **kwargs):
         self.discrete_action_space = agent.distribution_type == 'categorical'
@@ -219,12 +217,15 @@ class CriticNetwork(QNetwork):
         raise NotImplementedError
 
     def structure(self, inputs: Dict[str, Input], name='SAC-Q-Network', **kwargs) -> tuple:
+        utils.remove_keys(kwargs, keys=['dueling', 'operator', 'prioritized'])
+
         state_in = inputs['state']
         action_in = Input(shape=(self.agent.num_actions,), name='action', dtype=tf.float32)
 
         x = backbones.dense_branched(state_in, action_in, **kwargs)
 
-        output = self.output_layer(**self.output_args)(x)
+        output = self.output_layer(layer=x)
+        # output = self.output_layer(**self.output_args)(x)
         return (state_in, action_in), output, name
 
     @tf.function
@@ -235,7 +236,6 @@ class CriticNetwork(QNetwork):
         next_actions, log_prob, _, _ = utils.stop_gradient(self.agent.actor(next_states))
 
         # Entropy
-        # entropy = tf.reduce_mean(self.agent.temperature() * log_prob)
         entropy = tf.stop_gradient(log_prob * self.agent.temperature())
 
         # Targets
@@ -260,17 +260,17 @@ class CriticNetwork(QNetwork):
         q2_target = self.agent.q2.target(states, actions, training=False)
 
         q_target = tf.minimum(q1_target, q2_target)
-        # q_target = tf.expand_dims(q_target, axis=1)
-
         targets = tf.stop_gradient(rewards + self.agent.gamma * (1.0 - terminals) * (q_target - entropy))
 
         return targets, dict(target_q1=q1_target, target_q2=q2_target, target_q_min=q_target, targets=targets)
 
-    def output_layer(self, **kwargs) -> Layer:
+    def output_layer(self, layer) -> Layer:
         if self.discrete_action_space:
-            return Dense(units=self.agent.num_classes, name='q-values', **kwargs)
+            return super().output_layer(layer)  # compatible with "dueling" architecture
+            # return Dense(units=self.agent.num_classes, name='q-values', **kwargs)
 
-        return Dense(units=self.agent.num_actions, name='q-values', **kwargs)
+        # TODO: think about a "continuous" dueling architecture
+        return Dense(units=self.agent.num_actions, name='q-values', **self.output_args)(layer)
 
     def train_step(self, batch: dict):
         if isinstance(batch, tuple):
@@ -281,32 +281,38 @@ class CriticNetwork(QNetwork):
 
     @tf.function
     def train_on_batch(self, batch):
-        with tf.GradientTape(persistent=True) as tape:
+        with tf.GradientTape() as tape:
             loss_q1, loss_q2, debug = self.objective(batch)
+            loss = loss_q1 + loss_q2
 
-        self.apply_gradients(tape, network=self, loss=loss_q1, debug=debug, postfix='q1')
-        self.apply_gradients(tape, network=self.agent.q2, loss=loss_q2, debug=debug, postfix='q2')
-        del tape
+        v = self.trainable_variables + self.agent.q2.trainable_variables
+        gradients = tape.gradient(loss, v)
 
+        debug['gradient_norm'] = utils.tf_norm(gradients)
+        debug['gradient_global_norm'] = utils.tf_global_norm(debug['gradient_norm'])
+
+        if self.should_clip_gradients:
+            gradients, _ = utils.clip_gradients2(gradients, norm=self.clip_norm())
+            debug['gradient_clipped_norm'] = utils.tf_norm(gradients)
+            debug['clip_norm'] = self.clip_norm.value
+
+        self.optimizer.apply_gradients(zip(gradients, v))
         return debug
 
-    @staticmethod
-    def apply_gradients(tape: tf.GradientTape, network: 'CriticNetwork', loss: tf.Tensor, debug: dict, postfix=''):
-        trainable_vars = network.trainable_variables
-
-        gradients = tape.gradient(loss, trainable_vars)
-        debug[f'gradient_norm_{postfix}'] = [tf.norm(g) for g in gradients]
-
-        if network.should_clip_gradients:
-            gradients, global_norm = utils.clip_gradients2(gradients, norm=network.clip_norm())
-            debug[f'gradient_clipped_norm_{postfix}'] = [tf.norm(g) for g in gradients]
-            debug[f'gradient_global_norm_{postfix}'] = global_norm
-            debug[f'clip_norm_{postfix}'] = network.clip_norm.value
-            # gradients = utils.clip_gradients(gradients, norm=network.clip_norm())
-            # debug[f'gradient_clipped_norm_{postfix}'] = [tf.norm(g) for g in gradients]
-            # debug[f'clip_norm_{postfix}'] = network.clip_norm.value
-
-        network.optimizer.apply_gradients(zip(gradients, trainable_vars))
+    # @staticmethod
+    # def apply_gradients(tape: tf.GradientTape, network, loss: tf.Tensor, debug: dict, postfix=''):
+    #     trainable_vars = network.trainable_variables
+    #
+    #     gradients = tape.gradient(loss, trainable_vars)
+    #     debug[f'gradient_norm_{postfix}'] = [tf.norm(g) for g in gradients]
+    #
+    #     if network.should_clip_gradients:
+    #         gradients, global_norm = utils.clip_gradients2(gradients, norm=network.clip_norm())
+    #         debug[f'gradient_clipped_norm_{postfix}'] = [tf.norm(g) for g in gradients]
+    #         debug[f'gradient_global_norm_{postfix}'] = global_norm
+    #         debug[f'clip_norm_{postfix}'] = network.clip_norm.value
+    #
+    #     network.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
 
 class SACDiscrete:
@@ -314,6 +320,20 @@ class SACDiscrete:
 
 
 if __name__ == '__main__':
-    a = SAC(env='LunarLanderContinuous-v2', batch_size=64, actor=dict(units=128//2), critic=dict(units=[96-32, 32/2]),
-            use_summary=True, temperature=0.1, target_entropy='auto', optimization_steps=2, seed=42)
-    a.learn(200+300, 200)
+    from rl.parameters import StepDecay
+
+    actor = dict(units=64*4, activation='relu', normalization=None, normalize_input=False)
+    critic = dict(units=[64*4, 16*2], activation='relu', dueling=False, normalization=None, normalize_input=False)
+
+    a = SAC(env='LunarLanderContinuous-v2', batch_size=64, actor=actor, critic=critic,
+            name='sac-lunar',
+            lr=StepDecay(3e-4 * 3, steps=160, rate=0.5),
+            # summary=dict(keys=['episode_reward']),
+            clip_norm=(0.5, 30.0),
+            # clip_norm=(0.5, StepDecay(30.0, decay_steps=125, decay_rate=0.5)),
+            summary=dict(log_every=20),
+            # memory_size=15_000,
+            use_summary=True, temperature=0.1,
+            target_entropy=None, optimization_steps=1, seed=42)
+    a.summary()
+    a.learn(episodes=500//10, timesteps=200)
