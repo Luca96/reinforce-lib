@@ -2,7 +2,6 @@
 
 import os
 import gym
-import time
 import numpy as np
 import tensorflow as tf
 
@@ -17,11 +16,13 @@ from rl.v2.networks.q import Network, QNetwork, DoubleQNetwork
 
 
 class DQN(Agent):
+    # TODO: n_step (horizon) updates
     def __init__(self, *args, name='dqn-agent', lr: utils.DynamicType = 3e-4, optimizer='adam', memory_size=1024,
                  policy='e-greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = 1.0, load=False,
                  update_target_network: Union[bool, int] = False, polyak: utils.DynamicType = 0.995, double=True,
-                 network: dict = None, dueling=True, update_on_timestep=True, alpha: utils.DynamicType = 0.6,
-                 beta: utils.DynamicType = 0.4, replay_period=1, prioritized=False, **kwargs):
+                 network: dict = None, dueling=True, horizon=1, prioritized=False, alpha: utils.DynamicType = 0.6,
+                 beta: utils.DynamicType = 0.4, **kwargs):
+        assert horizon >= 1
         assert policy.lower() in ['boltzmann', 'softmax', 'e-greedy', 'greedy']
         super().__init__(*args, name=name, **kwargs)
 
@@ -30,16 +31,12 @@ class DQN(Agent):
         self.epsilon = DynamicParameter.create(value=epsilon)
         self.polyak = DynamicParameter.create(value=polyak)
         self.prioritized = bool(prioritized)
+        self.horizon = int(horizon)
 
         # PER memory params:
         if self.prioritized:
             self.alpha = DynamicParameter.create(value=alpha)
             self.beta = DynamicParameter.create(value=beta)
-            self.replay_period = int(replay_period)
-        else:
-            self.replay_period = 1  # to avoid additional bool flags
-
-        self.update_on_timestep = bool(update_on_timestep)
 
         if not update_target_network and self.polyak.value == 1.0:
             self.should_update_target = False
@@ -55,11 +52,9 @@ class DQN(Agent):
         if double:
             self.dqn = Network.create(agent=self, dueling=dueling, prioritized=self.prioritized, **(network or {}),
                                       base_class=DoubleQNetwork)
-            # self.dqn = DoubleQNetwork(agent=self, dueling=dueling, **(network or {}))
         else:
             self.dqn = Network.create(agent=self, dueling=dueling, prioritized=self.prioritized, **(network or {}),
                                       base_class=QNetwork)
-            # self.dqn = QNetwork(agent=self, dueling=dueling, **(network or {}))
 
         self.dqn.compile(optimizer, clip_norm=clip_norm, learning_rate=self.lr)
 
@@ -75,9 +70,9 @@ class DQN(Agent):
         if self._memory is None:
             if self.prioritized:
                 self._memory = PrioritizedMemory(self.transition_spec, shape=self.memory_size, alpha=self.alpha,
-                                                 beta=self.beta)
+                                                 beta=self.beta, seed=self.seed)
             else:
-                self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size)
+                self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size, seed=self.seed)
 
         return self._memory
 
@@ -94,13 +89,13 @@ class DQN(Agent):
         other, debug = None, {}
 
         if self.policy == 'boltzmann':
-            q_values = self.dqn(state, training=False)
+            q_values = self.dqn.q_values(state)
             exp_q = tf.exp(q_values)
             action = tf.random.categorical(logits=exp_q, num_samples=1, seed=self.seed)
             debug['exp_q_values'] = exp_q
 
         elif self.policy == 'softmax':
-            q_values = self.dqn(state, training=False)
+            q_values = self.dqn.q_values(state)
             action = tf.random.categorical(logits=q_values, num_samples=1, seed=self.seed)
 
         elif self.policy == 'e-greedy':
@@ -110,7 +105,7 @@ class DQN(Agent):
             prob_other = tf.cast(eps / self.num_classes, dtype=tf.float32)
             prob_best = 1.0 - eps + prob_other
 
-            q_values = self.dqn(state, training=False)
+            q_values = self.dqn.q_values(state)
             best_action = tf.squeeze(tf.argmax(q_values, axis=-1))
 
             prob = np.full_like(q_values, fill_value=prob_other)
@@ -138,7 +133,7 @@ class DQN(Agent):
             return self.memory.update_warning(self.batch_size)
 
         with utils.Timed('Update', silent=True):
-            batch = self.memory.get_batch(batch_size=self.batch_size, seed=self.seed)
+            batch = self.memory.get_batch(batch_size=self.batch_size)
             self.dqn.train_step(batch)
 
             if self.prioritized:
@@ -157,15 +152,7 @@ class DQN(Agent):
     def on_transition(self, transition: dict, timestep: int, episode: int):
         super().on_transition(transition, timestep, episode)
 
-        if self.update_on_timestep and ((timestep % self.replay_period == 0) or transition['terminal'] or
-                                        (timestep == self.max_timesteps)):
-            self.update()
-            self.update_target_network()
-
-    def on_termination(self, last_transition, timestep: int, episode: int):
-        super().on_termination(last_transition, timestep, episode)
-
-        if not self.update_on_timestep:
+        if (timestep % self.horizon == 0) or transition['terminal'] or (timestep == self.max_timesteps):
             self.update()
             self.update_target_network()
 
@@ -185,8 +172,8 @@ if __name__ == '__main__':
     agent = DQN(env='CartPole-v0', batch_size=32, policy='boltzmann', memory_size=4096,
                 name='dqn-cart', clip_norm=5.0, network=dict(num_layers=3),
                 lr=StepDecay(1.5e-5, steps=250, rate=0.5),
-                reward_scale=0.5, prioritized=True, replay_period=4,
-                use_summary=False, update_on_timestep=True, double=True, dueling=True, seed=42)
+                reward_scale=0.5, prioritized=True, horizon=4,
+                use_summary=False, double=True, dueling=True, seed=42)
     agent.summary()
 
     agent.learn(episodes=1500, timesteps=200, render=False, exploration_steps=4096 * 0,

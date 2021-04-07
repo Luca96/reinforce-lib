@@ -73,7 +73,7 @@ class Network(tf.keras.Model):
         return instance
 
     @staticmethod
-    def register(name: str):
+    def register(name: str = None):
         # Based on: https://stackoverflow.com/questions/5929107/decorators-with-parameters
 
         def decorator(cls):
@@ -87,10 +87,20 @@ class Network(tf.keras.Model):
                 #   - __main__.cls (another trigger: WHY?!)
                 return
 
-            Network._REGISTRY.register(name, class_=cls)
+            Network._REGISTRY.register(name or cls.__name__, class_=cls)
             return cls
 
         return lambda cls: decorator(cls)
+
+    @classmethod
+    def print_registered_networks(cls):
+        print('Registered Networks [')
+        spaces = max([len(name) for name, _ in cls._REGISTRY.registered_classes()])
+
+        for name, class_ in cls._REGISTRY.registered_classes():
+            print(f'\t{name:{spaces}} :: {class_}')
+
+        print(']')
 
     def compile(self, optimizer: str, clip_norm: utils.DynamicType = None, **kwargs):
         self.optimizer = utils.get_optimizer_by_name(optimizer, **kwargs)

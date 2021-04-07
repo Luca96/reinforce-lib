@@ -29,6 +29,7 @@ NP_EPS = np.finfo(np.float32).eps
 EPSILON = tf.constant(NP_EPS, dtype=tf.float32)
 
 TF_ZERO = tf.constant(0.0, dtype=tf.float32)
+TF_PI = tf.constant(np.pi, dtype=tf.float32)
 
 OPTIMIZERS = dict(adadelta=tf.keras.optimizers.Adadelta,
                   adagrad=tf.keras.optimizers.Adagrad,
@@ -141,6 +142,7 @@ def set_random_seed(seed=None):
     global GLOBAL_SEED
 
     if seed is not None:
+        seed = int(seed)
         assert 0 <= seed < 2 ** 32
 
         tf.random.set_seed(seed)
@@ -148,6 +150,15 @@ def set_random_seed(seed=None):
         random.seed(seed)
         GLOBAL_SEED = seed
         print(f'Global random seed {seed} set.')
+
+
+def get_random_generator(seed=None) -> np.random.Generator:
+    """Returns a numpy's random generator instance"""
+    if seed is not None:
+        seed = int(seed)
+        assert 0 <= seed < 2 ** 32
+
+    return np.random.default_rng(np.random.MT19937(seed=seed))
 
 
 def np_normalize(x, epsilon=np.finfo(np.float32).eps):
@@ -543,7 +554,7 @@ def index_tensor(tensor, indices):
 
     indices = tf.concat([
         tf.reshape(tf.range(start=0, limit=shape[0], dtype=tf.int32), shape),
-        tf.cast(indices, dtype=tf.int32)
+        tf.reshape(tf.cast(indices, dtype=tf.int32), shape),
     ], axis=1)
 
     return tf.gather_nd(tensor, indices)
@@ -696,12 +707,6 @@ def assert_shapes(a, b):
     assert tf.shape(a) == tf.shape(b)
 
 
-def tf_01_scaling(x):
-    x -= tf.reduce_min(x)
-    x /= tf.reduce_max(x)
-    return x
-
-
 def softplus(value=1.0):
     @tf.function
     def activation(x):
@@ -793,6 +798,33 @@ def tf_norm(items: list, **kwargs) -> list:
 
 def tf_global_norm(norms: list):
     return tf.sqrt(tf.reduce_sum([norm * norm for norm in norms]))
+
+
+@tf.function
+def huber_loss(errors: tf.Tensor, kappa=1.0) -> tf.Tensor:
+    """The Huber loss is defined via two cases:
+          - case_one: |errors| <= kappa (cutoff)
+          - case_two: |errors| > kappa"""
+    abs_errors = tf.abs(errors)
+
+    case_one = to_float(abs_errors <= kappa) * 0.5 * tf.square(errors)
+    case_two = to_float(abs_errors > kappa) * kappa * (abs_errors - 0.5 * kappa)
+
+    return case_one + case_two
+
+
+def tf_normal_cdf(x) -> tf.Tensor:
+    """Standard-Normal cumulative distribution function (CDF)
+        - Source: https://en.wikipedia.org/wiki/Normal_distribution#Cumulative_distribution_function
+    """
+    return 0.5 * (1.0 + tf.math.erf(x / tf.sqrt(2.0)))
+
+
+def tf_normal_inverse_cdf(x) -> tf.Tensor:
+    """Standard-Normal inverse cumulative distribution function (CDF)
+        - Source: https://en.wikipedia.org/wiki/Normal_distribution#Quantile_function
+    """
+    return tf.sqrt(2.0) * tf.math.erfinv(2.0 * x - 1.0)
 
 
 # TODO: remove or edit

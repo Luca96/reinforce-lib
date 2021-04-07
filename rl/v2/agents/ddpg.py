@@ -1,7 +1,6 @@
 """Deep Deterministic Policy Gradient (DDPG) Agent"""
 
 import os
-import time
 import tensorflow as tf
 
 from tensorflow.keras.layers import Layer, Dense, Input
@@ -10,17 +9,18 @@ from rl import utils
 from rl.parameters import DynamicParameter
 
 from rl.v2.agents import Agent
-from rl.v2.memories import ReplayMemory, TransitionSpec
+from rl.v2.memories import PrioritizedMemory, ReplayMemory, TransitionSpec
 from rl.v2.networks import Network, DeterministicPolicyNetwork, QNetwork, backbones
 
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Union
 
 
 class DDPG(Agent):
     def __init__(self, *args, optimizer='adam', actor_lr: utils.DynamicType = 1e-4, critic_lr: utils.DynamicType = 1e-3,
                  memory_size=1024, name='ddpg-agent', actor: dict = None, critic: dict = None, load=False,
                  clip_norm: utils.DynamicType = None, polyak: utils.DynamicType = 0.999, optimization_steps=1,
-                 noise: utils.DynamicType = 0.05, **kwargs):
+                 noise: utils.DynamicType = 0.05, prioritized=False, alpha: utils.DynamicType = 0.6,
+                 beta: utils.DynamicType = 0.4, **kwargs):
         assert optimization_steps >= 1
 
         super().__init__(*args, name=name, **kwargs)
@@ -31,16 +31,19 @@ class DDPG(Agent):
         self.polyak = DynamicParameter.create(value=polyak)
         self.optimization_steps = int(optimization_steps)
         self.noise = DynamicParameter.create(value=noise)
+        self.prioritized = bool(prioritized)
 
         self.critic_lr = DynamicParameter.create(value=critic_lr)
         self.actor_lr = DynamicParameter.create(value=actor_lr)
 
+        # PER memory params:
+        if self.prioritized:
+            self.alpha = DynamicParameter.create(value=alpha)
+            self.beta = DynamicParameter.create(value=beta)
+
         # Networks
         self.weights_path = dict(actor=os.path.join(self.base_path, 'actor'),
                                  critic=os.path.join(self.base_path, 'critic'))
-
-        # self.actor = ActorNetwork(agent=self, target=True, log_prefix='actor', **(actor or {}))
-        # self.critic = CriticNetwork(agent=self, log_prefix='critic', **(critic or {}))
 
         self.actor = Network.create(agent=self, target=True, log_prefix='actor', **(actor or {}),
                                     base_class='DDPG-ActorNetwork')
@@ -62,9 +65,13 @@ class DDPG(Agent):
         return TransitionSpec(state=self.state_spec, next_state=True, action=action_shape)
 
     @property
-    def memory(self) -> ReplayMemory:
+    def memory(self) -> Union[ReplayMemory, PrioritizedMemory]:
         if self._memory is None:
-            self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size)
+            if self.prioritized:
+                self._memory = PrioritizedMemory(self.transition_spec, shape=self.memory_size, alpha=self.alpha,
+                                                 beta=self.beta, seed=self.seed)
+            else:
+                self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size, seed=self.seed)
 
         return self._memory
 
@@ -138,12 +145,15 @@ class DDPG(Agent):
             return self.memory.update_warning(self.batch_size)
 
         for _ in range(self.optimization_steps):
-            batch = self.memory.sample(batch_size=self.batch_size, seed=self.seed)
+            batch = self.memory.sample(batch_size=self.batch_size)
 
             self.critic.train_step(batch)
             self.actor.train_step(batch)
 
             self.update_target_networks()
+
+            if self.prioritized:
+                self.memory.update_priorities()
 
     def update_target_networks(self):
         if self.polyak.value < 1.0:
@@ -241,6 +251,6 @@ if __name__ == '__main__':
     actor = dict(units=32, output=dict(kernel_initializer='glorot_uniform', bias_initializer='zeros'))
 
     a = DDPG(env=env2, batch_size=64, name='ddpg-cart', noise=0.01, use_summary=True,
-             actor=actor, critic=dict(units=[64, 16]), memory_size=4096, polyak=0.995,
+             actor=actor, critic=dict(units=[64, 16]), memory_size=4096, polyak=0.995, prioritized=True,
              optimization_steps=1, clip_norm=1.0, critic_lr=1e-3, reward_scale=1.0 / 4, seed=42)
     a.learn(250, 200, exploration_steps=4096)

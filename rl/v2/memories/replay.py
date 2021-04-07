@@ -12,19 +12,19 @@ from typing import Union
 class ReplayMemory(Memory):
 
     def get_batch(self, batch_size: int, **kwargs) -> dict:
-        return self.sample(batch_size, **kwargs)
+        return self.sample(batch_size)
 
     # TODO: should sample with replacement?
-    def sample(self, batch_size: int, seed=None) -> dict:
+    def sample(self, batch_size: int) -> dict:
         """Samples a batch of transitions (without replacement)"""
         batch = dict()
 
         # random indices
         # indices = tf.range(start=0, limit=self.current_size, dtype=tf.int32)
-        # indices = tf.random.shuffle(indices, seed=seed)[:batch_size]
+        # indices = tf.random.shuffle(indices, seed=self.seed)[:batch_size]
 
         # indices = np.random.choice(self.current_size, size=batch_size, replace=True)
-        indices = np.random.choice(self.current_size, size=batch_size, replace=False)
+        indices = self.random.choice(self.current_size, size=batch_size, replace=False)
 
         for key, value in self.data.items():
             batch[key] = self._gather(value, indices)
@@ -64,7 +64,7 @@ class PrioritizedMemory(ReplayMemory):
         self.priorities[self.index - 1] = self.priorities[:self.index].max()
 
     # TODO: should sample with replacement?
-    def sample(self, batch_size: int, seed=None) -> dict:
+    def sample(self, batch_size: int) -> dict:
         """Samples a batch of transitions"""
         batch = dict()
         size = self.current_size
@@ -79,7 +79,7 @@ class PrioritizedMemory(ReplayMemory):
         prob = np.nan_to_num(prob, nan=0.0, posinf=0.0, neginf=0.0)
 
         # TODO: try with "replacement"
-        indices = np.random.choice(size, size=batch_size, replace=False, p=prob)
+        indices = self.random.choice(size, size=batch_size, replace=False, p=prob)
         # indices = np.random.choice(size, size=batch_size, replace=True, p=prob + utils.NP_EPS)
         self.indices = indices
 
@@ -130,7 +130,7 @@ class EmphasizingMemory(ReplayMemory):
     def eta(self) -> float:
         return self.eta_min + self.delta_eta * (self.timestep / self.episode_length)
 
-    def sample(self, batch_size: int, seed=None) -> dict:
+    def sample(self, batch_size: int) -> dict:
         batch = dict()
         size = self.current_size
         self.k += 1
@@ -151,8 +151,8 @@ class EmphasizingMemory(ReplayMemory):
             indices = tf.concat([range1 + range2], axis=0)
             assert sampling_range == indices.shape[0]
 
-        # indices = tf.random.shuffle(indices, seed=seed)[:batch_size]
-        indices = np.random.choice(indices, size=batch_size)
+        # indices = tf.random.shuffle(indices, seed=self.seed)[:batch_size]
+        indices = self.random.choice(indices, size=batch_size)
 
         for key, value in self.data.items():
             batch[key] = self._gather(value, indices)

@@ -15,6 +15,7 @@ from rl.v2.agents.a2c import ParallelGAEMemory
 from typing import Dict, Tuple, Union, Callable
 
 
+# TODO: some performance issue (slow and variable inference speed => try @tf.function on `act`)
 # TODO: share features among the two networks??
 # TODO(bug): probable memory leak!
 class PPO1(ParallelAgent):
@@ -49,7 +50,6 @@ class PPO1(ParallelAgent):
         self.weights_path = dict(policy=os.path.join(self.base_path, 'policy'),
                                  value=os.path.join(self.base_path, 'value'))
 
-        # self.policy, self.value = self.get_networks(policy, value)
         self.policy = Network.create(agent=self, **(policy or {}), base_class='PPO-PolicyNetwork')
         self.value = Network.create(agent=self, **(value or {}), base_class=ValueNetwork)
 
@@ -70,9 +70,6 @@ class PPO1(ParallelAgent):
             self._memory = GAEMemory1(self.transition_spec, agent=self, shape=(self.num_actors, self.horizon))
 
         return self._memory
-
-    # def get_networks(self, policy: dict, value: dict):
-    #     return PolicyNet(agent=self, **(policy or {})), ValueNetwork(agent=self, **(value or {}))
 
     def act(self, states) -> Tuple[tf.Tensor, dict, dict]:
         actions, log_prob, mean, std = self.policy(states, training=False)
@@ -141,6 +138,7 @@ class PolicyNet(PolicyNetwork):
         new_log_prob, entropy = self(batch['state'], actions=batch['action'], training=True)
 
         # TODO: kl-divergence?
+        kld = utils.kl_divergence(new_log_prob, old_log_prob)
 
         # Entropy
         entropy = reduction(entropy)
@@ -160,7 +158,7 @@ class PolicyNet(PolicyNetwork):
         total_loss = policy_loss - entropy_penalty
 
         # Debug
-        debug = dict(ratio=ratio, log_prob=new_log_prob, old_log_prob=old_log_prob, entropy=entropy,
+        debug = dict(ratio=ratio, log_prob=new_log_prob, old_log_prob=old_log_prob, entropy=entropy, kl_divergence=kld,
                      loss=policy_loss, ratio_clip=clip_value, loss_entropy=entropy_penalty, loss_total=total_loss)
 
         return total_loss, debug
@@ -258,9 +256,6 @@ class PPO2(PPO1):
             self._memory = GAEMemory2(self.transition_spec, agent=self, shape=(self.num_actors, self.horizon))
 
         return self._memory
-
-    # def get_networks(self, policy: dict, value: dict):
-    #     return PolicyNet(agent=self, **(policy or {})), DecomposedValueNetwork(agent=self, **(value or {}))
 
 
 class GAEMemory2(GAEMemory1):

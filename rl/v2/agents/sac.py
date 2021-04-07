@@ -11,7 +11,7 @@ from rl import utils
 from rl.parameters import DynamicParameter
 
 from rl.v2.agents import Agent
-from rl.v2.memories import ReplayMemory, TransitionSpec
+from rl.v2.memories import PrioritizedMemory, ReplayMemory, TransitionSpec
 from rl.v2.networks import Network, PolicyNetwork, QNetwork, backbones
 
 from typing import Dict, Tuple, Union
@@ -24,7 +24,8 @@ class SAC(Agent):
     def __init__(self, *args, optimizer='adam', lr: utils.DynamicType = 3e-4, memory_size=1024, name='sac-agent',
                  actor: dict = None, critic: dict = None, clip_norm: utils.DynamicType = None, load=False,
                  polyak: utils.DynamicType = 0.995, optimization_steps=1, temperature: utils.DynamicType = 0.001,
-                 target_entropy: Union[str, utils.DynamicType] = None, target_update_interval=1000, **kwargs):
+                 target_entropy: Union[str, utils.DynamicType] = None, target_update_interval=1000, prioritized=False,
+                 alpha: utils.DynamicType = 0.6, beta: utils.DynamicType = 0.4, **kwargs):
         assert optimization_steps >= 1
 
         super().__init__(*args, name=name, **kwargs)
@@ -35,9 +36,15 @@ class SAC(Agent):
         self.polyak = DynamicParameter.create(value=polyak)
         self.opt_steps = int(optimization_steps)
         self.temperature = DynamicParameter.create(value=temperature or 1.0)
+        self.prioritized = bool(prioritized)
 
         self.critic_lr = DynamicParameter.create(value=lr)
         self.actor_lr = DynamicParameter.create(value=lr)
+
+        # PER memory params:
+        if self.prioritized:
+            self.alpha = DynamicParameter.create(value=alpha)
+            self.beta = DynamicParameter.create(value=beta)
 
         # Temperature adjustment
         if target_entropy is not None:
@@ -60,10 +67,6 @@ class SAC(Agent):
                                  q1=os.path.join(self.base_path, 'q1'),
                                  q2=os.path.join(self.base_path, 'q2'))
 
-        # self.actor = ActorNetwork(agent=self, **(actor or {}))
-        # self.q1 = CriticNetwork(agent=self, **(critic or {}))
-        # self.q2 = CriticNetwork(agent=self, **(critic or {}))
-
         self.actor = Network.create(agent=self, **(actor or {}), base_class='SAC-ActorNetwork')
         self.q1 = Network.create(agent=self, **(critic or {}), base_class='SAC-CriticNetwork')
         self.q2 = Network.create(agent=self, **(critic or {}), base_class='SAC-CriticNetwork')
@@ -80,9 +83,13 @@ class SAC(Agent):
         return TransitionSpec(state=self.state_spec, next_state=True, action=(self.num_actions,))
 
     @property
-    def memory(self) -> ReplayMemory:
+    def memory(self) -> Union[ReplayMemory, PrioritizedMemory]:
         if self._memory is None:
-            self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size)
+            if self.prioritized:
+                self._memory = PrioritizedMemory(self.transition_spec, shape=self.memory_size, alpha=self.alpha,
+                                                 beta=self.beta, seed=self.seed)
+            else:
+                self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size, seed=self.seed)
 
         return self._memory
 
@@ -117,9 +124,9 @@ class SAC(Agent):
             return self.memory.update_warning(self.batch_size)
 
         with utils.Timed('Update'):
-            batches = [self.memory.sample(batch_size=self.batch_size, seed=self.seed) for _ in range(self.opt_steps)]
+            for _ in range(self.opt_steps):
+                batch = self.memory.sample(batch_size=self.batch_size)
 
-            for batch in batches:
                 # update Q-networks
                 self.q1.train_step(batch)  # also updates `q2`
 
@@ -132,6 +139,9 @@ class SAC(Agent):
                 # update temperature
                 debug = self.update_temperature(batch)
                 self.log(average=True, **debug)
+
+                if self.prioritized:
+                    self.memory.update_priorities()
 
     @tf.function
     def update_temperature(self, batch: dict) -> dict:
@@ -331,9 +341,9 @@ if __name__ == '__main__':
             # summary=dict(keys=['episode_reward']),
             clip_norm=(0.5, 30.0),
             # clip_norm=(0.5, StepDecay(30.0, decay_steps=125, decay_rate=0.5)),
-            summary=dict(log_every=20),
+            summary=dict(log_every=20), prioritized=True,
             # memory_size=15_000,
             use_summary=True, temperature=0.1,
             target_entropy=None, optimization_steps=1, seed=42)
     a.summary()
-    a.learn(episodes=500//10, timesteps=200)
+    a.learn(episodes=500, timesteps=200)

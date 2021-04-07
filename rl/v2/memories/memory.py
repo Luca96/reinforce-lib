@@ -11,7 +11,10 @@ from typing import Union, Tuple
 class Memory:
     """A circular buffer that supports uniform replying"""
 
-    def __init__(self, transition_spec: TransitionSpec, shape: Union[int, Tuple]):
+    def __init__(self, transition_spec: TransitionSpec, shape: Union[int, Tuple], seed=None):
+        self.seed = seed or utils.GLOBAL_SEED
+        self.random = utils.get_random_generator(seed=self.seed)
+
         if isinstance(shape, tuple):
             self.size = np.prod(shape)  # max size
             self.shape = shape

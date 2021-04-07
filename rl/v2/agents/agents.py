@@ -9,7 +9,7 @@ import numpy as np
 
 from rl import utils
 from rl.parameters import DynamicParameter
-from rl.environments import ParallelEnv
+from rl.environments.gym import ParallelEnv
 
 from rl.v2.memories import Memory, TransitionSpec
 
@@ -116,6 +116,7 @@ class Agent:
 
         if isinstance(action_space, gym.spaces.Box):
             self.num_actions = action_space.shape[0]
+            self.discrete_actions = False
 
             # continuous:
             if action_space.is_bounded():
@@ -133,6 +134,7 @@ class Agent:
             # discrete:
             assert isinstance(action_space, gym.spaces.Discrete)
             self.distribution_type = 'categorical'
+            self.discrete_actions = True
 
             self.num_actions = 1
             self.num_classes = action_space.n
