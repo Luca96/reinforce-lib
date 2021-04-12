@@ -11,6 +11,23 @@ from tensorflow.keras.layers import Layer
 from tensorflow.keras import initializers
 
 from rl import utils
+from rl.layers import preprocessing
+
+
+class Sampling(Layer):
+    """Given mean and log-variance that parametrize a Gaussian, the layer samples from it by using the
+       reparametrization trick.
+        - https://keras.io/examples/generative/vae/
+    """
+
+    def call(self, inputs, **kwargs):
+        mean, log_var = inputs
+
+        # sample from a Standard Normal
+        epsilon = tf.random.normal(shape=tf.shape(mean))
+
+        # Reparametrization trick
+        return mean + tf.exp(0.5 * log_var) * epsilon
 
 
 class NoisyDense(Layer):
@@ -154,23 +171,3 @@ class NoisyDense(Layer):
 
     def get_config(self):
         return super().get_config()
-
-
-if __name__ == '__main__':
-    from tensorflow.keras.layers import Input
-    from tensorflow.keras.models import Model
-
-    def get_model():
-        i = Input(shape=(2,), name='input')
-        x = NoisyDense(units=16, activation='relu')(i)
-        y = NoisyDense(units=32, noise='independent', use_bias=False)(x)
-        return Model(i, [x, y])
-
-    m = get_model()
-    m.summary()
-
-    a, b = m(tf.random.normal((3, 2)))
-    print(a)
-    print('=====')
-    print(b)
-    pass

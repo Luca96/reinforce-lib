@@ -9,7 +9,7 @@ import multiprocessing as mp
 import random
 import time
 
-from typing import Union, List, Dict, Tuple, Optional, Callable
+from typing import Union, List, Dict, Tuple, Optional, Callable, Any
 from distutils import dir_util
 from datetime import datetime
 
@@ -213,12 +213,8 @@ def clip(value, min_value, max_value):
     return min(max_value, max(value, min_value))
 
 
-# TODO: possible bug; it interpolates "all weights" not only "trainable variables"...
+# TODO: deprecate in favor of `polyak_averaging2`
 def polyak_averaging(model: tf.keras.Model, old_weights: list, alpha=0.99):
-    """Source: Deep Learning Book (section 8.7.3)
-        - the original implementation is: `w = alpha * w_old + (1.0 - alpha) * w_new`,
-          here we use `w = alpha * w_new + (1.0 - alpha) * w_old` because it performs better for RL
-    """
     new_weights = model.get_weights()
     weights = []
 
@@ -664,13 +660,16 @@ def tf_shuffle_tensors(*tensors, indices=None):
 
 
 # TODO: rename to `tensors_to_batches`
-# TODO: add `filter` option
 def data_to_batches(tensors: Union[list, dict, tuple], batch_size: int, shuffle_batches=False, take: int = None,
-                    drop_remainder=False, map_fn=None, prefetch_size=2, num_shards=1, skip=0, seed=None, shuffle=False):
+                    drop_remainder=False, map_fn=None, prefetch_size=2, num_shards=1, skip=0, seed=None, shuffle=False,
+                    filter_fn: Callable[[Any], bool] = None):
     """Transform some tensors data into a dataset of mini-batches"""
     dataset = tf.data.Dataset.from_tensor_slices(tensors).skip(count=skip)
 
-    if isinstance(take, int):
+    if callable(filter_fn):
+        dataset = dataset.filter(predicate=filter_fn)
+
+    if isinstance(take, int) and take > 0:
         dataset = dataset.take(count=take)
 
     if shuffle:
@@ -827,69 +826,68 @@ def tf_normal_inverse_cdf(x) -> tf.Tensor:
     return tf.sqrt(2.0) * tf.math.erfinv(2.0 * x - 1.0)
 
 
-# TODO: remove or edit
-class DynamicArray:
-    """Dynamic-growing np.array meant to be used for agent's Memory"""
-
-    def __init__(self, shape: tuple, max_capacity: int, min_capacity=16, dtype=np.float32):
-        assert min_capacity > 0
-        assert max_capacity >= min_capacity
-
-        self.elem_shape = shape
-        self.dtype = dtype
-
-        self.min_capacity = min_capacity
-        self.max_capacity = max_capacity
-        self.current_capacity = self.min_capacity
-
-        self.array = self._allocate(capacity=self.min_capacity)
-        self.index = 0
-
-    @property
-    def shape(self):
-        return self.array.shape
-
-    def grow(self):
-        self.current_capacity = min(2 * self.current_capacity, self.max_capacity)
-
-        old_array = self.array
-        self.array = self._allocate(capacity=self.current_capacity)
-        self._copy(array=old_array)
-
-        del old_array
-
-    # def insert(self, data, index: int):
-    #     assert 0 <= index < self.current_capacity
-    #
-    #     self.array[index] = self._to_numpy(data)
-
-    def append(self, data):
-        if self.index >= self.current_capacity:
-            assert self.index < self.max_capacity, 'DynamicArray is full!'
-            print('-- grow --')
-            self.grow()
-
-        self.array[self.index] = self._to_numpy(data)
-        self.index += 1
-
-    def to_tensor(self, dtype=tf.float32) -> tf.Tensor:
-        return tf.constant(self.array[:self.index], dtype=dtype)
-
-    def clean(self):
-        pass
-
-    def __repr__(self):
-        return self.array.__repr__()
-
-    def _to_numpy(self, data):
-        data = np.asarray(data, dtype=self.dtype)
-        return np.reshape(data, newshape=self.elem_shape)
-
-    def _copy(self, array):
-        self.array[:array.shape[0]] = array
-
-    def _allocate(self, capacity: int):
-        return np.zeros(shape=(capacity,) + self.elem_shape, dtype=self.dtype)
+# class DynamicArray:
+#     """Dynamic-growing np.array"""
+#
+#     def __init__(self, shape: tuple, max_capacity: int, min_capacity=16, dtype=np.float32):
+#         assert min_capacity > 0
+#         assert max_capacity >= min_capacity
+#
+#         self.elem_shape = shape
+#         self.dtype = dtype
+#
+#         self.min_capacity = min_capacity
+#         self.max_capacity = max_capacity
+#         self.current_capacity = self.min_capacity
+#
+#         self.array = self._allocate(capacity=self.min_capacity)
+#         self.index = 0
+#
+#     @property
+#     def shape(self):
+#         return self.array.shape
+#
+#     def grow(self):
+#         self.current_capacity = min(2 * self.current_capacity, self.max_capacity)
+#
+#         old_array = self.array
+#         self.array = self._allocate(capacity=self.current_capacity)
+#         self._copy(array=old_array)
+#
+#         del old_array
+#
+#     # def insert(self, data, index: int):
+#     #     assert 0 <= index < self.current_capacity
+#     #
+#     #     self.array[index] = self._to_numpy(data)
+#
+#     def append(self, data):
+#         if self.index >= self.current_capacity:
+#             assert self.index < self.max_capacity, 'DynamicArray is full!'
+#             print('-- grow --')
+#             self.grow()
+#
+#         self.array[self.index] = self._to_numpy(data)
+#         self.index += 1
+#
+#     def to_tensor(self, dtype=tf.float32) -> tf.Tensor:
+#         return tf.constant(self.array[:self.index], dtype=dtype)
+#
+#     def clean(self):
+#         pass
+#
+#     def __repr__(self):
+#         return self.array.__repr__()
+#
+#     def _to_numpy(self, data):
+#         data = np.asarray(data, dtype=self.dtype)
+#         return np.reshape(data, newshape=self.elem_shape)
+#
+#     def _copy(self, array):
+#         self.array[:array.shape[0]] = array
+#
+#     def _allocate(self, capacity: int):
+#         return np.zeros(shape=(capacity,) + self.elem_shape, dtype=self.dtype)
 
 
 # -------------------------------------------------------------------------------------------------

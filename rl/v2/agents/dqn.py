@@ -76,6 +76,7 @@ class DQN(Agent):
 
         return self._memory
 
+    # TODO: add `MultiDiscrete` action-space support
     def _init_action_space(self):
         assert isinstance(self.env.action_space, gym.spaces.Discrete)
 
@@ -90,7 +91,7 @@ class DQN(Agent):
 
         if self.policy == 'boltzmann':
             q_values = self.dqn.q_values(state)
-            exp_q = tf.exp(q_values)
+            exp_q = tf.exp(tf.minimum(q_values, 80.0))  # clip to prevent tf.exp go to "inf"
             action = tf.random.categorical(logits=exp_q, num_samples=1, seed=self.seed)
             debug['exp_q_values'] = exp_q
 
@@ -176,5 +177,5 @@ if __name__ == '__main__':
                 use_summary=False, double=True, dueling=True, seed=42)
     agent.summary()
 
-    agent.learn(episodes=1500, timesteps=200, render=False, exploration_steps=4096 * 0,
+    agent.learn(episodes=500, timesteps=200//2, render=10, exploration_steps=4096 * 0,
                 evaluation=dict(episodes=50, freq=100))

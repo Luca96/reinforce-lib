@@ -1,13 +1,23 @@
 """Some pre-defined NNs architectures"""
 
+import tensorflow as tf
+
 from tensorflow.keras.layers import *
 from tensorflow.keras import regularizers
 
 from rl import utils
-from rl.layers import NoisyDense
+from rl.layers import NoisyDense, preprocessing
 
-from typing import Union, List
+from typing import Union, List, Tuple
 
+
+KernelType = Union[int, Tuple[int, int], List[int], List[Tuple[int, int]]]
+StrideType = KernelType
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# -- Feed-Forward
+# ---------------------------------------------------------------------------------------------------------------------
 
 def dense(layer: Layer, units=32, num_layers=2, activation='relu', normalization='layer', normalize_input=True,
           use_bias=True, bias_initializer='glorot_uniform', kernel_initializer='glorot_normal', dropout=0.0,
@@ -76,6 +86,7 @@ def dense_branched(*layers: List[Layer], units: Union[int, List[int]] = 32, num_
     return concatenate(outputs)
 
 
+# TODO: remove, use `dense(...)` with a "noisy" (bool) argument instead
 def noisy_dense(layer: Layer, units=32, num_layers=2, activation='relu', normalization='layer', normalize_input=True,
                 use_bias=True, bias_initializer='glorot_uniform', kernel_initializer='glorot_normal', dropout=0.0,
                 sigma=0.5, noise='factorized', **kwargs) -> Layer:
@@ -99,15 +110,41 @@ def noisy_dense(layer: Layer, units=32, num_layers=2, activation='relu', normali
     return x
 
 
-# TODO: does not take into account non-square kernels and strides (add `tuple` type for them as well)
+# # TODO: implement as a layer?
+# def mixture_density(layer: Layer, units: int, components: int, **kwargs) -> Layer:
+#     """The "head" of a Mixture Density Network (MDN) with factored Gaussian components (called "kernel functions"):
+#         - see chapter 3 of https://publications.aston.ac.uk/id/eprint/373/1/NCRG_94_004.pdf
+#     """
+#     assert components >= 1
+#     m = int(components)
+#
+#     alpha = Dense(units=m, activation='softmax', name='mixing_coeffs')(layer)
+#
+#     # Parameters of Gaussian components (note: the variance is factored)
+#     mu = Dense(units, activation='linear', name='mu')(layer)
+#     log_var = Dense(units, activation='linear', name='log_var')(layer)
+#
+#     # Compute the probability density
+#     var = tf.exp(log_var)
+#     pass
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# -- Convolutional
+# ---------------------------------------------------------------------------------------------------------------------
+
+# TODO: rename to `atari_cnn`?
 def convolutional(layer: Layer, filters: Union[int, List[int]] = None, units: Union[int, List[int]] = None,
-                  conv_activation='relu', dense_activation='relu', kernels: Union[int, List[int]] = None,
-                  strides: Union[int, List[int]] = None, bias_initializer='he_uniform', kernel_initializer='he_normal',
+                  conv_activation='relu', dense_activation='relu', kernels: KernelType = None, resize=(84, 84),
+                  strides: StrideType = None, bias_initializer='he_uniform', kernel_initializer='he_normal',
                   pooling: Union[str, dict] = None, global_pooling: str = None, padding='same', dilation=1, **kwargs):
-    """Atari-like 2D-Convolutional network architecture with one input. Default:
-        - 3 convolutional layers: 32, 64, 64 filters with kernel 8, 4, 3 and strides 4, 2, 1 ("same" padding)
-        - relu activation
-        - 1 feed-forward layer: 256 units, relu activation
+    """Atari-like 2D-Convolutional network architecture with one input.
+       Default:
+         - resize images to 84x84
+         - 3 convolutional layers: 32, 64, 64 filters with kernel 8, 4, 3 and strides 4, 2, 1 ("same" padding)
+         - relu activation
+         - flatten last conv's output
+         - 1 feed-forward layer: 256 units, relu activation
     """
     num_conv = 3 if not isinstance(filters, (list, tuple)) else len(filters)
     num_dense = 1 if not isinstance(units, (list, tuple)) else len(units)
@@ -129,7 +166,13 @@ def convolutional(layer: Layer, filters: Union[int, List[int]] = None, units: Un
     strides = init_param(strides, default=[4, 2, 1])
     units = init_param(units, default=[256], num=num_dense)
 
-    x = layer
+    if isinstance(resize, tuple) and len(resize) >= 1:
+        height = resize[0]
+        width = height if len(resize) == 1 else resize[1]
+
+        x = preprocessing.Resizing(height, width)(layer)
+    else:
+        x = layer
 
     for i in range(num_conv):
         x = Conv2D(filters=filters[i], kernel_size=kernels[i], strides=strides[i], padding=padding,
@@ -142,9 +185,13 @@ def convolutional(layer: Layer, filters: Union[int, List[int]] = None, units: Un
 
     for i in range(num_dense):
         x = Dense(units=units[i], activation=dense_activation, kernel_initializer=kernel_initializer,
-                  bias_initializer=bias_initializer, **kwargs)
+                  bias_initializer=bias_initializer, **kwargs)(x)
     return x
 
+
+# ---------------------------------------------------------------------------------------------------------------------
+# -- Recurrent
+# ---------------------------------------------------------------------------------------------------------------------
 
 def recurrent():
     raise NotImplementedError

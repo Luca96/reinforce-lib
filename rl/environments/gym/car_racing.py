@@ -10,7 +10,7 @@ class CarRacingDiscrete(gym.ActionWrapper):
         assert (bins >= 2) and (bins % 2 == 0)
         super().__init__(env=gym.make('CarRacing-v0'))
 
-        # some variables useful to convert discrete actions into continuous one
+        # some variables useful to convert discrete actions into continuous ones
         self.low = self.action_space.low
         self.delta = (self.action_space.high - self.action_space.low) / bins
 

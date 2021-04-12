@@ -19,7 +19,11 @@ class ValueNetwork(Network):
 
     def structure(self, inputs: Dict[str, Input], name='ValueNetwork', **kwargs) -> tuple:
         inputs = inputs['state']
-        x = backbones.dense(layer=inputs, **kwargs)
+
+        if len(inputs.shape) <= 2:
+            x = backbones.dense(layer=inputs, **kwargs)
+        else:
+            x = backbones.convolutional(layer=inputs, **kwargs)
 
         output = self.output_layer(x)
         return inputs, output, name

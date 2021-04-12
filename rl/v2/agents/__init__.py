@@ -1,4 +1,5 @@
 
+# TODO: create two directories for agents: "model_free" and "model_based" (but include all here)
 from rl.v2.agents.agents import Agent, ParallelAgent
 
 # Policy optimization agents:
@@ -17,7 +18,10 @@ from rl.v2.agents.ddpg import DDPG
 # TODO: TD3?
 
 # Distributional RL agent:
-# TODO: C51, QR-DQN, DQN-IQN
+# TODO: QR-DQN
+# from rl.v2.agents.c51 import C51
+from rl.v2.agents.iqn import IQN
 
 # Model-based agents:
 # TODO: MCTS, ...
+# from rl.v2.agents.mcts import MCTS

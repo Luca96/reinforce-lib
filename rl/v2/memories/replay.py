@@ -14,7 +14,6 @@ class ReplayMemory(Memory):
     def get_batch(self, batch_size: int, **kwargs) -> dict:
         return self.sample(batch_size)
 
-    # TODO: should sample with replacement?
     def sample(self, batch_size: int) -> dict:
         """Samples a batch of transitions (without replacement)"""
         batch = dict()
@@ -22,8 +21,6 @@ class ReplayMemory(Memory):
         # random indices
         # indices = tf.range(start=0, limit=self.current_size, dtype=tf.int32)
         # indices = tf.random.shuffle(indices, seed=self.seed)[:batch_size]
-
-        # indices = np.random.choice(self.current_size, size=batch_size, replace=True)
         indices = self.random.choice(self.current_size, size=batch_size, replace=False)
 
         for key, value in self.data.items():
@@ -63,7 +60,6 @@ class PrioritizedMemory(ReplayMemory):
         super().store(transition)
         self.priorities[self.index - 1] = self.priorities[:self.index].max()
 
-    # TODO: should sample with replacement?
     def sample(self, batch_size: int) -> dict:
         """Samples a batch of transitions"""
         batch = dict()
@@ -78,9 +74,7 @@ class PrioritizedMemory(ReplayMemory):
         prob /= prob.sum()
         prob = np.nan_to_num(prob, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # TODO: try with "replacement"
         indices = self.random.choice(size, size=batch_size, replace=False, p=prob)
-        # indices = np.random.choice(size, size=batch_size, replace=True, p=prob + utils.NP_EPS)
         self.indices = indices
 
         for key, value in self.data.items():
@@ -90,8 +84,10 @@ class PrioritizedMemory(ReplayMemory):
         weights = (size * prob[indices]) ** float(-self.beta())
         weights /= weights.max()
 
-        # TODO: prevent user to use "weights" spec, when creating prioritized mem
-        batch['weights'] = tf.expand_dims(weights, axis=-1)
+        if '_weights' in batch:
+            raise ValueError('Key "_weights" is reserved for PrioritizedMemory.')
+
+        batch['_weights'] = tf.expand_dims(weights, axis=-1)
         return batch
 
     @staticmethod

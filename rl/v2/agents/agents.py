@@ -317,12 +317,11 @@ class Agent:
                 self.log(action_env=action_env, **debug)
 
                 if terminal or (t == timesteps):
-                    # TODO: put message in `on_episode_end`
-                    print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
-                          f'with reward {round(episode_reward, 3)}.')
-
                     self.log(timestep=t)
                     self.on_termination(last_transition=transition, timestep=t, episode=episode)
+
+                    print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
+                          f'with reward {round(episode_reward, 3)}.')
                     break
                 else:
                     state = next_state
@@ -508,10 +507,9 @@ class Agent:
         self.log_transition(transition)
         self.memory.store(transition)
 
-    # TODO: delete
-    def on_log(self, *args, **kwargs):
-        """Called *after* environment step, usually used to log actions"""
-        pass
+    # def on_log(self, *args, **kwargs):
+    #     """Called *after* environment step, usually used to log actions"""
+    #     pass
 
     def on_termination(self, last_transition, timestep: int, episode: int):
         """Called *exactly* at the end of each episode, due to terminal state or maximum number of timesteps reached.

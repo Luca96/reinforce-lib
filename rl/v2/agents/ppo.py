@@ -15,6 +15,7 @@ from rl.v2.agents.a2c import ParallelGAEMemory
 from typing import Dict, Tuple, Union, Callable
 
 
+# TODO: clip `log_prob` at -1 as in the "Munchausen RL" paper?
 # TODO: some performance issue (slow and variable inference speed => try @tf.function on `act`)
 # TODO: share features among the two networks??
 # TODO(bug): probable memory leak!
@@ -137,7 +138,7 @@ class PolicyNet(PolicyNetwork):
 
         new_log_prob, entropy = self(batch['state'], actions=batch['action'], training=True)
 
-        # TODO: kl-divergence?
+        # KL-Divergence
         kld = utils.kl_divergence(new_log_prob, old_log_prob)
 
         # Entropy

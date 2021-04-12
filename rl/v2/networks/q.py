@@ -59,7 +59,11 @@ class QNetwork(Network):
         utils.remove_keys(kwargs, keys=['dueling', 'operator', 'prioritized'])
 
         inputs = inputs['state']
-        x = backbones.dense(layer=inputs, **kwargs)
+
+        if len(inputs.shape) <= 2:
+            x = backbones.dense(layer=inputs, **kwargs)
+        else:
+            x = backbones.convolutional(layer=inputs, **kwargs)
 
         output = self.output_layer(layer=x)
         return inputs, output, name
@@ -96,7 +100,7 @@ class QNetwork(Network):
             # inform agent's memory about td-error, to later update priorities
             self.agent.memory.td_error.assign(tf.squeeze(td_error))
 
-            loss = reduction(td_error * batch['weights'])
+            loss = reduction(td_error * batch['_weights'])
         else:
             loss = 0.5 * reduction(tf.square(q_values - q_targets))
 
@@ -333,7 +337,12 @@ class ImplicitQuantileNetwork(QNetwork):
         states = inputs['state']
         quantiles = inputs['quantile']
 
-        x = backbones.dense(layer=states, **kwargs)
+        if len(states.shape) <= 2:
+            x = backbones.dense(layer=states, **kwargs)
+        else:
+            x = backbones.convolutional(layer=states, **kwargs)
+
+        # x = backbones.dense(layer=states, **kwargs)
         x = Dense(units=self.embedding_size)(x)
 
         emb = self.embed_fn(quantiles)

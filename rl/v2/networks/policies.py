@@ -55,7 +55,11 @@ class PolicyNetwork(Network):
 
     def structure(self, inputs: Dict[str, Input], name='PolicyNetwork', **kwargs) -> tuple:
         inputs = inputs['state']
-        x = backbones.dense(layer=inputs, **kwargs)
+
+        if len(inputs.shape) <= 2:
+            x = backbones.dense(layer=inputs, **kwargs)
+        else:
+            x = backbones.convolutional(layer=inputs, **kwargs)
 
         output = self.output_layer(x)
         return inputs, output, name
@@ -83,7 +87,6 @@ class PolicyNetwork(Network):
 
         return total_loss, debug
 
-    # TODO: investigate ghostly "seed" argument in tfp.DistributionLambda
     def get_distribution_layer(self, layer: Layer, min_std=0.02, unimodal=False,
                                **kwargs) -> tfp.layers.DistributionLambda:
         """
@@ -144,7 +147,11 @@ class DeterministicPolicyNetwork(Network):
 
     def structure(self, inputs: Dict[str, Input], name='DeterministicPolicyNetwork', **kwargs) -> tuple:
         inputs = inputs['state']
-        x = backbones.dense(layer=inputs, **kwargs)
+
+        if len(inputs.shape) <= 2:
+            x = backbones.dense(layer=inputs, **kwargs)
+        else:
+            x = backbones.convolutional(layer=inputs, **kwargs)
 
         output = self.output_layer(x)
         return inputs, output, name
