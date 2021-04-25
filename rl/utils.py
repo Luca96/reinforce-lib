@@ -45,16 +45,30 @@ DynamicType = Union[float, LearningRateSchedule, DynamicParameter]
 
 
 def get_optimizer_by_name(name: str, *args, **kwargs) -> tf.keras.optimizers.Optimizer:
-    optimizer_class = OPTIMIZERS.get(name.lower(), None)
+    name = name.lower()
+    optimizer_class = OPTIMIZERS.get(name, None)
 
     if optimizer_class is None:
         raise ValueError(f'Cannot find optimizer {name}. Select one of {OPTIMIZERS.keys()}.')
+
+    if name == 'adam':
+        # Source: Google Dopamine
+        kwargs.setdefault('epsilon', 0.0003125)  # more numerically stable
+
+    elif name == 'rmsprop':
+        # https://github.com/google/dopamine/blob/master/dopamine/agents/dqn/configs/dqn_nature.gin#L22
+        kwargs.setdefault('epsilon', 0.00001)
 
     print(f'Optimizer: {name}.')
     return optimizer_class(*args, **kwargs)
 
 
 def get_normalization_layer(name: str, **kwargs) -> tf.keras.layers.Layer:
+    if isinstance(name, str):
+        name = name.lower()
+    else:
+        raise ValueError(f'Parameter `name` should be a "string" not "{type(name)}"')
+
     if name == 'batch':
         return tf.keras.layers.BatchNormalization(**kwargs)
 
@@ -63,13 +77,16 @@ def get_normalization_layer(name: str, **kwargs) -> tf.keras.layers.Layer:
 
 
 def apply_normalization(layer: tf.keras.layers.Layer, name: str, **kwargs) -> tf.keras.layers.Layer:
+    if not isinstance(name, str):
+        return layer
+
+    name = name.lower()
+
     if name == 'batch':
         return tf.keras.layers.BatchNormalization(**kwargs)(layer)
 
     if name == 'layer':
         return tf.keras.layers.LayerNormalization(**kwargs)(layer)
-
-    return layer
 
 
 def get_normalization_fn(arg: Union[str, Callable], **kwargs):
@@ -161,22 +178,31 @@ def get_random_generator(seed=None) -> np.random.Generator:
     return np.random.default_rng(np.random.MT19937(seed=seed))
 
 
-def np_normalize(x, epsilon=np.finfo(np.float32).eps):
+def np_normalize(x, epsilon=NP_EPS):
     return (x - np.mean(x)) / (np.std(x) + epsilon)
 
 
 def discount_cumsum(x, discount: float):
-    """Source: https://github.com/openai/spinningup/blob/master/spinup/algos/tf1/ppo/core.py#L45"""
+    """Performs a cumulative discounted sum.
+        - Source: https://github.com/openai/spinningup/blob/master/spinup/algos/tf1/ppo/core.py#L45
+    """
     return scipy.signal.lfilter([1.0], [1.0, float(-discount)], x[::-1], axis=0)[::-1]
 
 
 def gae(rewards, values, gamma: float, lambda_: float, normalize=False):
+    """Generalized Advantage Estimation (GAE) formula"""
     if lambda_ == 0.0:
+        # special case: GAE(\gamma, 0)
         advantages = rewards[:-1] + gamma * values[1:] - values[:-1]
+
+    elif lambda_ == 1.0:
+        # special case: GAE(\gamma, 1)
+        advantages = rewards_to_go(rewards[:-1], discount=gamma) - values[:-1]
     else:
         deltas = rewards[:-1] + gamma * values[1:] - values[:-1]
         advantages = discount_cumsum(deltas, discount=gamma * lambda_)
 
+    # TODO: remove "normalize" in fn signature
     if normalize:
         advantages = tf_normalize(advantages)
 
@@ -184,7 +210,10 @@ def gae(rewards, values, gamma: float, lambda_: float, normalize=False):
 
 
 def rewards_to_go(rewards, discount: float, decompose=False):
-    returns = discount_cumsum(rewards, discount=discount)[:-1]
+    if len(rewards) == 1:
+        returns = rewards
+    else:
+        returns = discount_cumsum(rewards, discount=discount)[:-1]
 
     if decompose:
         returns_base, returns_exp = tf.map_fn(fn=decompose_number, elems=to_float(returns),
@@ -225,10 +254,13 @@ def polyak_averaging(model: tf.keras.Model, old_weights: list, alpha=0.99):
     model.set_weights(weights)
 
 
+# TODO: as method of Network?
 def polyak_averaging2(model, target, alpha: float):
     for var, var_target in zip(model.trainable_variables, target.trainable_variables):
         value = alpha * var_target + (1.0 - alpha) * var
+
         var_target.assign(value, read_value=False)
+        # var_target.assign(value, use_locking=True)
 
 
 def clip_gradients(gradients: list, norm: float) -> list:
@@ -261,7 +293,7 @@ def average_gradients(gradients: list, n: int) -> list:
 def decompose_number(num: float) -> Tuple[float, float]:
     """Decomposes a given number `n` in a `base` (b) and `exponent` (e), such that:
        - n = b * 10^e
-       - NOTE: b in [-1.0, 1.0], and e in [0.0, +inf]
+       - NOTE: `b` in [-1.0, 1.0], and `e` in [0.0, +inf]
 
        Examples:
        - 2.34 = (0.234, 1), such that 0.234 * 10^1 = 2.34
@@ -737,7 +769,7 @@ def batch_norm_relu6(layer: tf.keras.layers.Layer):
 
 @tf.function
 def lisht(x):
-    """Non-Parameteric Linearly Scaled Hyperbolic Tangent Activation Function
+    """Non-Parametric Linearly Scaled Hyperbolic Tangent Activation Function
        Sources:
         - https://www.tensorflow.org/addons/api_docs/python/tfa/activations/lisht
         - https://arxiv.org/abs/1901.05894
@@ -806,8 +838,8 @@ def huber_loss(errors: tf.Tensor, kappa=1.0) -> tf.Tensor:
           - case_two: |errors| > kappa"""
     abs_errors = tf.abs(errors)
 
-    case_one = to_float(abs_errors <= kappa) * 0.5 * tf.square(errors)
-    case_two = to_float(abs_errors > kappa) * kappa * (abs_errors - 0.5 * kappa)
+    case_one = to_float(abs_errors <= kappa) * 0.5 * tf.square(errors)  # MSE
+    case_two = to_float(abs_errors > kappa) * kappa * (abs_errors - 0.5 * kappa)  #  k * (|x| - 1/2 k)
 
     return case_one + case_two
 

@@ -8,6 +8,7 @@ from rl.parameters import DynamicParameter
 from typing import Union, List, Dict, Callable
 
 
+# TODO: monitor the "distance" (i.e. global_norm) of the network w.r.t its target (to debug polyak)
 # TODO: distributed strategy
 class Network(tf.keras.Model):
     """Base class for agent's networks (e.g. Q, Policy, Value, ...)"""
@@ -36,7 +37,7 @@ class Network(tf.keras.Model):
     @staticmethod
     def create(*args, base_class: Union[str, Callable] = None, **kwargs) -> 'Network':
         """Instantiates a subclass of Network"""
-        class_or_name = kwargs.pop('class', None)
+        class_or_name = kwargs.pop('class', kwargs.pop('cls', None))
 
         if class_or_name is None:
             # use `base_class`
@@ -102,8 +103,14 @@ class Network(tf.keras.Model):
 
         print(']')
 
-    def compile(self, optimizer: str, clip_norm: utils.DynamicType = None, **kwargs):
-        self.optimizer = utils.get_optimizer_by_name(optimizer, **kwargs)
+    def compile(self, optimizer: Union[str, dict], clip_norm: utils.DynamicType = None, **kwargs):
+        if isinstance(optimizer, dict):
+            name = optimizer.pop('name', 'adam')
+            kwargs.update(optimizer)  # add the remaining arguments if any
+        else:
+            name = str(optimizer)
+
+        self.optimizer = utils.get_optimizer_by_name(name, **kwargs)
 
         if clip_norm is None:
             self.should_clip_gradients = False

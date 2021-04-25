@@ -164,9 +164,11 @@ class DDPG(Agent):
         with utils.Timed('Learn'):
             super().learn(*args, **kwargs)
 
-    def on_transition(self, transition: dict, timestep: int, episode: int):
-        super().on_transition(transition, timestep, episode)
-        self.update()
+    def on_transition(self, transition: dict, timestep: int, episode: int, exploration=False):
+        super().on_transition(transition, timestep, episode, exploration)
+
+        if not exploration:
+            self.update()
 
     def save_weights(self):
         self.actor.save_weights(filepath=self.weights_path['actor'])

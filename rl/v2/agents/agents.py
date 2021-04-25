@@ -16,6 +16,8 @@ from rl.v2.memories import Memory, TransitionSpec
 from typing import List, Dict, Union, Tuple
 
 
+# TODO: summary of agent parameters?
+# TODO: "evaluation" dict for parameters that what should be set differently during evaluation?
 # TODO: provide a "fake" agent just for debugging components?
 # TODO: gym.env wrapper that supports "reproducible" sampling, and has suitable "specs" for state and action-spaces
 #  + basic pre-processing (e.g. conversion to numpy/tensor)?
@@ -89,6 +91,14 @@ class Agent:
             self.should_log = True
         else:
             self.should_log = False
+    
+    @classmethod
+    def from_preset(cls, preset: dict, **kwargs) -> 'Agent':
+        """Creates an Agent instance (type depends on caller class) from given `preset` (i.e. configuration)"""
+        args = preset.copy()
+        args.update(**kwargs)
+
+        return cls(**args)
 
     @property
     def transition_spec(self) -> TransitionSpec:
@@ -207,37 +217,149 @@ class Agent:
     def update(self):
         raise NotImplementedError
 
-    def explore(self, steps: int):
-        """Random exploration steps before training"""
-        if steps <= 0:
-            return
-
-        state = self.env.reset()
-        state = self.preprocess(state, evaluation=False)
-
-        while steps > 0:
-            action, other, debug = self.act_randomly(state)
-            action_env = self.convert_action(action)
-
-            for _ in range(self.repeat_action):
-                next_state, reward, terminal, info = self.env.step(action=action_env)
-
-                if terminal:
-                    break
-
-            transition = dict(state=state, action=action, reward=reward, next_state=next_state,
-                              terminal=terminal, **(info or {}), **(other or {}))
-
-            self.preprocess_transition(transition, exploration=True)
-            self.memory.store(transition)
-            self.log(random_action_env=action_env, random_action=action, **debug)
-
-            if terminal:
-                state = self.env.reset()
-                state = self.preprocess(state, evaluation=False)
-                print(f'Explorative episode terminated. Steps left: {steps - 1}.')
-
-            steps -= 1
+    # # TODO: does not consider horizon, etc...
+    # def explore(self, steps: int):
+    #     """Random exploration steps before training"""
+    #     if steps <= 0:
+    #         return
+    #
+    #     state = self.env.reset()
+    #     state = self.preprocess(state, evaluation=False)
+    #
+    #     while steps > 0:
+    #         action, other, debug = self.act_randomly(state)
+    #         action_env = self.convert_action(action)
+    #
+    #         for _ in range(self.repeat_action):
+    #             next_state, reward, terminal, info = self.env.step(action=action_env)
+    #
+    #             if terminal:
+    #                 break
+    #
+    #         transition = dict(state=state, action=action, reward=reward, next_state=next_state,
+    #                           terminal=terminal, **(info or {}), **(other or {}))
+    #
+    #         self.preprocess_transition(transition, exploration=True)
+    #         self.memory.store(transition)
+    #         self.log(random_action_env=action_env, random_action=action, **debug)
+    #
+    #         if terminal:
+    #             state = self.env.reset()
+    #             state = self.preprocess(state, evaluation=False)
+    #             print(f'Explorative episode terminated. Steps left: {steps - 1}.')
+    #
+    #         steps -= 1
+    #
+    # def learn(self, episodes: int, timesteps: int, render: Union[bool, int, None] = False, should_close=True,
+    #           evaluation: Union[dict, bool] = None, exploration_steps=0, save=True):
+    #     """Training loop"""
+    #     assert episodes > 0
+    #     assert timesteps > 0
+    #
+    #     self.on_start(episodes, timesteps)
+    #
+    #     # Render:
+    #     if render is True:
+    #         render_freq = 1  # render each episode
+    #
+    #     elif render is False or render is None:
+    #         render_freq = episodes + 1  # never render
+    #     else:
+    #         render_freq = int(render)  # render at specified frequency
+    #
+    #     # Evaluation:
+    #     if isinstance(evaluation, dict):
+    #         eval_freq = evaluation.pop('freq', episodes + 1)  # default: never evaluate
+    #         assert isinstance(eval_freq, int)
+    #
+    #         evaluation['should_close'] = False
+    #         evaluation.setdefault('episodes', 1)  # default: evaluate on just 1 episode
+    #         evaluation.setdefault('timesteps', timesteps)  # default: evaluate on the same number of timesteps
+    #         evaluation.setdefault('render', render)  # default: same rendering options
+    #     else:
+    #         eval_freq = episodes + 1  # never evaluate
+    #
+    #     # Saving:
+    #     if save:
+    #         # track 'average return' to determine best agent, also prefer newer agents (if equally good)
+    #         best_return = -2**32
+    #         should_save = True
+    #     else:
+    #         should_save = False
+    #
+    #     # Exploration:
+    #     self.explore(steps=int(exploration_steps))
+    #
+    #     # Learning-loop:
+    #     for episode in range(1, episodes + 1):
+    #         self.on_episode_start(episode)
+    #
+    #         should_render = episode % render_freq == 0
+    #         should_evaluate = episode % eval_freq == 0
+    #
+    #         episode_reward = 0.0
+    #         t0 = time.time()
+    #
+    #         state = self.env.reset()
+    #         state = self.preprocess(state)
+    #
+    #         for t in range(1, timesteps + 1):
+    #             if should_render:
+    #                 self.env.render()
+    #
+    #             # Agent prediction
+    #             action, other, debug = self.act(state)
+    #             action_env = self.convert_action(action)
+    #
+    #             # Environment step
+    #             for _ in range(self.repeat_action):
+    #                 next_state, reward, terminal, info = self.env.step(action=action_env)
+    #                 episode_reward += reward
+    #
+    #                 if terminal:
+    #                     break
+    #
+    #             # TODO: next_state not pre-processes, pre-process or avoid storing them!
+    #             transition = dict(state=state, action=action, reward=reward, next_state=next_state,
+    #                               terminal=terminal, **(info or {}), **(other or {}))
+    #
+    #             self.preprocess_transition(transition)
+    #             self.on_transition(transition, timestep=t, episode=episode)
+    #             self.log(action_env=action_env, **debug)
+    #
+    #             if terminal or (t == timesteps):
+    #                 self.log(timestep=t)
+    #                 self.on_termination(last_transition=transition, timestep=t, episode=episode)
+    #
+    #                 print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
+    #                       f'with reward {round(episode_reward, 3)}.')
+    #                 break
+    #             else:
+    #                 state = next_state
+    #                 state = self.preprocess(state)
+    #
+    #         self.on_episode_end(episode, episode_reward)
+    #
+    #         if should_evaluate:
+    #             eval_rewards = self.evaluate(**evaluation)
+    #
+    #             self.log(eval_rewards=eval_rewards)
+    #             print(f'[Evaluation] average return: {np.round(np.mean(eval_rewards), 2)}, '
+    #                   f'std: {np.round(np.std(eval_rewards), 2)}')
+    #
+    #             if should_save:
+    #                 average_return = np.floor(np.mean(eval_rewards))
+    #
+    #                 # TODO: when saving also save 'best_return' into the agent's config
+    #                 if average_return >= best_return:
+    #                     self.save()
+    #                     best_return = average_return
+    #                     print(f'Saved [{round(best_return, 2)}]')
+    #
+    #         if self.should_record:
+    #             self.record(episode)
+    #
+    #     self.on_close(should_close)
 
     def learn(self, episodes: int, timesteps: int, render: Union[bool, int, None] = False, should_close=True,
               evaluation: Union[dict, bool] = None, exploration_steps=0, save=True):
@@ -277,14 +399,18 @@ class Agent:
             should_save = False
 
         # Exploration:
-        self.explore(steps=int(exploration_steps))
+        exploration_steps = int(exploration_steps)
+        is_exploring = exploration_steps > 0
+
+        episode = 0
 
         # Learning-loop:
-        for episode in range(1, episodes + 1):
-            self.on_episode_start(episode)
+        while episode < episodes + 1:
+            episode += 1
+            self.on_episode_start(episode, exploration=is_exploring)
 
-            should_render = episode % render_freq == 0
-            should_evaluate = episode % eval_freq == 0
+            should_render = (not is_exploring) and (episode % render_freq == 0)
+            should_evaluate = (not is_exploring) and (episode % eval_freq == 0)
 
             episode_reward = 0.0
             t0 = time.time()
@@ -293,11 +419,25 @@ class Agent:
             state = self.preprocess(state)
 
             for t in range(1, timesteps + 1):
+                if is_exploring and exploration_steps <= 0:
+                    # reset episode count, since we discard the episodes consumed for exploration
+                    episode = 0
+                    is_exploring = False
+
+                    print('Exploration terminated.')
+                    break
+                else:
+                    exploration_steps -= 1
+
                 if should_render:
                     self.env.render()
 
                 # Agent prediction
-                action, other, debug = self.act(state)
+                if is_exploring:
+                    action, other, debug = self.act_randomly(state)
+                else:
+                    action, other, debug = self.act(state)
+
                 action_env = self.convert_action(action)
 
                 # Environment step
@@ -312,22 +452,29 @@ class Agent:
                 transition = dict(state=state, action=action, reward=reward, next_state=next_state,
                                   terminal=terminal, **(info or {}), **(other or {}))
 
-                self.preprocess_transition(transition)
-                self.on_transition(transition, timestep=t, episode=episode)
-                self.log(action_env=action_env, **debug)
+                self.preprocess_transition(transition, exploration=is_exploring)
+                self.on_transition(transition, timestep=t, episode=episode, exploration=is_exploring)
+
+                if is_exploring:
+                    self.log(random_action_env=action_env, random_action=action, **debug)
+                else:
+                    self.log(action_env=action_env, **debug)
 
                 if terminal or (t == timesteps):
                     self.log(timestep=t)
-                    self.on_termination(last_transition=transition, timestep=t, episode=episode)
-
-                    print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
-                          f'with reward {round(episode_reward, 3)}.')
+                    self.on_termination(last_transition=transition, timestep=t, episode=episode,
+                                        exploration=is_exploring)
+                    if is_exploring:
+                        print(f'Exploration episode terminated. Steps left: {exploration_steps - 1}.')
+                    else:
+                        print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
+                              f'with reward {round(episode_reward, 3)}.')
                     break
                 else:
                     state = next_state
                     state = self.preprocess(state)
 
-            self.on_episode_end(episode, episode_reward)
+            self.on_episode_end(episode, episode_reward, exploration=is_exploring)
 
             if should_evaluate:
                 eval_rewards = self.evaluate(**evaluation)
@@ -350,6 +497,8 @@ class Agent:
 
         self.on_close(should_close)
 
+    # TODO: provide choice for evaluation criterion: mean, median, std...
+    # TODO: during evaluation the behaviour of some agents (e.g. DQN) changes (e.g. different `epsilon` if used)
     def evaluate(self, episodes: int, timesteps: int, render: Union[bool, int] = True, should_close=False) -> list:
         if render is True:
             render_freq = 1  # render each episode
@@ -478,26 +627,30 @@ class Agent:
     def save_weights(self):
         raise NotImplementedError
 
-    def on_episode_start(self, episode: int, evaluation=False):
+    def on_episode_start(self, episode: int, evaluation=False, exploration=False):
         """Called at the beginning of each episode"""
         self.reset()
 
-    def on_episode_end(self, episode: int, episode_reward: float, evaluation=False):
+    def on_episode_end(self, episode: int, episode_reward: float, evaluation=False, exploration=False):
         """Called *after* the end of each episode.
             - Used for memory-specific stuff.
             - Or, to update the agent (e.g. PPO)
         """
-        for parameter in self.dynamic_parameters.values():
-            parameter.on_episode()
+        if exploration:
+            return
 
-        self.log(episode_reward=episode_reward)
-        self.log_dynamic_parameters()
+        if not evaluation:
+            for parameter in self.dynamic_parameters.values():
+                parameter.on_episode()
+
+            self.log_dynamic_parameters()
+            self.log(episode_reward=episode_reward)
 
     # TODO: start/end ?
     def on_timestep(self, timestep: int):
         pass
 
-    def on_transition(self, transition: dict, timestep: int, episode: int):
+    def on_transition(self, transition: dict, timestep: int, episode: int, exploration=False):
         """Called upon a transition occurs (agent prediction + environment step).
             - Useful for logging or pre-processing the transition.
             - Also for storing transition in memory, also conditional on actual timestep/episode num.
@@ -511,7 +664,7 @@ class Agent:
     #     """Called *after* environment step, usually used to log actions"""
     #     pass
 
-    def on_termination(self, last_transition, timestep: int, episode: int):
+    def on_termination(self, last_transition, timestep: int, episode: int, exploration=False):
         """Called *exactly* at the end of each episode, due to terminal state or maximum number of timesteps reached.
             - Used for agent-specific memory stuff.
             - Or, to update the agent (e.g. PPO)

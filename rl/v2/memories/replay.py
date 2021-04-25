@@ -12,7 +12,13 @@ from typing import Union
 class ReplayMemory(Memory):
 
     def get_batch(self, batch_size: int, **kwargs) -> dict:
-        return self.sample(batch_size)
+        batch = self.sample(batch_size)
+
+        # retro-compatibility for ReplayMemory with DQN objective (see networks.q.DQN.objective(...))
+        if 'return' not in batch:
+            batch['return'] = batch['reward']
+
+        return batch
 
     def sample(self, batch_size: int) -> dict:
         """Samples a batch of transitions (without replacement)"""
@@ -40,6 +46,41 @@ class ReplayMemory(Memory):
         return tensors
 
 
+class NStepMemory(ReplayMemory):
+    """N-step replay memory"""
+
+    def __init__(self, *args, gamma: float, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        if 'return' in self.data:
+            raise ValueError('Key "return" is reserved!')
+
+        self.data['return'] = np.zeros_like(self.data['reward'])
+        self.gamma = gamma
+        self.last_index = 0
+
+    def end_trajectory(self):
+        index = self.index - 1
+
+        # compute n-step returns:
+        if self.index > self.last_index:
+            rewards = self.data['reward'][self.last_index:index]
+        else:
+            rewards = np.concatenate([self.data['reward'][self.last_index:],
+                                      self.data['reward'][:index]])
+
+        returns = utils.rewards_to_go(rewards, discount=self.gamma)
+
+        if self.index > self.last_index:
+            self.data['return'][self.last_index:index] = returns
+        else:
+            self.data['return'][self.last_index:] = returns[:self.current_size - self.last_index]
+            self.data['return'][:index] = returns[index:]
+
+        self.last_index = index
+
+
+# TODO: use "sum-tree structure" when memory size is large (> 4/8/16k ?)
 class PrioritizedMemory(ReplayMemory):
     """Prioritized Experience Replay (PER) memory, proportional-variant
         - Based on https://github.com/BY571/Soft-Actor-Critic-and-Extensions/blob/master/SAC_PER.py
@@ -85,10 +126,13 @@ class PrioritizedMemory(ReplayMemory):
         weights /= weights.max()
 
         if '_weights' in batch:
-            raise ValueError('Key "_weights" is reserved for PrioritizedMemory.')
+            raise ValueError('Key "_weights" is reserved for `PrioritizedMemory`.')
 
         batch['_weights'] = tf.expand_dims(weights, axis=-1)
         return batch
+
+    def on_update(self):
+        self.update_priorities()
 
     @staticmethod
     def _get_var(size) -> tf.Variable:

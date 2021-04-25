@@ -88,7 +88,7 @@ class ScheduleWrapper(LearningRateSchedule, DynamicParameter):
         return self.schedule.get_config()
 
 
-# TODO: deprecate
+# TODO: to deprecate when removing old implementation of agents
 class LearnableParameter(DynamicParameter):
     def __init__(self, initial_value: float, name=None):
         self._value = tf.Variable(initial_value=initial_value, trainable=True, name=name,
@@ -127,27 +127,29 @@ class ConstantParameter(DynamicParameter):
 
 class ExponentialDecay(ScheduleWrapper):
     def __init__(self, initial_value: float, steps: int, rate: float, staircase=False, min_value=0.0, max_value=None):
-        super().__init__(schedule=schedules.ExponentialDecay(initial_learning_rate=initial_value,
-                                                             decay_steps=steps, decay_rate=rate,
-                                                             staircase=staircase),
-                         min_value=min_value, max_value=max_value)
+        super().__init__(schedule=schedules.ExponentialDecay(initial_learning_rate=float(initial_value),
+                                                             decay_steps=int(steps), decay_rate=float(rate),
+                                                             staircase=bool(staircase)),
+                         min_value=float(min_value), max_value=max_value)
 
 
 class StepDecay(ScheduleWrapper):
     def __init__(self, initial_value: float, steps: int, rate: float, min_value=1e-7, max_value=None):
-        super().__init__(schedule=schedules.ExponentialDecay(initial_value, steps, rate, staircase=True),
-                         min_value=min_value, max_value=max_value)
+        super().__init__(schedule=schedules.ExponentialDecay(initial_learning_rate=float(initial_value),
+                                                             decay_steps=int(steps), decay_rate=float(rate),
+                                                             staircase=True),
+                         min_value=float(min_value), max_value=max_value)
 
 
 class LinearDecay(ScheduleWrapper):
     def __init__(self, initial_value: float, end_value: float, steps: int, cycle=False):
-        super().__init__(schedule=schedules.PolynomialDecay(initial_learning_rate=initial_value,
-                                                            decay_steps=steps, end_learning_rate=end_value,
-                                                            power=1.0, cycle=cycle))
+        super().__init__(schedule=schedules.PolynomialDecay(initial_learning_rate=float(initial_value),
+                                                            decay_steps=int(steps), end_learning_rate=float(end_value),
+                                                            power=1.0, cycle=bool(cycle)))
 
 
 class PolynomialDecay(ScheduleWrapper):
     def __init__(self, initial_value: float, end_value: float, steps: int, power=1.0, cycle=False):
-        super().__init__(schedule=schedules.PolynomialDecay(initial_learning_rate=initial_value,
-                                                            decay_steps=steps, end_learning_rate=end_value,
-                                                            power=power, cycle=cycle))
+        super().__init__(schedule=schedules.PolynomialDecay(initial_learning_rate=float(initial_value),
+                                                            decay_steps=int(steps), end_learning_rate=float(end_value),
+                                                            power=power, cycle=bool(cycle)))

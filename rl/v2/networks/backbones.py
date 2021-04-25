@@ -19,15 +19,22 @@ StrideType = KernelType
 # -- Feed-Forward
 # ---------------------------------------------------------------------------------------------------------------------
 
-def dense(layer: Layer, units=32, num_layers=2, activation='relu', normalization='layer', normalize_input=True,
+# TODO: learn about FourierBasis networks:
+#  - https://github.com/google/dopamine/blob/master/dopamine/discrete_domains/gym_lib.py#L162
+#  - Value Function Approximation in Reinforcement Learning using the Fourier Basis (2011)
+def dense(layer: Layer, units=32, num_layers=2, activation='relu', normalization=None, normalize_input=False,
           use_bias=True, bias_initializer='glorot_uniform', kernel_initializer='glorot_normal', dropout=0.0,
-          weight_decay=0.0, **kwargs) -> Layer:
+          weight_decay=0.0, noisy=False, sigma=0.5, noise='factorized', min_max: Union[tuple, list] = None,
+          **kwargs) -> Layer:
     """Feed-Forward Neural Network architecture with one input"""
     assert num_layers >= 1
     assert weight_decay >= 0.0
 
     if normalize_input:
         x = utils.apply_normalization(layer, name=normalization)
+
+    elif isinstance(min_max, (tuple, list)) and len(min_max) == 2:
+        x = preprocessing.MinMaxScaling(min_value=min_max[0], max_value=min_max[1])(layer)
     else:
         x = layer
 
@@ -37,8 +44,12 @@ def dense(layer: Layer, units=32, num_layers=2, activation='relu', normalization
         weight_decay = None
 
     for _ in range(num_layers):
-        x = Dense(units, activation=activation, use_bias=use_bias, bias_initializer=bias_initializer,
-                  kernel_initializer=kernel_initializer, kernel_regularizer=weight_decay, **kwargs)(x)
+        if noisy:
+            x = NoisyDense(units, activation=activation, use_bias=use_bias, bias_initializer=bias_initializer,
+                           kernel_initializer=kernel_initializer, sigma=sigma, noise=noise, **kwargs)(x)
+        else:
+            x = Dense(units, activation=activation, use_bias=use_bias, bias_initializer=bias_initializer,
+                      kernel_initializer=kernel_initializer, kernel_regularizer=weight_decay, **kwargs)(x)
 
         if dropout > 0.0:
             x = Dropout(rate=dropout)(x)
@@ -48,6 +59,7 @@ def dense(layer: Layer, units=32, num_layers=2, activation='relu', normalization
     return x
 
 
+# TODO: add `min_max` argument
 def dense_branched(*layers: List[Layer], units: Union[int, List[int]] = 32, num_layers: Union[int, List[int]] = 2,
                    activation: Union[str, List[str]] = 'relu', normalization: Union[str, List[str]] = 'layer',
                    normalize_input: Union[bool, List[bool]] = True, use_bias: Union[bool, List[bool]] = True,
@@ -84,30 +96,6 @@ def dense_branched(*layers: List[Layer], units: Union[int, List[int]] = 32, num_
         outputs.append(out)
 
     return concatenate(outputs)
-
-
-# TODO: remove, use `dense(...)` with a "noisy" (bool) argument instead
-def noisy_dense(layer: Layer, units=32, num_layers=2, activation='relu', normalization='layer', normalize_input=True,
-                use_bias=True, bias_initializer='glorot_uniform', kernel_initializer='glorot_normal', dropout=0.0,
-                sigma=0.5, noise='factorized', **kwargs) -> Layer:
-    """Feed-Forward Noisy network"""
-    assert num_layers >= 1
-
-    if normalize_input:
-        x = utils.apply_normalization(layer, name=normalization)
-    else:
-        x = layer
-
-    for _ in range(num_layers):
-        x = NoisyDense(units, activation=activation, use_bias=use_bias, bias_initializer=bias_initializer,
-                       kernel_initializer=kernel_initializer, sigma=sigma, noise=noise, **kwargs)(x)
-
-        if dropout > 0.0:
-            x = Dropout(rate=dropout)(x)
-
-        x = utils.apply_normalization(x, name=normalization)
-
-    return x
 
 
 # # TODO: implement as a layer?
@@ -195,3 +183,27 @@ def convolutional(layer: Layer, filters: Union[int, List[int]] = None, units: Un
 
 def recurrent():
     raise NotImplementedError
+
+
+if __name__ == '__main__':
+    import numpy as np
+    from tensorflow.keras.datasets import mnist
+
+    (x_train, y_train), (_, _) = mnist.load_data()
+    x_train = np.reshape(x_train, (-1, 28, 28, 1)) / 255.0
+    y_train = tf.keras.utils.to_categorical(y_train, num_classes=10)
+
+    def get_model():
+        images = Input(shape=(28, 28, 1))
+        x = convolutional(images, global_pooling='avg')
+        classes = Dense(units=10, activation='softmax')(x)
+        return tf.keras.Model(images, classes, name='ConvMNIST')
+
+    m = get_model()
+    m.summary()
+
+    m.compile(optimizer='adam', loss='binary_crossentropy', run_eagerly=True,
+              metrics=['accuracy', tf.keras.metrics.AUC()])
+
+    m.fit(x=x_train, y=y_train, batch_size=128, validation_split=0.2, epochs=5)  # acc: 97.13, auc: 99.86
+

@@ -100,8 +100,8 @@ class PPO1(ParallelAgent):
 
             self.memory.clear()
 
-    def on_transition(self, transition: Dict[str, list], timestep: int, episode: int):
-        super().on_transition(transition, timestep, episode)
+    def on_transition(self, transition: Dict[str, list], timestep: int, episode: int, exploration=False):
+        super().on_transition(transition, timestep, episode, exploration)
 
         if any(transition['terminal']) or (timestep % self.horizon == 0) or (timestep == self.max_timesteps) \
                 or self.memory.is_full():
@@ -113,7 +113,8 @@ class PPO1(ParallelAgent):
             debug = self.memory.end_trajectory(last_values=values)
             self.log(average=True, **debug)
 
-            self.update()
+            if not exploration:
+                self.update()
 
     def load_weights(self):
         self.policy.load_weights(filepath=self.weights_path['policy'], by_name=False)

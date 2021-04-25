@@ -11,17 +11,19 @@ from rl import utils
 from rl.parameters import DynamicParameter
 
 from rl.v2.agents import Agent
-from rl.v2.memories import TransitionSpec, ReplayMemory, PrioritizedMemory
+from rl.v2.memories import TransitionSpec, ReplayMemory, NStepMemory, PrioritizedMemory
 from rl.v2.networks.q import Network, QNetwork, DoubleQNetwork
 
 
 class DQN(Agent):
+    # TODO: `cumulative_gamma = tf.pow(gamma, horizon)` ?
+    # TODO: possibility to chose "huber loss" instead of MSE
     # TODO: n_step (horizon) updates
-    def __init__(self, *args, name='dqn-agent', lr: utils.DynamicType = 3e-4, optimizer='adam', memory_size=1024,
-                 policy='e-greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = 1.0, load=False,
+    def __init__(self, *args, name='dqn-agent', lr: utils.DynamicType = 3e-4, optimizer: Union[dict, str] = 'adam',
+                 policy='e-greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = None, load=False,
                  update_target_network: Union[bool, int] = False, polyak: utils.DynamicType = 0.995, double=True,
                  network: dict = None, dueling=True, horizon=1, prioritized=False, alpha: utils.DynamicType = 0.6,
-                 beta: utils.DynamicType = 0.4, **kwargs):
+                 beta: utils.DynamicType = 0.4, memory_size=1024, **kwargs):
         assert horizon >= 1
         assert policy.lower() in ['boltzmann', 'softmax', 'e-greedy', 'greedy']
         super().__init__(*args, name=name, **kwargs)
@@ -72,8 +74,9 @@ class DQN(Agent):
                 self._memory = PrioritizedMemory(self.transition_spec, shape=self.memory_size, alpha=self.alpha,
                                                  beta=self.beta, seed=self.seed)
             else:
-                self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size, seed=self.seed)
-
+                # self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size, seed=self.seed)
+                self._memory = NStepMemory(self.transition_spec, shape=self.memory_size, gamma=self.gamma,
+                                           seed=self.seed)
         return self._memory
 
     # TODO: add `MultiDiscrete` action-space support
@@ -135,10 +138,9 @@ class DQN(Agent):
 
         with utils.Timed('Update', silent=True):
             batch = self.memory.get_batch(batch_size=self.batch_size)
-            self.dqn.train_step(batch)
 
-            if self.prioritized:
-                self.memory.update_priorities()
+            self.dqn.train_step(batch)
+            self.memory.on_update()
 
     def update_target_network(self):
         if self.should_update_target:
@@ -150,12 +152,15 @@ class DQN(Agent):
             else:
                 self.dqn.update_target_network(copy_weights=False, polyak=self.polyak())
 
-    def on_transition(self, transition: dict, timestep: int, episode: int):
-        super().on_transition(transition, timestep, episode)
+    def on_transition(self, transition: dict, timestep: int, episode: int, exploration=False):
+        super().on_transition(transition, timestep, episode, exploration)
 
         if (timestep % self.horizon == 0) or transition['terminal'] or (timestep == self.max_timesteps):
-            self.update()
-            self.update_target_network()
+            self.memory.end_trajectory()
+
+            if not exploration:
+                self.update()
+                self.update_target_network()
 
     def save_weights(self):
         self.dqn.save_weights(filepath=self.weights_path['dqn'])
@@ -168,14 +173,22 @@ class DQN(Agent):
 
 
 if __name__ == '__main__':
-    from rl.parameters import StepDecay, ExponentialDecay
+    from rl import parameters as p
+    from rl.presets import DQNPresets
 
-    agent = DQN(env='CartPole-v0', batch_size=32, policy='boltzmann', memory_size=4096,
-                name='dqn-cart', clip_norm=5.0, network=dict(num_layers=3),
-                lr=StepDecay(1.5e-5, steps=250, rate=0.5),
-                reward_scale=0.5, prioritized=True, horizon=4,
-                use_summary=False, double=True, dueling=True, seed=42)
+    cart_min = DQNPresets.CARTPOLE_MIN
+    cart_max = DQNPresets.CARTPOLE_MAX
+
+    # mse
+    agent = DQN(env='CartPole-v0', batch_size=128, policy='boltzmann', memory_size=50_000,
+                name='dqn-cart', epsilon=0.01, lr=0.001,
+                network=dict(num_layers=2, units=64, min_max=(cart_min, cart_max), noisy=False),
+                reward_scale=1.0, prioritized=False, horizon=1, gamma=0.97,
+                polyak=1.0, update_target_network=100,
+                use_summary=not False, double=True, dueling=False, seed=42)
+
+    # agent = DQN.from_preset(DQNPresets.CART_POLE, load=True)
     agent.summary()
 
-    agent.learn(episodes=500, timesteps=200//2, render=10, exploration_steps=4096 * 0,
+    agent.learn(episodes=500, timesteps=200, render=1000, exploration_steps=500,
                 evaluation=dict(episodes=50, freq=100))

@@ -268,8 +268,8 @@ class Worker(mp.Process):
         # DON'T call super: this avoids an error about `self.agent.statistics.is_alive()`
         self.sync_parameters()
 
-    def on_transition(self, transition, timestep: int, episode: int):
-        self.agent.on_transition_(transition, timestep, episode)
+    def on_transition(self, transition, timestep: int, episode: int, exploration=False):
+        self.agent.on_transition_(transition, timestep, episode, exploration)
 
         if transition['terminal'] or (timestep % self.agent.n_steps == 0) or (timestep == self.max_timesteps):
             terminal_state = self.agent.preprocess(transition['next_state'])
@@ -282,8 +282,9 @@ class Worker(mp.Process):
             debug = self.agent.memory.end_trajectory(last_value=value)
             self.log(average=True, **debug)
 
-            self.update()
-            self.sync_parameters()
+            if not exploration:
+                self.update()
+                self.sync_parameters()
 
 
 class GAEMemory(EpisodicMemory):

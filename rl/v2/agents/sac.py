@@ -172,9 +172,11 @@ class SAC(Agent):
         with utils.Timed('Learn'):
             super().learn(*args, **kwargs)
 
-    def on_termination(self, last_transition, timestep: int, episode: int):
-        super().on_termination(last_transition, timestep, episode)
-        self.update()
+    def on_termination(self, last_transition, timestep: int, episode: int, exploration=False):
+        super().on_termination(last_transition, timestep, episode, exploration)
+
+        if not exploration:
+            self.update()
 
     def save_weights(self):
         self.actor.save_weights(filepath=self.weights_path['actor'])

@@ -33,13 +33,18 @@ class QNetwork(Network):
 
         super().__init__(agent, target=target, dueling=dueling, operator=operator, log_prefix=log_prefix, **kwargs)
 
-        self.gamma = self.agent.gamma
+        # cumulative gamma
+        self.gamma_n = tf.pow(x=self.agent.gamma, y=self.agent.horizon)
 
     @tf.function
     def call(self, inputs, actions=None, training=None):
         q_values = super().call(inputs, training=training)
 
+        # TODO: consider to multiply q-values times one_hot(actions) instead of indexing
         if tf.is_tensor(actions):
+            # actions = tf.one_hot(actions, self.agent.num_classes, 1.0, 0.0)
+            # return tf.reduce_sum(q_values * actions, axis=1)
+
             # index q-values by given actions
             q_values = utils.index_tensor(tensor=q_values, indices=actions)
             return tf.expand_dims(q_values, axis=-1)
@@ -102,18 +107,25 @@ class QNetwork(Network):
 
             loss = reduction(td_error * batch['_weights'])
         else:
+            # TODO: consider `huber_loss` instead (as in original paper)
             loss = 0.5 * reduction(tf.square(q_values - q_targets))
+            # loss = reduction(utils.huber_loss(q_values - q_targets))
 
-        debug = dict(loss=loss, targets=q_targets, values=q_values, td_error=q_targets - q_values)
+        debug = dict(loss=loss, targets=q_targets, values=q_values, returns=batch['return'],
+                     td_error=q_targets - q_values)
+
+        if '_weights' in batch:
+            debug['weights_IS'] = batch['_weights']
+
         return loss, debug
 
     @tf.function
     def targets(self, batch: dict):
         """Computes target Q-values using target network"""
-        rewards = batch['reward']
+        returns = batch['return']
         q_values = self.target(inputs=batch['next_state'], training=False)
 
-        targets = rewards + self.gamma * (1.0 - batch['terminal']) * tf.reduce_max(q_values, axis=1, keepdims=True)
+        targets = returns + self.gamma_n * (1.0 - batch['terminal']) * tf.reduce_max(q_values, axis=1, keepdims=True)
         return tf.stop_gradient(targets)
 
 
@@ -122,7 +134,7 @@ class DoubleQNetwork(QNetwork):
 
     @tf.function
     def targets(self, batch: dict):
-        rewards = batch['reward']
+        returns = batch['return']
         next_states = batch['next_state']
 
         # double q-learning rule
@@ -130,16 +142,135 @@ class DoubleQNetwork(QNetwork):
         argmax_a = tf.expand_dims(tf.argmax(q_target, axis=-1), axis=-1)
         q_values = self.target(inputs=next_states, actions=argmax_a, training=False)
 
-        targets = rewards + self.gamma * (1.0 - batch['terminal']) * q_values
+        targets = returns + self.gamma_n * (1.0 - batch['terminal']) * q_values
         return tf.stop_gradient(targets)
 
 
-# TODO: not working!
+# @Network.register()
+# class CategoricalQNetwork(QNetwork):
+#
+#     def __init__(self, agent: Agent, target=True, log_prefix='cqn', **kwargs):
+#         utils.remove_keys(kwargs, keys=['dueling', 'operator', 'prioritized'])
+#         self._base_model_initialized = True
+#
+#         self.num_classes = agent.num_classes
+#         self.num_atoms = agent.num_atoms
+#         self.support = agent.support
+#         self.v_min = agent.v_min
+#         self.v_max = agent.v_max
+#
+#         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
+#
+#     @tf.function
+#     def call(self, inputs, actions=None, argmax=False, training=None):
+#         support = self.support  # z_i ("atoms")
+#         support_prob = super().call(inputs, training=training)  # p_i
+#
+#         if tf.is_tensor(actions):
+#             # select support probabilities according to *given* actions
+#             # return utils.index_tensor(support_prob, indices=actions)
+#             return self.index(support_prob, actions)
+#
+#         q_values = tf.reduce_sum(support * support_prob, axis=1)
+#
+#         if argmax:
+#             a_star = tf.argmax(q_values, axis=-1)
+#
+#             # select support probabilities according to *best* actions
+#             # sp = utils.index_tensor(support_prob, indices=a_star)
+#             return self.index(support_prob, a_star)
+#             # return tf.expand_dims(prob, axis=-1)
+#
+#         return q_values
+#
+#     @staticmethod
+#     @tf.function
+#     def index(prob, actions):
+#         batch_size, num_atoms = prob.shape[:2]
+#
+#         # prepare indices along..
+#         idx_a = tf.repeat(actions, repeats=[num_atoms] * batch_size)  # action-dim
+#         idx_z = tf.tile(tf.range(0, limit=num_atoms), multiples=[batch_size])  # atoms-dim
+#         idx_b = tf.repeat(tf.range(0, limit=batch_size), repeats=[num_atoms] * batch_size)  # batch-dim
+#
+#         # concat and reshape to get final indices
+#         indices = tf.stack([idx_b, idx_z, tf.cast(idx_a, dtype=tf.int32)], axis=1)
+#         indices = tf.reshape(indices, shape=(batch_size * num_atoms, 3))
+#
+#         # finally retrieve stuff at indices
+#         tensor = tf.gather_nd(prob, indices)
+#         return tf.reshape(tensor, shape=(batch_size, num_atoms))
+#
+#     @tf.function
+#     def act(self, inputs):
+#         q_values = self(inputs, training=False)
+#         return tf.argmax(q_values, axis=-1)
+#
+#     def structure(self, inputs: Dict[str, Input], name='Categorical-Q-Network', **kwargs) -> tuple:
+#         return super().structure(inputs, name=name, **kwargs)
+#
+#     def output_layer(self, layer: Layer) -> Layer:
+#         assert self.agent.num_actions == 1
+#
+#         out = Dense(units=self.num_atoms * self.num_classes, name='z-logits', **self.output_args)(layer)
+#         out = Reshape((self.num_atoms, self.num_classes))(out)
+#         return tf.nn.softmax(out, axis=1)  # per-action softmax
+#
+#     @tf.function
+#     def objective(self, batch: dict, reduction=tf.reduce_mean) -> tuple:
+#         prob = self(batch['state'], actions=batch['action'], training=True)
+#         prob_next = self.target(batch['next_state'], argmax=True, training=False)
+#
+#         # compute projection on support
+#         proj_z = tf.matmul(batch['reward'], tf.transpose(self.agent.gamma * self.support))
+#         proj_z = tf.clip_by_value(proj_z, self.v_min, self.v_max)
+#
+#         b = (proj_z - self.v_min) / self.agent.delta
+#
+#         low = tf.math.floor(b)  # "low" and "upp" are indices
+#         upp = tf.math.ceil(b)
+#
+#         # distribute probability of the projected support
+#         m = tf.zeros(shape=(prob_next.shape[0], self.num_atoms))
+#
+#         prob_low = prob_next * (upp - b)
+#         prob_upp = prob_next * (b - low)
+#
+#         # def scatter_add(args: tuple):
+#         #     tensor, indices, updates = args
+#         #     return tf.tensor_scatter_nd_add(tensor, tf.expand_dims(indices, axis=-1), updates)
+#
+#         m_low = tf.map_fn(fn=self._scatter_add, elems=(m, low, prob_low), fn_output_signature=tf.float32)
+#         m_upp = tf.map_fn(fn=self._scatter_add, elems=(m, upp, prob_upp), fn_output_signature=tf.float32)
+#
+#         # cross-entropy loss
+#         loss = tf.stop_gradient(m_low + m_upp) * tf.math.log(prob)
+#         # loss = (m_low + m_upp) * tf.math.log(prob)
+#
+#         loss = tf.reduce_sum(loss, axis=1)  # sum over atoms (z_i)
+#         loss = reduction(-loss)  # mean over batch of trajectories
+#
+#         return loss, {}  # dict(loss=loss, prob=prob, prob_target=prob_next, projected_support=proj_z)
+#
+#     @staticmethod
+#     @tf.function
+#     def _scatter_add(args: tuple):
+#         tensor, indices, updates = args
+#         indices = tf.cast(indices, dtype=tf.int32)
+#
+#         return tf.tensor_scatter_nd_add(tensor, tf.expand_dims(indices, axis=-1), updates)
+#
+#     def targets(self, batch: dict):
+#         pass
+
+
 @Network.register()
-class CategoricalQNetwork(QNetwork):
+class RainbowQNetwork(QNetwork):
+    # https://github.com/google/dopamine/blob/master/dopamine/agents/rainbow/rainbow_agent.py
 
     def __init__(self, agent: Agent, target=True, log_prefix='cqn', **kwargs):
-        utils.remove_keys(kwargs, keys=['dueling', 'operator', 'prioritized'])
+        # utils.remove_keys(kwargs, keys=['dueling', 'operator', 'prioritized'])
+        utils.remove_keys(kwargs, keys=['prioritized'])
         self._base_model_initialized = True
 
         self.num_classes = agent.num_classes
@@ -151,110 +282,117 @@ class CategoricalQNetwork(QNetwork):
         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
 
     @tf.function
-    def call(self, inputs, actions=None, argmax=False, training=None):
-        support = self.support  # z_i ("atoms")
-        support_prob = super().call(inputs, training=training)  # p_i
+    def call(self, inputs, training=None, **kwargs):
+        logits = super().call(inputs, training=training)  # p = (B, |A|, |Z|)
+        probabilities = tf.nn.softmax(logits)
 
-        if actions:
-            # select support probabilities according to *given* actions
-            # return utils.index_tensor(support_prob, indices=actions)
-            return self.index(support_prob, actions)
+        q_values = tf.reduce_sum(self.support * probabilities, axis=2)
 
-        q_values = tf.reduce_sum(support * support_prob, axis=1)
-
-        if argmax:
-            a_star = tf.argmax(q_values, axis=-1)
-
-            # select support probabilities according to *best* actions
-            # sp = utils.index_tensor(support_prob, indices=a_star)
-            return self.index(support_prob, a_star)
-            # return tf.expand_dims(prob, axis=-1)
-
-        return q_values
+        return q_values, logits, probabilities
 
     @tf.function
     def q_values(self, inputs, **kwargs):
-        raise NotImplementedError
+        q_values, _, _ = self(inputs, training=False)
+        return q_values
 
-    @staticmethod
-    @tf.function
-    def index(prob, actions):
-        batch_size, num_atoms = prob.shape[:2]
-
-        # prepare indices along..
-        idx_a = tf.repeat(actions, repeats=[num_atoms] * batch_size)  # action-dim
-        idx_z = tf.tile(tf.range(0, limit=num_atoms), multiples=[batch_size])  # atoms-dim
-        idx_b = tf.repeat(tf.range(0, limit=batch_size), repeats=[num_atoms] * batch_size)  # batch-dim
-
-        # concat and reshape to get final indices
-        indices = tf.stack([idx_b, idx_z, tf.cast(idx_a, dtype=tf.int32)], axis=1)
-        indices = tf.reshape(indices, shape=(batch_size * num_atoms, 3))
-
-        # finally retrieve stuff at indices
-        tensor = tf.gather_nd(prob, indices)
-        return tf.reshape(tensor, shape=(batch_size, num_atoms))
-
-    @tf.function
-    def act(self, inputs):
-        q_values = self(inputs, training=False)
-        return tf.argmax(q_values, axis=-1)
-
-    def structure(self, inputs: Dict[str, Input], name='Categorical-Q-Network', **kwargs) -> tuple:
-        return super().structure(inputs, name=name, **kwargs)
+    # def output_layer(self, layer: Layer) -> Layer:
+    #     assert self.agent.num_actions == 1
+    #
+    #     logits = Dense(units=self.num_atoms * self.num_classes, name='z-logits', **self.output_args)(layer)
+    #     logits = Reshape((self.num_classes, self.num_atoms))(logits)
+    #     return logits
 
     def output_layer(self, layer: Layer) -> Layer:
         assert self.agent.num_actions == 1
 
-        out = Dense(units=self.num_atoms * self.num_classes, name='z-logits', **self.output_args)(layer)
-        out = Reshape((self.num_atoms, self.num_classes))(out)
-        return tf.nn.softmax(out, axis=1)  # per-action softmax
+        if self.use_dueling:
+            return self.dueling_architecture(layer)
+
+        logits = Dense(units=self.num_atoms * self.num_classes, name='z-logits', **self.output_args)(layer)
+        logits = Reshape((self.num_classes, self.num_atoms))(logits)
+        return logits
+
+    def dueling_architecture(self, layer: Layer) -> Layer:
+        # two streams (branches)
+        value = Dense(units=self.num_atoms, name='value', **self.output_args)(layer)
+
+        adv = Dense(units=self.num_atoms * self.agent.num_classes, name='advantage', **self.output_args)(layer)
+        adv = Reshape((self.num_classes, self.num_atoms))(adv)
+
+        # reduce on action-dimension (axis 1)
+        if self.operator == 'max':
+            k = tf.reduce_max(adv, axis=1, keepdims=True)
+        else:
+            k = tf.reduce_mean(adv, axis=1, keepdims=True)
+
+        # expand action dims to allow broadcasting. Shape: (batch, actions, atoms)
+        return value[:, None, :] + (adv - k[:, None, :])
 
     @tf.function
     def objective(self, batch: dict, reduction=tf.reduce_mean) -> tuple:
-        prob = self(batch['state'], actions=batch['action'], training=True)
-        prob_next = self.target(batch['next_state'], argmax=True, training=False)
+        q_values, logits, _ = self(batch['state'], training=True)
+        target_distribution, _debug = self.targets(batch)
 
-        # compute projection on support
-        proj_z = tf.matmul(batch['reward'], tf.transpose(self.agent.gamma * self.support))
-        proj_z = tf.clip_by_value(proj_z, self.v_min, self.v_max)
+        indices = tf.range(self.agent.batch_size, dtype=tf.float32)[:, None]
+        actions = tf.concat([indices, batch['action']], axis=1)
+        action_logits = tf.gather_nd(logits, indices=tf.cast(actions, dtype=tf.int32))
 
-        b = (proj_z - self.v_min) / self.agent.delta
+        loss = tf.nn.softmax_cross_entropy_with_logits(labels=target_distribution, logits=action_logits)
 
-        low = tf.math.floor(b)  # "low" and "upp" are indices
-        upp = tf.math.ceil(b)
+        if self.has_prioritized_mem:
+            self.agent.memory.td_error.assign(loss)
 
-        # distribute probability of the projected support
-        m = tf.zeros(shape=(prob_next.shape[0], self.num_atoms))
+        loss = reduction(loss)
 
-        prob_low = prob_next * (upp - b)
-        prob_upp = prob_next * (b - low)
+        debug = dict(loss=loss, q_values=q_values, target_distribution=target_distribution, logits=logits)
+        debug.update(**_debug)
 
-        # def scatter_add(args: tuple):
-        #     tensor, indices, updates = args
-        #     return tf.tensor_scatter_nd_add(tensor, tf.expand_dims(indices, axis=-1), updates)
+        return loss, debug
 
-        m_low = tf.map_fn(fn=self._scatter_add, elems=(m, low, prob_low), fn_output_signature=tf.float32)
-        m_upp = tf.map_fn(fn=self._scatter_add, elems=(m, upp, prob_upp), fn_output_signature=tf.float32)
-
-        # cross-entropy loss
-        loss = tf.stop_gradient(m_low + m_upp) * tf.math.log(prob)
-        # loss = (m_low + m_upp) * tf.math.log(prob)
-
-        loss = tf.reduce_sum(loss, axis=1)  # sum over atoms (z_i)
-        loss = reduction(-loss)  # mean over batch of trajectories
-
-        return loss, {}  # dict(loss=loss, prob=prob, prob_target=prob_next, projected_support=proj_z)
-
-    @staticmethod
     @tf.function
-    def _scatter_add(args: tuple):
-        tensor, indices, updates = args
-        indices = tf.cast(indices, dtype=tf.int32)
-
-        return tf.tensor_scatter_nd_add(tensor, tf.expand_dims(indices, axis=-1), updates)
-
     def targets(self, batch: dict):
-        pass
+        batch_size = self.agent.batch_size
+
+        # shape: (batch_size, num_atoms)
+        tiled_support = tf.tile(self.support, multiples=[batch_size])
+        tiled_support = tf.reshape(tiled_support, shape=(batch_size, self.num_atoms))
+
+        gamma_with_terminal = self.gamma_n * (1.0 - batch['terminal'])
+        target_support = batch['return'] + gamma_with_terminal * tiled_support
+
+        next_q, _, prob = self.target(batch['next_state'], training=False)
+        batch_indices = tf.range(batch_size, dtype=tf.int64)[:, None]
+
+        next_q_argmax = tf.argmax(next_q, axis=1)[:, None]
+        next_q_argmax_indices = tf.concat([batch_indices, next_q_argmax], axis=1)
+
+        next_prob = tf.gather_nd(prob, indices=next_q_argmax_indices)
+
+        projection = self.project_distribution(target_support, next_prob, self.support)
+        return tf.stop_gradient(projection), dict(q_targets=next_q, next_prob=next_prob)
+
+    @tf.function
+    def project_distribution(self, support, weights, target_support):
+        target_deltas = target_support[1:] - target_support[:-1]
+        delta_z = target_deltas[0]
+
+        batch_size = self.agent.batch_size
+        num_dims = tf.shape(target_support)[0]
+
+        clipped_support = tf.clip_by_value(support, self.v_min, self.v_max)[:, None, :]
+        tiled_support = tf.tile([clipped_support], multiples=(1, 1, num_dims, 1))
+
+        target_support = tf.tile(target_support[:, None], multiples=(batch_size, 1))
+        target_support = tf.reshape(target_support, shape=(batch_size, num_dims, 1))
+
+        numerator = tf.abs(tiled_support - target_support)
+        quotient = 1.0 - (numerator / delta_z)
+
+        clipped_quotient = tf.clip_by_value(quotient, 0.0, 1.0)
+        inner_prod = clipped_quotient * weights[:, None, :]
+
+        projection = tf.reduce_sum(inner_prod, axis=3)
+        return tf.reshape(projection, shape=(batch_size, num_dims))
 
 
 @Network.register()

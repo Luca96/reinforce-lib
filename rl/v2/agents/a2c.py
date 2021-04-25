@@ -115,8 +115,8 @@ class A2C(ParallelAgent):
         self.actor.update(gradients=actor_grads)
         self.critic.update(gradients=critic_grads)
 
-    def on_transition(self, transition: Dict[str, list], timestep: int, episode: int):
-        super().on_transition(transition, timestep, episode)
+    def on_transition(self, transition: Dict[str, list], timestep: int, episode: int, exploration=False):
+        super().on_transition(transition, timestep, episode, exploration)
 
         if any(transition['terminal']) or (timestep % self.horizon == 0) or (timestep == self.max_timesteps):
             terminal_states = self.preprocess(transition['next_state'])
@@ -127,8 +127,9 @@ class A2C(ParallelAgent):
             debug = self.memory.end_trajectory(last_values=values)
             self.log(average=True, **debug)
 
-            self.update()
-            self.memory.clear()
+            if not exploration:
+                self.update()
+                self.memory.clear()
 
     def load_weights(self):
         self.actor.load_weights(filepath=self.weights_path['actor'], by_name=False)

@@ -127,6 +127,12 @@ class Memory:
 
         return all_data
 
+    def on_update(self, *args, **kwargs):
+        pass
+
+    def end_trajectory(self, *args, **kwargs):
+        pass
+
     def clear(self):
         """Empties the memory"""
         self.index = 0
