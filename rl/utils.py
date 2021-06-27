@@ -629,6 +629,11 @@ def tf_chance(shape=(1,), lower=0.0, upper=1.0, seed=None):
     return tf.random.uniform(shape=shape, minval=lower, maxval=upper, seed=seed)
 
 
+def tf_count(tensor: tf.Tensor, value: Union[int, float, tf.Tensor]):
+    """Counts occurrences of `value` within `tensor`."""
+    return tf.reduce_sum(tf.cast(tensor == value, dtype=tf.int32))
+
+
 def tf_normalize(x, eps=EPSILON):
     """Normalizes some tensor `x` to 0-mean 1-stddev (aka standardization`)"""
     x = to_float(x)
