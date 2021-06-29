@@ -1,9 +1,7 @@
 """Decision trees (DTs)"""
 
 import numpy as np
-# import tensorflow as tf
 
-# from rl import utils
 from typing import List
 
 

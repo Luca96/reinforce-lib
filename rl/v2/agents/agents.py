@@ -16,6 +16,7 @@ from rl.v2.memories import Memory, TransitionSpec
 from typing import List, Dict, Union, Tuple
 
 
+# TODO: provide various gradient clipping strategies: "none", "norm", "global_norm", "custom".
 # TODO: summary of agent parameters?
 # TODO: "evaluation" dict for parameters that what should be set differently during evaluation?
 # TODO: provide a "fake" agent just for debugging components?

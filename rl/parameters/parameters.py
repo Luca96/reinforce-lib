@@ -53,7 +53,7 @@ class DynamicParameter:
         return dict(step=int(self.step.value()))
 
     def on_episode(self):
-        self.step.assign_add(delta=1)
+        self.step.assign_add(1)
 
     def load(self, config: dict):
         self.step.assign(value=config.get('step', 0))

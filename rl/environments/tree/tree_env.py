@@ -11,27 +11,37 @@ from rl import utils
 from rl.environments.tree.trees import TreeClassifier, TreeRegressor
 
 
-# TODO: make a generic TreeEnv (without specific tree type), then subclass
-class TreeClassifierEnv(gym.Env):
-    """Gym Environment in which the agent has to build a decision tree to classify some dataset."""
-    def __init__(self, x_data: np.ndarray, y_data: np.ndarray, batch_size: int, validation_size=0.2, aggregation='avg',
-                 reward: Union[str, dict, Callable] = 'accuracy', num_batch_reward=np.inf, seed=utils.GLOBAL_SEED,
-                 **kwargs):
-        assert batch_size >= 1
-        assert isinstance(aggregation, str)
-        assert isinstance(num_batch_reward, (float, int)) and num_batch_reward >= 1
-
+class TreeEnv(gym.Env):
+    def __init__(self, seed=utils.GLOBAL_SEED):
         self.random: np.random.Generator = None
         self._seed = None
         self.seed(seed)
 
+    def seed(self, seed=utils.GLOBAL_SEED):
+        self._seed = seed
+        self.random = utils.get_random_generator(seed=self._seed)
+
+
+# TODO: make a generic TreeEnv (without specific tree type), then subclass
+class TreeClassifierEnv(TreeEnv):
+    """Gym Environment in which the agent has to build a decision tree to classify some dataset."""
+    def __init__(self, x_data: np.ndarray, y_data: np.ndarray, batch_size: int, validation_size=0.2, aggregation='avg',
+                 reward: Union[str, dict, Callable] = 'accuracy', num_batch_reward=np.inf, seed=utils.GLOBAL_SEED,
+                 debug=True, **kwargs):
+        assert batch_size >= 1
+        assert isinstance(aggregation, str)
+        assert isinstance(num_batch_reward, (float, int)) and num_batch_reward >= 1
+
+        super().__init__(seed)
+
+        self.debug = bool(debug)
         self.kwargs = kwargs
         self.batch_size = int(batch_size)
         self.reward_fn = self._get_reward_fn(reward)
         self.aggregate = self._get_aggregation_fn(aggregation)
 
         self.x_train, self.x_val, \
-        self.y_train, self.y_val = train_test_split(x_data, y_data, test_size=validation_size, random_state=self.random)
+        self.y_train, self.y_val = train_test_split(x_data, y_data, test_size=validation_size, random_state=self._seed)
 
         # prepare validation-set for computing rewards
         ds = tf.data.Dataset.from_tensor_slices(tensors=(self.x_val, self.y_val))
@@ -64,9 +74,10 @@ class TreeClassifierEnv(gym.Env):
     @property
     def observation_space(self):
         return gym.spaces.Dict(x=gym.spaces.Box(shape=(self.batch_size, self.x_train.shape[-1]),
-                                                low=self.x_low, high=self.x_high),
+                                                # low=self.x_low, high=self.x_high),
+                                                low=-np.inf, high=np.inf),
                                y=gym.spaces.Box(shape=(self.batch_size, 1), low=0.0, high=np.max(self.y_train)),
-                               tree=gym.spaces.Box(shape=(None, self.num_features), low=-np.inf, high=np.inf))
+                               tree=gym.spaces.Box(shape=(1, self.num_features), low=-np.inf, high=np.inf))
 
     def step(self, action: Dict[str, np.ndarray]):
         num_splits = int(np.squeeze(action['num_splits']))  # TODO: minimum value should be one
@@ -84,6 +95,10 @@ class TreeClassifierEnv(gym.Env):
         return self.observation(), self.reward(), self.done(), self.info()
 
     def reset(self):
+        if self.debug:
+            self.tree.print()
+            input('Press ENTER to continue...')
+
         self.tree = TreeClassifier(x_train=self.x_train, y_train=self.y_train, **self.kwargs)
         self.node = self.tree
         self.lifo = [self.tree]
@@ -111,7 +126,9 @@ class TreeClassifierEnv(gym.Env):
         return {}
 
     def render(self, mode='human'):
-        self.tree.print()
+        if self.debug:
+            self.tree.print()
+            input('Press ENTER to continue...')
 
     def sample(self) -> Tuple[np.ndarray, np.ndarray]:
         """Returns a batch of data from the current node"""
@@ -124,10 +141,6 @@ class TreeClassifierEnv(gym.Env):
             y = self.node.y_train[indices]
 
         return x, y
-
-    def seed(self, seed=utils.GLOBAL_SEED):
-        self._seed = seed
-        self.random = utils.get_random_generator(seed=self._seed)
 
     @staticmethod
     def _get_reward_fn(identifier) -> Callable:
@@ -143,7 +156,7 @@ class TreeClassifierEnv(gym.Env):
     def _get_aggregation_fn(method):
         method = method.lower()
 
-        if method in ['avg', 'average']:
+        if method in ['mean', 'avg', 'average']:
             return np.mean
 
         elif method == 'median':
@@ -164,5 +177,5 @@ class TreeClassifierEnv(gym.Env):
         return self.node.as_features(split_size=self.tree.max_split)
 
 
-class TreeRegressorEnv(gym.Env):
+class TreeRegressorEnv(TreeEnv):
     pass

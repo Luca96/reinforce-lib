@@ -35,11 +35,12 @@ class Memory:
         for name, spec in self.specs.items():
             self.data[name] = self._add_spec(spec)
 
-    # TODO: should be recursive?
     def _add_spec(self, spec: dict):
         if 'shape' in spec:
             shape = spec['shape']
             return np.zeros(shape=self.shape + shape, dtype=spec['dtype'])
+
+        return {k: self._add_spec(v) for k, v in spec.items()}
 
     @property
     def current_size(self) -> int:
@@ -141,11 +142,11 @@ class Memory:
     def __delete__(self, instance):
         pass
 
-    def summary(self):
+    def summary(self, line_width=80):
         """Summarizes the structure of the current memory"""
-        print('-' * 80)
-        print(f'Memory: "{self.__class__.__name__}"')
-        print('-' * 80)
+        print('-' * line_width)
+        print(f' Memory: "{self.__class__.__name__}"')
+        print('-' * line_width)
 
         def _summary(key, value, nesting=0):
             if isinstance(value, dict):
@@ -155,10 +156,10 @@ class Memory:
                     _summary(key=k_, value=v_, nesting=nesting + 1)
             else:
                 print('  ' * nesting + f' - {key}: shape {value.shape}, dtype {value.dtype}')
-                print('-' * 80)
 
         for k, v in self.data.items():
             _summary(key=k, value=v, nesting=0)
+            print('-' * line_width)
 
     def serialize(self, path: str):
         """Saves the entire content of the memory into a numpy's npz file"""

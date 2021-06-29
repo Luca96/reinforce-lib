@@ -54,6 +54,9 @@ class PPO1(ParallelAgent):
         self.policy = Network.create(agent=self, **(policy or {}), base_class='PPO-PolicyNetwork')
         self.value = Network.create(agent=self, **(value or {}), base_class=ValueNetwork)
 
+        if clip_norm is None:
+            clip_norm = (None, None)
+
         self.policy.compile(optimizer, clip_norm=clip_norm[0], learning_rate=self.policy_lr)
         self.value.compile(optimizer, clip_norm=clip_norm[1], learning_rate=self.value_lr)
 
@@ -237,11 +240,13 @@ class GAEMemory1(ParallelGAEMemory):
 
 
 class PPO2(PPO1):
+    """PPO agent with base-exponent value decomposition"""
+
     def __init__(self, *args, name='ppo2-agent', normalize_advantages: Union[None, str] = 'sign', **kwargs):
         value = kwargs.pop('value', {})
 
         if 'class' not in value:
-            value['class'] = DecomposedValueNetwork
+            value['class'] = value.get('cls', DecomposedValueNetwork)
 
         super().__init__(*args, name=name, normalize_advantages=normalize_advantages, value=value, **kwargs)
         assert isinstance(self.value, DecomposedValueNetwork)
