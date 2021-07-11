@@ -234,6 +234,11 @@ def is_vector(x) -> bool:
     return 1 <= len(x.shape) <= 2
 
 
+def is_empty(x: Union[np.ndarray, tf.Tensor]) -> bool:
+    """Checks whether an np.array or tf.Tensor `x` is empty or not"""
+    return (x.shape[0] == 0) and (x.shape[-1] == 0)
+
+
 def depth_concat(*arrays):
     return np.concatenate(*arrays, axis=-1)
 

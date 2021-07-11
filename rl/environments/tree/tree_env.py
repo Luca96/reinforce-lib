@@ -22,13 +22,16 @@ class TreeEnv(gym.Env):
         self.random = utils.get_random_generator(seed=self._seed)
 
 
+# TODO: extend to `multi-label` and `multi-class`?
 # TODO: make a generic TreeEnv (without specific tree type), then subclass
 class TreeClassifierEnv(TreeEnv):
     """Gym Environment in which the agent has to build a decision tree to classify some dataset."""
     def __init__(self, x_data: np.ndarray, y_data: np.ndarray, batch_size: int, validation_size=0.2, aggregation='avg',
                  reward: Union[str, dict, Callable] = 'accuracy', num_batch_reward=np.inf, seed=utils.GLOBAL_SEED,
-                 debug=True, **kwargs):
+                 debug=True, pad: Union[None, int, float] = 0.0, **kwargs):
         assert batch_size >= 1
+        assert len(x_data.shape) >= 2
+        assert 1 <= len(y_data.shape) <= 2
         assert isinstance(aggregation, str)
         assert isinstance(num_batch_reward, (float, int)) and num_batch_reward >= 1
 
@@ -61,7 +64,13 @@ class TreeClassifierEnv(TreeEnv):
         self.node = self.tree  # current node
         self.lifo = [self.tree]  # Last-In First-out queue to determine the growth order of the tree
 
-        self.num_features = 2 + self.tree.max_split + len(self.tree.classes)  # 2 for depth + feature_index
+        self.num_features = 3 + self.tree.max_split + len(self.tree.classes)  # 3: depth, feature_index, num children
+
+        if isinstance(pad, (int, float)):
+            self.should_pad = True
+            self.pad_value = float(pad)
+        else:
+            self.should_pad = False
 
     @property
     def action_space(self) -> gym.spaces.Dict:
@@ -73,11 +82,12 @@ class TreeClassifierEnv(TreeEnv):
 
     @property
     def observation_space(self):
-        return gym.spaces.Dict(x=gym.spaces.Box(shape=(self.batch_size, self.x_train.shape[-1]),
-                                                # low=self.x_low, high=self.x_high),
+        return gym.spaces.Dict(x=gym.spaces.Box(shape=(self.batch_size,) + self.x_train.shape[1:],
                                                 low=-np.inf, high=np.inf),
-                               y=gym.spaces.Box(shape=(self.batch_size, 1), low=0.0, high=np.max(self.y_train)),
-                               tree=gym.spaces.Box(shape=(1, self.num_features), low=-np.inf, high=np.inf))
+                               y=gym.spaces.Box(shape=(self.batch_size,) + self.y_train.shape[1:],
+                                                low=0.0, high=np.max(self.y_train)),
+                               tree=gym.spaces.Box(shape=(self.tree.max_depth + 1, self.num_features),
+                                                   low=-np.inf, high=np.inf))
 
     def step(self, action: Dict[str, np.ndarray]):
         num_splits = int(np.squeeze(action['num_splits']))  # TODO: minimum value should be one
@@ -107,13 +117,34 @@ class TreeClassifierEnv(TreeEnv):
 
     def observation(self) -> dict:
         x, y = self.sample()
+
+        if self.should_pad:
+            pad_size = self.batch_size - x.shape[0]
+
+            if pad_size > 0:
+                pad_x = np.full(shape=(pad_size, x.shape[-1]), fill_value=self.pad_value, dtype=np.float32)
+                # TODO: generalize shape
+                pad_y = np.full(shape=(pad_size,), fill_value=self.pad_value, dtype=np.float32)
+
+                x = np.concatenate([x, pad_x], axis=0)
+                y = np.concatenate([y, pad_y], axis=0)
+
+        x = np.expand_dims(x, axis=0)
+        y = np.expand_dims(y, axis=0)
+
+        if len(y.shape) == 2:
+            y = np.reshape(y, newshape=(1, y.shape[1], -1))
+
         return dict(x=x, y=y, tree=self._tree_obs())
 
     def reward(self) -> float:
         rewards = []
 
         for (x_batch, y_batch) in self.validation_set.take(count=self.num_validation_batches):
-            rewards.append(self.reward_fn(x_batch, y_batch))
+            y_pred = self.tree.predict(batch=x_batch, sort=False, debug=True)
+            y_pred = tf.convert_to_tensor(y_pred, dtype=tf.float32)
+
+            rewards.append(self.reward_fn(y_batch, y_pred))
 
         return self.aggregate(rewards)
 
@@ -172,9 +203,17 @@ class TreeClassifierEnv(TreeEnv):
 
     def _tree_obs(self):
         if self.tree.is_empty():
-            return np.zeros(shape=(1, self.num_features), dtype=np.float32)
+            return np.zeros(shape=(1, self.tree.max_depth + 1, self.num_features), dtype=np.float32)
 
-        return self.node.as_features(split_size=self.tree.max_split)
+        tree_obs = self.node.as_features(split_size=self.tree.max_split)
+        missing_nodes = self.tree.max_depth + 1 - tree_obs.shape[0]
+
+        if missing_nodes > 0:
+            # pad with leading zeros
+            padding = np.zeros(shape=(missing_nodes, self.num_features), dtype=np.float32)
+            return np.concatenate([tree_obs, padding], axis=0)
+
+        return np.expand_dims(tree_obs, axis=0)
 
 
 class TreeRegressorEnv(TreeEnv):

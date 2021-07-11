@@ -2,11 +2,12 @@
 
 import numpy as np
 
+from rl import utils
 from typing import List
 
 
 class TreeNode:
-    INF = np.reshape(np.inf, newshape=(1,))
+    INF = np.reshape(np.inf, newshape=[-1])
 
     def __init__(self, x: np.ndarray, y: np.ndarray, parent=None, min_samples_leaf=1):
         assert (parent is None) or isinstance(parent, TreeNode)
@@ -25,9 +26,10 @@ class TreeNode:
 
         self.split_index = -1.0
         self.split_values = None
+        self.all_split_values = None  # = `split_values` with [-inf, +inf]
 
         if self.is_root:
-            self.classes, self.class_counts = np.unique(self.y_train, return_counts=True)
+            self.classes, self.class_counts = self._find_classes_and_counts()
             self.min_samples_leaf = int(min_samples_leaf)
         else:
             self.classes = self.parent.classes
@@ -45,21 +47,23 @@ class TreeNode:
         else:
             name = f'Node@{self.depth}'
 
-        if not self.split_values:
+        if self.split_values is None or utils.is_empty(self.split_values):
             split = '()'
 
         elif len(self.split_values) == 1:
             split = f'x[{self.split_index}] <= {str(round(self.split_values[0], 2))}'
         else:
-            a = round(self.split_values[0].numpy(), 2)
-            b = round(self.split_values[1].numpy(), 2)
+            a = round(self.split_values[0], 2)
+            b = round(self.split_values[1], 2)
             split = f'{str(a)} <= x[{self.split_index}] <= {str(b)}'
 
-        return f'{name} [{split} => {self.class_counts}]'
+        return f'{name} [{split} -> {self.class_counts}]'
 
+    # TODO: rename to as `grow`?
     def split(self, index: int, values):
         """Grows the tree"""
-        values = np.reshape(values, newshape=(-1,))
+        values = np.reshape(values, newshape=[-1])
+        values = np.sort(values)
         values = np.concatenate([-self.INF, values, self.INF], axis=0)
 
         for i in range(values.shape[0] - 1):
@@ -73,10 +77,14 @@ class TreeNode:
 
         self.split_index = index
         self.split_values = values[1:-1]
+        self.all_split_values = values
 
     def is_empty(self) -> bool:
         """Check whether the tree is empty or not"""
         return self.is_root and len(self.children) == 0
+
+    def prob(self) -> np.ndarray:
+        return self.class_counts / np.sum(self.class_counts)
 
     def has_children(self) -> bool:
         """Check whether the node has at least one child or not"""
@@ -117,10 +125,14 @@ class TreeNode:
             node = node.parent
             features.insert(0, node.to_vector(split_size))
 
-        return np.asarray(features, dtype=np.float32)
+        return np.array(features, dtype=np.float32)
 
     def to_vector(self, split_size: int) -> np.ndarray:
-        """Transforms the current node to a vector of features"""
+        """Transforms the current node to a vector of features:
+            - 3: depth, split_index, num children,
+            - N: split_values,
+            - M: class_counts.
+        """
         if not self.has_children():
             split_values = np.zeros(shape=(split_size,), dtype=np.float32)
 
@@ -139,8 +151,23 @@ class TreeNode:
 
         return np.asarray(features, dtype=np.float32)
 
+    def _find_classes_and_counts(self):
+        y_train = self.y_train
+
+        if len(y_train.shape) == 1 or y_train.shape[-1] == 1:
+            return np.unique(y_train, return_counts=True)
+
+        # assume `y_train` is one-hot encoded
+        classes = np.arange(y_train.shape[-1])
+        counts = np.sum(y_train, axis=0)
+
+        return classes, counts
+
     def _compute_class_counts(self) -> np.ndarray:
-        return np.asarray([np.sum(self.y_train == c) for c in self.classes])
+        if len(self.y_train.shape) == 1 or self.y_train.shape[-1] == 1:
+            return np.asarray([np.sum(self.y_train == c) for c in self.classes])
+
+        return np.sum(self.y_train, axis=0)
 
     def _check_if_leaf(self) -> bool:
         """A node is a leaf if either:
@@ -166,19 +193,58 @@ class TreeClassifier(TreeNode):
             assert max_depth >= 1
             self.max_depth = int(max_depth)
         else:
+            # TODO: remove inf depth
             self.max_depth = np.inf
 
         self.max_split = int(max_split)
-        self._built = False
 
-    def build(self):
-        self._built = True
+    def predict(self, batch, sort=True, debug=False):
+        batch = np.asarray(batch, dtype=np.float32)
+        assert not utils.is_empty(batch)
 
-    def predict(self):
-        if not self._built:
-            raise ValueError('The tree is not built.')
+        if len(batch.shape) == 1:
+            batch = np.reshape(batch, newshape=(1, -1))
+        else:
+            assert len(batch.shape) == 2
 
-        raise NotImplementedError
+        # queue: node, data, indices (for sorting)
+        queue = [(self, batch, np.arange(batch.shape[0]))]
+        probs = []
+        indices = []
+
+        while len(queue) > 0:
+            node, x, idx = queue.pop(0)
+            if debug: print('POP', str(node), len(queue), len(node.children))
+
+            if node.is_leaf or len(node.children) == 0:
+                # repeat `prob` x.shape[0] times
+                if debug: print(node.class_counts)
+                prob = np.repeat(node.prob()[None, :], repeats=x.shape[0], axis=0)
+                probs.append(prob)
+                indices.append(idx)
+                continue
+
+            features = x[:, node.split_index]
+
+            for i in range(len(node.all_split_values) - 1):
+                lower = node.all_split_values[i]
+                upper = node.all_split_values[i + 1]
+
+                mask = (features > lower) & (features <= upper)
+                data = x[mask]
+
+                if data.shape[0] > 0:
+                    queue.append((node.children[i], data, idx[mask]))
+                    if debug: print('\tadded', i)
+
+        probs = np.concatenate(probs, axis=0)
+
+        if sort:
+            indices = np.concatenate(indices, axis=0)
+            indices = np.sort(indices)
+            return probs[indices]
+
+        return probs
 
 
 class TreeRegressor:
