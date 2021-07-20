@@ -246,7 +246,7 @@ def tf_sobel(image, grayscale=False, restore_depth=True, normalize=True):
 # -------------------------------------------------------------------------------------------------
 
 @tf.function
-def tf_normalize(image, eps=utils.EPSILON):
+def tf_normalize(image, eps=utils.TF_EPS):
     """Scales the given image in range [0.0, 1.0]"""
     image -= tf.reduce_min(image)
     image /= tf.reduce_max(image) + eps

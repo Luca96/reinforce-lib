@@ -26,11 +26,12 @@ from rl.parameters import DynamicParameter
 GLOBAL_SEED = None
 
 NP_EPS = np.finfo(np.float32).eps
-EPSILON = tf.constant(NP_EPS, dtype=tf.float32)
+TF_EPS = tf.constant(NP_EPS, dtype=tf.float32)
 
 TF_ZERO = tf.constant(0.0, dtype=tf.float32)
 TF_PI = tf.constant(np.pi, dtype=tf.float32)
 
+# TODO: use `tf.keras.optimizers.get` instead?
 OPTIMIZERS = dict(adadelta=tf.keras.optimizers.Adadelta,
                   adagrad=tf.keras.optimizers.Adagrad,
                   adam=tf.keras.optimizers.Adam,
@@ -42,6 +43,7 @@ OPTIMIZERS = dict(adadelta=tf.keras.optimizers.Adadelta,
 
 # Types
 DynamicType = Union[float, LearningRateSchedule, DynamicParameter]
+TensorDictOrTensor = Union[Dict[str, tf.Tensor], tf.Tensor]
 
 
 def get_optimizer_by_name(name: str, *args, **kwargs) -> tf.keras.optimizers.Optimizer:
@@ -53,7 +55,7 @@ def get_optimizer_by_name(name: str, *args, **kwargs) -> tf.keras.optimizers.Opt
 
     if name == 'adam':
         # Source: Google Dopamine
-        kwargs.setdefault('epsilon', 0.0003125)  # more numerically stable
+        kwargs.setdefault('epsilon', 0.0003125)  # more numerically stable (maybe..)
 
     elif name == 'rmsprop':
         # https://github.com/google/dopamine/blob/master/dopamine/agents/dqn/configs/dqn_nature.gin#L22
@@ -237,6 +239,19 @@ def is_vector(x) -> bool:
 def is_empty(x: Union[np.ndarray, tf.Tensor]) -> bool:
     """Checks whether an np.array or tf.Tensor `x` is empty or not"""
     return (x.shape[0] == 0) and (x.shape[-1] == 0)
+
+
+def to_tuple(x: Union[int, float, bool, list, tuple]) -> tuple:
+    if isinstance(x, (int, float, bool)):
+        return tuple([x])
+
+    if isinstance(x, list):
+        return tuple(x)
+
+    if not isinstance(x, tuple):
+        raise ValueError(f'Argument must of type int, float, bool, list or tuple not {type(x)}.')
+
+    return x
 
 
 def depth_concat(*arrays):
@@ -475,7 +490,8 @@ def space_to_flat_spec(space: gym.Space, name: str) -> Dict[str, tuple]:
     spec = dict()
 
     if isinstance(space, spaces.Discrete):
-        spec[name] = (space.n,)
+        # spec[name] = (space.n,)
+        spec[name] = (1,)
 
     elif isinstance(space, spaces.MultiDiscrete):
         spec[name] = space.nvec.shape
@@ -639,7 +655,7 @@ def tf_count(tensor: tf.Tensor, value: Union[int, float, tf.Tensor]):
     return tf.reduce_sum(tf.cast(tensor == value, dtype=tf.int32))
 
 
-def tf_normalize(x, eps=EPSILON):
+def tf_normalize(x, eps=TF_EPS):
     """Normalizes some tensor `x` to 0-mean 1-stddev (aka standardization`)"""
     x = to_float(x)
     return (x - tf.math.reduce_mean(x)) / (tf.math.reduce_std(x) + eps)
@@ -667,14 +683,14 @@ def tf_magnitude_norm(x):
     return tf.where(base > 0.0, x=base + exp, y=base - exp)
 
 
-def tf_minmax_norm(x, lower=0.0, upper=1.0, eps=EPSILON):
+def tf_minmax_norm(x, lower=0.0, upper=1.0, eps=TF_EPS):
     """Min-Max normalization, which scales `x` to be in range [lower, upper]"""
     x = to_float(x)
     x_min = tf.minimum(x) + eps
     return (x - x_min) / (tf.maximum(x) - x_min) * (upper - lower) + lower
 
 
-def tf_explained_variance(x, y, eps=EPSILON) -> float:
+def tf_explained_variance(x, y, eps=TF_EPS) -> float:
     """Computes fraction of variance that `x` explains about `y`.
        Interpretation:
             - ev = 0  =>  might as well have predicted zero
@@ -837,6 +853,7 @@ def tf_norm(items: list, **kwargs) -> list:
     return [tf.norm(x, **kwargs) for x in items]
 
 
+# TODO: change to accept `optional` norm argument
 def tf_global_norm(norms: list):
     return tf.sqrt(tf.reduce_sum([norm * norm for norm in norms]))
 
@@ -1053,7 +1070,10 @@ class SummaryProcess(mp.Process):
             with self.tf_summary_writer.as_default():
 
                 while not self.queue.empty():
-                    self.log(**self.queue.get())
+                    try:
+                        self.log(**self.queue.get())
+                    except Exception as err:
+                        print(err)
 
                 if self.stop_event.is_set():
                     self.tf_summary_writer.close()
@@ -1163,7 +1183,7 @@ class SummaryProcess(mp.Process):
 
 class IncrementalStatistics:
     """Compute mean, variance, and standard deviation incrementally."""
-    def __init__(self, epsilon=NP_EPS, max_count=10e8):
+    def __init__(self, epsilon=TF_EPS, max_count=10e8):
         self.mean = 0.0
         self.variance = 0.0
         self.std = 0.0
@@ -1194,7 +1214,7 @@ class IncrementalStatistics:
         if normalize:
             return self.normalize(x)
 
-    def normalize(self, values, eps=NP_EPS):
+    def normalize(self, values, eps=TF_EPS):
         return to_float((values - self.mean) / (self.std + eps))
 
     def set(self, mean: float, variance: float, std: float, count: int):

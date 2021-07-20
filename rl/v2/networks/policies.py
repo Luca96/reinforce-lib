@@ -5,53 +5,68 @@ import tensorflow_probability as tfp
 from tensorflow.keras.layers import *
 
 from rl import utils
+from rl.layers.distributions import Distribution
 
 from rl.v2.agents import Agent
 from rl.v2.networks import Network, backbones
 
-from typing import Dict
+from typing import Dict, Optional, Union
 
 
+# TODO: remove old methods
 @Network.register(name='PolicyNetwork')
 class PolicyNetwork(Network):
 
-    def __init__(self, agent: Agent, eps=utils.EPSILON, log_prefix='policy', **kwargs):
+    def __init__(self, agent: Agent, eps=utils.TF_EPS, log_prefix='policy', **kwargs):
         self._base_model_initialized = True  # weird hack
 
+        # TODO: remove old `distribution` field
         self.distribution = agent.distribution_type
         self.eps = eps
 
         super().__init__(agent, target=False, log_prefix=log_prefix, **kwargs)
 
-    @tf.function
-    def call(self, inputs, actions=None, training=False, **kwargs):
-        policy: tfp.distributions.Distribution = super().call(inputs, training=training, **kwargs)
-
-        new_actions = self._round_actions_if_necessary(actions=policy)
-        log_prob = policy.log_prob(new_actions)
-
-        if self.distribution != 'categorical':
-            mean = policy.mean()
-            std = policy.stddev()
-        else:
-            mean = std = 0.0
-
-        if tf.is_tensor(actions):
-            actions = self._round_actions_if_necessary(actions)
-
-            # compute `log_prob` of given `actions`
-            return policy.log_prob(actions), policy.entropy()
-        else:
-            return new_actions, log_prob, mean, std
+        # TODO: rename to `distribution`
+        self.dist: Distribution = self.layers[-1]
 
     @tf.function
-    def _round_actions_if_necessary(self, actions):
-        if self.distribution == 'beta':
-            # round samples (actions) before computing density:
-            # https://www.tensorflow.org/probability/api_docs/python/tfp/distributions/Beta
-            return tf.clip_by_value(actions, self.eps, 1.0 - self.eps)
+    def call(self, inputs, actions: Optional[utils.TensorDictOrTensor] = None, training=False, **kwargs):
+        new_actions = super().call(inputs, training=training, **kwargs)
 
-        return actions
+        if isinstance(actions, dict) or tf.is_tensor(actions):
+            return self.dist.log_prob(actions), self.dist.entropy()
+
+        return new_actions, self.dist.log_prob(new_actions), self.dist.mean(), self.dist.stddev()
+
+    # @tf.function
+    # def call(self, inputs, actions=None, training=False, **kwargs):
+    #     policy: tfp.distributions.Distribution = super().call(inputs, training=training, **kwargs)
+    #
+    #     new_actions = self._round_actions_if_necessary(actions=policy)
+    #     log_prob = policy.log_prob(new_actions)
+    #
+    #     if self.distribution != 'categorical':
+    #         mean = policy.mean()
+    #         std = policy.stddev()
+    #     else:
+    #         mean = std = 0.0
+    #
+    #     if tf.is_tensor(actions):
+    #         actions = self._round_actions_if_necessary(actions)
+    #
+    #         # compute `log_prob` of given `actions`
+    #         return policy.log_prob(actions), policy.entropy()
+    #     else:
+    #         return new_actions, log_prob, mean, std
+
+    # @tf.function
+    # def _round_actions_if_necessary(self, actions):
+    #     if self.distribution == 'beta':
+    #         # round samples (actions) before computing density:
+    #         # https://www.tensorflow.org/probability/api_docs/python/tfp/distributions/Beta
+    #         return tf.clip_by_value(actions, self.eps, 1.0 - self.eps)
+    #
+    #     return actions
 
     def structure(self, inputs: Dict[str, Input], name='PolicyNetwork', **kwargs) -> tuple:
         inputs = inputs['state']
@@ -64,13 +79,12 @@ class PolicyNetwork(Network):
         output = self.output_layer(x)
         return inputs, output, name
 
-    def output_layer(self, layer: Layer) -> Layer:
-        return self.get_distribution_layer(layer, **self.output_args)
+    def output_layer(self, layer: Layer, **kwargs) -> Layer:
+        return Distribution.get(action_space=self.agent.env.action_space, **kwargs)(layer)
 
     @tf.function
     def objective(self, batch, reduction=tf.reduce_mean) -> tuple:
         advantages = batch['advantage']
-
         log_prob, entropy = self(batch['state'], actions=batch['action'], training=True)
 
         # Entropy
@@ -87,6 +101,7 @@ class PolicyNetwork(Network):
 
         return total_loss, debug
 
+    # TODO: remove
     def get_distribution_layer(self, layer: Layer, min_std=0.02, unimodal=False,
                                **kwargs) -> tfp.layers.DistributionLambda:
         """

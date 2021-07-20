@@ -16,8 +16,11 @@ from rl.v2.memories import Memory, TransitionSpec
 from typing import List, Dict, Union, Tuple
 
 
+# TODO: observation normalization: e.g. standardization by incremental empirical mean and std
+# TODO: rename `repeat_action` to `frame-skip`?
+# TODO: when frame-skip > 1, adjust the discount factor i.e. to \gamma^n
 # TODO: provide various gradient clipping strategies: "none", "norm", "global_norm", "custom".
-# TODO: summary of agent parameters?
+# TODO: summary of agent hyper-parameters?
 # TODO: "evaluation" dict for parameters that what should be set differently during evaluation?
 # TODO: provide a "fake" agent just for debugging components?
 # TODO: gym.env wrapper that supports "reproducible" sampling, and has suitable "specs" for state and action-spaces
@@ -459,7 +462,7 @@ class Agent:
                 if is_exploring:
                     self.log(random_action_env=action_env, random_action=action, **debug)
                 else:
-                    self.log(action_env=action_env, **debug)
+                    self.log_env(action=action_env, **debug)
 
                 if terminal or (t == timesteps):
                     self.log(timestep=t)
@@ -469,7 +472,7 @@ class Agent:
                         print(f'Exploration episode terminated. Steps left: {exploration_steps - 1}.')
                     else:
                         print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
-                              f'with reward {round(episode_reward, 3)}.')
+                              f'with reward {round(episode_reward, 3)}')
                     break
                 else:
                     state = next_state
@@ -584,7 +587,19 @@ class Agent:
             self.summary_queue.put(dict(average=average, **kwargs))
 
     def log_transition(self, transition: dict):
-        self.log(reward=transition['reward'], action=transition['action'])
+        action = transition['action']
+
+        if isinstance(action, dict):
+            self.log(reward=transition['reward'], **action)
+        else:
+            self.log(reward=transition['reward'], action=action)
+
+    def log_env(self, action, **kwargs):
+        if isinstance(action, dict):
+            actions_env = {f'action_env_{k}': v for k, v in action.items()}
+            self.log(**actions_env, **kwargs)
+        else:
+            self.log(action_env=action, **kwargs)
 
     def log_dynamic_parameters(self):
         self.log(**({k: p.value for k, p in self.dynamic_parameters.items()}))
@@ -794,7 +809,10 @@ class ParallelAgent(Agent):
             states = self.env.reset()
             states = self.preprocess(states)
 
-            for t in range(1, timesteps + 1):
+            # for t in range(1, timesteps + 1):
+            t = 0
+            while t < timesteps + 1:
+                t += 1
                 if should_render:
                     self.env.render()
 
@@ -804,7 +822,7 @@ class ParallelAgent(Agent):
 
                 # Environment step
                 for _ in range(self.repeat_action):
-                    next_states, rewards, terminals, info = self.env.step(actions=actions_env)
+                    next_states, rewards, terminals, info = self.env.step(action=actions_env)
                     episode_reward += np.mean(rewards)
 
                     if any(terminals):
@@ -814,11 +832,11 @@ class ParallelAgent(Agent):
                                   terminal=terminals, **(info or {}), **(other or {}))
 
                 self.on_transition(transition, timestep=t, episode=episode)
-                self.log(action_env=actions_env, **debug)
+                self.log_env(action=actions_env, **debug)
 
                 if any(terminals) or (t == timesteps):
                     print(f'Episode {episode} terminated after {t} timesteps in {round((time.time() - t0), 3)}s ' +
-                          f'with reward {round(episode_reward, 3)}.')
+                          f'with reward {round(episode_reward, 3)}')
                     tot_rew += episode_reward
 
                     self.log(timestep=t)
@@ -855,7 +873,8 @@ class ParallelAgent(Agent):
 
     def preprocess(self, states, evaluation=False):
         if isinstance(states[0], dict):
-            states_ = {f'state_{k}': [v] for k, v in states[0].items()}
+            # states_ = {f'state_{k}': [v] for k, v in states[0].items()}
+            states_ = {f'state_{k}': [] for k in states[0].keys()}
 
             for state in states:
                 for k, v in state.items():
@@ -870,11 +889,31 @@ class ParallelAgent(Agent):
 
         for i, (reward, action) in enumerate(zip(transition['reward'], transition['action'])):
             data[f'reward_{i}'] = reward
-            data[f'action_{i}'] = action
+
+            if isinstance(action, dict):
+                for k, v in action.items():
+                    data[f'action_{i}_{k}'] = v
+            else:
+                data[f'action_{i}'] = action
 
         self.log(**data)
 
+    # TODO: generalize to `log_actions`?
+    def log_env(self, action: list, **kwargs):
+        actions = action
+        data = dict()
 
+        for i, action in enumerate(actions):
+            if isinstance(action, dict):
+                for k, v in action.items():
+                    data[f'action_env_{k}_{i}'] = v
+            else:
+                data[f'action_env_{i}'] = action
+
+        self.log(**data, **kwargs)
+
+
+# TODO: an AsyncAgent should wrap multi-processing and the sharing of tf's graphs
 class AsyncAgent(Agent):
     pass
 

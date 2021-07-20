@@ -345,7 +345,7 @@ class PPOAgent(Agent):
         if self.distribution_type != 'categorical':
             # round samples (actions) before computing density:
             # motivation: https://www.tensorflow.org/probability/api_docs/python/tfp/distributions/Beta
-            actions = tf.clip_by_value(actions, utils.EPSILON, 1.0 - utils.EPSILON)
+            actions = tf.clip_by_value(actions, utils.TF_EPS, 1.0 - utils.TF_EPS)
             # actions = tf.clip_by_value(actions, 1e-3, 1.0 - 1e-3)  # TODO: test if better
 
         new_log_prob = new_policy.log_prob(actions)

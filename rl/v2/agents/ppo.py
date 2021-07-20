@@ -15,6 +15,7 @@ from rl.v2.agents.a2c import ParallelGAEMemory
 from typing import Dict, Tuple, Union, Callable
 
 
+# TODO: option to recompute advantages at each optimization epoch
 # TODO: clip `log_prob` at -1 as in the "Munchausen RL" paper?
 # TODO: some performance issue (slow and variable inference speed => try @tf.function on `act`)
 # TODO: share features among the two networks??
@@ -82,10 +83,10 @@ class PPO1(ParallelAgent):
         other = dict(log_prob=log_prob, value=values)
         debug = dict()
 
-        if self.distribution_type != 'categorical':
-            for i, (mu, sigma) in enumerate(zip(mean, std)):
-                debug[f'distribution_mean_{i}'] = mu
-                debug[f'distribution_std_{i}'] = sigma
+        # if self.distribution_type != 'categorical':
+        for i, (mu, sigma) in enumerate(zip(mean, std)):
+            debug[f'distribution_mean_{i}'] = mu
+            debug[f'distribution_std_{i}'] = sigma
 
         return actions, other, debug
 

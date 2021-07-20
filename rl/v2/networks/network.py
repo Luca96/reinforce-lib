@@ -8,6 +8,7 @@ from rl.parameters import DynamicParameter
 from typing import Union, List, Dict, Callable
 
 
+# TODO: check each `tf.is_tensor(x)` add `isinstance(x, dict)`
 # TODO: monitor the "distance" (i.e. global_norm) of the network w.r.t its target (to debug polyak)
 # TODO: distributed strategy
 class Network(tf.keras.Model):
@@ -105,8 +106,10 @@ class Network(tf.keras.Model):
 
     def compile(self, optimizer: Union[str, dict], clip_norm: utils.DynamicType = None, **kwargs):
         if isinstance(optimizer, dict):
-            name = optimizer.pop('name', 'adam')
+            name = optimizer.get('name', 'adam')
+
             kwargs.update(optimizer)  # add the remaining arguments if any
+            kwargs.pop('name')
         else:
             name = str(optimizer)
 

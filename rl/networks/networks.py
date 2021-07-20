@@ -73,7 +73,7 @@ class Network:
         """Clips actions to prevent numerical instability when computing (log-)probabilities.
            - Use for Beta distribution only.
         """
-        return tf.clip_by_value(actions, utils.EPSILON, 1.0 - utils.EPSILON)
+        return tf.clip_by_value(actions, utils.TF_EPS, 1.0 - utils.TF_EPS)
 
     def get_distribution_layer(self, distribution: str, layer: Layer, min_std=0.02, unimodal=False,
                                **kwargs) -> tfp.layers.DistributionLambda:
@@ -165,7 +165,7 @@ class PPONetwork(Network):
         if self.distribution != 'categorical':
             # round samples (actions) before computing density:
             # motivation: https://www.tensorflow.org/probability/api_docs/python/tfp/distributions/Beta
-            log_prob = policy.log_prob(tf.clip_by_value(policy, utils.EPSILON, 1.0 - utils.EPSILON))
+            log_prob = policy.log_prob(tf.clip_by_value(policy, utils.TF_EPS, 1.0 - utils.TF_EPS))
             mean = policy.mean()
             std = policy.stddev()
         else:
@@ -205,7 +205,7 @@ class PPONetwork(Network):
         value = self.value_predict(inputs)
 
         if self.distribution != 'categorical':
-            log_prob = policy.log_prob(tf.clip_by_value(policy, utils.EPSILON, 1.0 - utils.EPSILON))
+            log_prob = policy.log_prob(tf.clip_by_value(policy, utils.TF_EPS, 1.0 - utils.TF_EPS))
         else:
             log_prob = policy.log_prob(policy)
 
