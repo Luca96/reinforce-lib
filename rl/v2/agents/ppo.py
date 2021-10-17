@@ -15,8 +15,8 @@ from rl.v2.agents.a2c import ParallelGAEMemory
 from typing import Dict, Tuple, Union, Callable
 
 
+# TODO: proper clip-norm init
 # TODO: option to recompute advantages at each optimization epoch
-# TODO: clip `log_prob` at -1 as in the "Munchausen RL" paper?
 # TODO: some performance issue (slow and variable inference speed => try @tf.function on `act`)
 # TODO: share features among the two networks??
 # TODO(bug): probable memory leak!
@@ -58,8 +58,8 @@ class PPO1(ParallelAgent):
         if clip_norm is None:
             clip_norm = (None, None)
 
-        self.policy.compile(optimizer, clip_norm=clip_norm[0], learning_rate=self.policy_lr)
-        self.value.compile(optimizer, clip_norm=clip_norm[1], learning_rate=self.value_lr)
+        self.policy.compile(optimizer, clip_norm=clip_norm[0], clip=self.clip_grads, learning_rate=self.policy_lr)
+        self.value.compile(optimizer, clip_norm=clip_norm[1], clip=self.clip_grads, learning_rate=self.value_lr)
 
         if load:
             self.load()
@@ -310,61 +310,3 @@ class GAEMemory2(GAEMemory1):
         returns = tf.map_fn(fn=utils.decompose_number, elems=returns, dtype=(tf.float32, tf.float32))
         returns = tf.concat([returns[0], tf.reshape(returns[1], shape=returns[0].shape)], axis=-1)
         return returns
-
-
-def cartpole1():
-    policy = dict(activation=tf.nn.swish, units=32, bias_initializer='glorot_uniform',
-                  kernel_initializer='glorot_normal')
-    value = dict(activation=tf.nn.tanh, bias_initializer='glorot_uniform', kernel_initializer='glorot_normal')
-
-    args1 = dict(batch_size=32, horizon=200, num_actors=1, lambda_=0.95, entropy=0.0,
-                 advantage_scale=2.0, optimization_epochs=10, policy_lr=3e-4)
-
-    args2 = args1.copy()
-    args2.update(advantage_scale=1.0, normalize_advantages='magnitude')
-
-    args3: dict = args2.copy()
-    args3.update(normalize_advantages=None, normalize_returns='magnitude')
-
-    a = PPO1(env='CartPole-v0', name='ppo1-cart', **args3, policy=policy, value=value, seed=42, use_summary=True)
-    a.learn(500, 200)
-
-
-def lunar1():
-    policy = dict(activation=tf.nn.swish, num_layers=4, units=64)
-    value = dict(activation=tf.nn.tanh, num_layers=4, units=64, exponent_scale=4.0)
-
-    a = PPO1(env='LunarLanderContinuous-v2', batch_size=32, horizon=200, num_actors=4, lambda_=0.95,
-             entropy=0.001, name='ppo1-lunar',
-             optimization_epochs=10, policy_lr=3e-4, policy=policy, value=value, seed=42, use_summary=True)
-    a.learn(500, 200, render=25)
-
-
-def cartpole2():
-    policy = dict(activation=tf.nn.swish, units=32, bias_initializer='glorot_uniform',
-                  kernel_initializer='glorot_normal')
-    value = dict(activation=tf.nn.tanh, exponent_scale=3.0, bias_initializer='glorot_uniform',
-                 kernel_initializer='glorot_normal')
-
-    a = PPO2(env='CartPole-v0', batch_size=32, horizon=200, num_actors=1, lambda_=0.95, entropy=0.0,
-             name='ppo2-cart',
-             optimization_epochs=10, policy_lr=3e-4, policy=policy, value=value, seed=42, use_summary=True)
-    a.learn(500, 200)
-
-
-def lunar2():
-    policy = dict(activation=tf.nn.swish, num_layers=4, units=64)
-    value = dict(activation=tf.nn.tanh, num_layers=4, units=64, exponent_scale=4.0)
-
-    a = PPO2(env='LunarLanderContinuous-v2', batch_size=32, horizon=200, num_actors=4, lambda_=0.95,
-             entropy=0.001, name='ppo2-lunar',
-             optimization_epochs=10, policy_lr=3e-4, policy=policy, value=value, seed=42, use_summary=True)
-    a.learn(500, 200, render=25)
-
-
-if __name__ == '__main__':
-    cartpole1()
-    # lunar_lander1()
-
-    # cartpole2()
-    # lunar2()

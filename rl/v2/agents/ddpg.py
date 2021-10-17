@@ -49,8 +49,8 @@ class DDPG(Agent):
                                     base_class='DDPG-ActorNetwork')
         self.critic = Network.create(agent=self, log_prefix='critic', **(critic or {}), base_class='DDPG-CriticNetwork')
 
-        self.actor.compile(optimizer, clip_norm=self.clip_norm[0], learning_rate=self.actor_lr)
-        self.critic.compile(optimizer, clip_norm=self.clip_norm[1], learning_rate=self.critic_lr)
+        self.actor.compile(optimizer, clip_norm=self.clip_norm[0], clip=self.clip_grads, learning_rate=self.actor_lr)
+        self.critic.compile(optimizer, clip_norm=self.clip_norm[1], clip=self.clip_grads, learning_rate=self.critic_lr)
 
         if load:
             self.load()

@@ -120,7 +120,7 @@ class DQNAgent(Agent):
 
     def update_target_network(self):
         """Updates the weights of the target networks by Polyak average"""
-        utils.polyak_averaging2(model=self.dqn, target=self.target, alpha=self.polyak_coeff)
+        utils.polyak_averaging(model=self.dqn, target=self.target, alpha=self.polyak_coeff)
 
     def get_gradients(self, batch):
         with tf.GradientTape() as tape:

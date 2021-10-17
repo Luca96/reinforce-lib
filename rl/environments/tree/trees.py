@@ -9,6 +9,7 @@ from typing import List
 class TreeNode:
     INF = np.reshape(np.inf, newshape=[-1])
 
+    # TODO: memory leak; store data only in "root", then only "indices" for the other nodes.
     def __init__(self, x: np.ndarray, y: np.ndarray, parent=None, min_samples_leaf=1):
         assert (parent is None) or isinstance(parent, TreeNode)
         assert min_samples_leaf >= 1
@@ -24,6 +25,10 @@ class TreeNode:
         self.y_train = y  # labels (or targets/classes)
         self.num_samples = self.x_train.shape[0]
 
+        # compute split range
+        self.x_low = np.min(self.x_train, axis=0)
+        self.x_range = np.max(self.x_train, axis=0) - self.x_low
+
         self.split_index = -1.0
         self.split_values = None
         self.all_split_values = None  # = `split_values` with [-inf, +inf]
@@ -37,6 +42,7 @@ class TreeNode:
             self.min_samples_leaf = self.parent.min_samples_leaf
 
         self.is_leaf = self._check_if_leaf()
+        self.impurity = self._compute_gini()
 
     def __str__(self):
         if self.is_leaf:
@@ -59,32 +65,54 @@ class TreeNode:
 
         return f'{name} [{split} -> {self.class_counts}]'
 
-    # TODO: rename to as `grow`?
-    def split(self, index: int, values):
+    # TODO: rename to `grow`?
+    def split(self, index: int, values) -> bool:
         """Grows the tree"""
-        values = np.reshape(values, newshape=[-1])
-        values = np.sort(values)
+        # values = np.reshape(values, newshape=[-1])
+        # values = np.sort(values)
+
+        if self.x_range[index] == 0.0:
+            return False
+
+        values = self.x_low[index] + (values * self.x_range[index])
         values = np.concatenate([-self.INF, values, self.INF], axis=0)
 
         for i in range(values.shape[0] - 1):
             x = self.x_train[:, index]
             mask = (x > values[i]) & (x <= values[i + 1])
 
+            if np.sum(mask) == 0:
+                return False
+
             node = TreeNode(x=self.x_train[mask], y=self.y_train[mask], parent=self)
             node.depth = self.depth + 1
 
             self.children.append(node)
+            # print(f'--> [{i+1}/{values.shape[0]-1}] append {node}')
 
         self.split_index = index
         self.split_values = values[1:-1]
         self.all_split_values = values
+
+        return True
+
+    # def can_split(self, index: int) -> bool:
+    #     if self.x_range[index] == 0.0:
+    #         return False
+    #
+    #     return True
 
     def is_empty(self) -> bool:
         """Check whether the tree is empty or not"""
         return self.is_root and len(self.children) == 0
 
     def prob(self) -> np.ndarray:
-        return self.class_counts / np.sum(self.class_counts)
+        sum_counts = np.sum(self.class_counts)
+
+        if sum_counts == 0.0:
+            return np.zeros_like(self.class_counts)
+
+        return self.class_counts / sum_counts
 
     def has_children(self) -> bool:
         """Check whether the node has at least one child or not"""
@@ -98,8 +126,11 @@ class TreeNode:
             node, space = queue.pop(0)
             print(f'{space}{node}')
 
-            for child in node.children:
-                queue.append((child, f'{space}\t'))
+            # for child in node.children:
+            #     queue.append((child, f'{space}\t'))
+
+            for child in reversed(node.children):
+                queue.insert(0, (child, f'{space}\t'))
 
     def stringify(self) -> str:
         """Returns a string representation from the current node up to the parent node"""
@@ -127,6 +158,8 @@ class TreeNode:
 
         return np.array(features, dtype=np.float32)
 
+    # TODO: use "impurity" as feature?
+    # TODO: add "is_leaf" or substitute with "num_children"
     def to_vector(self, split_size: int) -> np.ndarray:
         """Transforms the current node to a vector of features:
             - 3: depth, split_index, num children,
@@ -144,12 +177,29 @@ class TreeNode:
             split_values = self.split_values
 
         features = np.concatenate([
-            [self.depth, self.split_index, len(self.children)],
+            # [self.depth, self.split_index, len(self.children)],  # TODO: divide by their max
+            [self.depth, self.split_index / self.x_train.shape[-1], len(self.children) / split_size],
             split_values,
-            self.class_counts
+            # self.class_counts,
+            self.prob()  # class prob
         ])
 
         return np.asarray(features, dtype=np.float32)
+
+    def _compute_gini(self):
+        # source: https://scikit-learn.org/stable/modules/tree.html#classification-criteria
+        proportion = self.class_counts / self.class_counts.sum()
+        return np.sum(proportion * (1.0 - proportion))
+
+    def _compute_entropy(self):
+        # source: https://scikit-learn.org/stable/modules/tree.html#classification-criteria
+        proportion = self.class_counts / self.class_counts.sum()
+        return -np.sum(proportion * np.log(proportion))
+
+    def _compute_misclassification(self):
+        # source: https://scikit-learn.org/stable/modules/tree.html#classification-criteria
+        proportion = self.class_counts / self.class_counts.sum()
+        return 1.0 - np.max(proportion)
 
     def _find_classes_and_counts(self):
         y_train = self.y_train
@@ -174,7 +224,8 @@ class TreeNode:
             1. the number of samples is <= `min_samples_leaf`, or
             2. the node is pure, i.e. only one class count is non-zero: e.g. [0, 10, 0]
         """
-        few_samples = self.class_counts.sum() <= self.min_samples_leaf  # 1
+        few_samples = np.all(self.class_counts <= self.min_samples_leaf)  # 1
+        # few_samples = self.class_counts.sum() <= self.min_samples_leaf  # 1
         is_pure = np.sum(self.class_counts == 0) == len(self.classes) - 1  # 2
 
         return is_pure or few_samples
@@ -182,8 +233,8 @@ class TreeNode:
 
 class TreeClassifier(TreeNode):
     """Decision tree for classification problems"""
-    def __init__(self, x_train: np.ndarray, y_train: np.ndarray, max_depth=None, max_split=2, min_samples_leaf=1):
-        assert max_split >= 1
+    def __init__(self, x_train: np.ndarray, y_train: np.ndarray, max_depth=None, max_split_values=2, min_samples_leaf=1):
+        assert max_split_values >= 1
         assert min_samples_leaf >= 1
         assert x_train.shape[0] == y_train.shape[0]
 
@@ -196,9 +247,28 @@ class TreeClassifier(TreeNode):
             # TODO: remove inf depth
             self.max_depth = np.inf
 
-        self.max_split = int(max_split)
+        self.max_split = int(max_split_values)
 
-    def predict(self, batch, sort=True, debug=False):
+    # TODO: provide keras-style progress bar
+    def predict(self, x, batch_size: int, already_batched=False, prefetch=2, **kwargs):
+        assert batch_size >= 1
+
+        if not already_batched:
+            import tensorflow as tf
+
+            x = tf.data.Dataset.from_tensor_slices(x)
+            x = x.batch(int(batch_size))
+            x = x.prefetch(buffer_size=int(prefetch))
+
+        out = []
+
+        for batch in x:
+            probs = self.predict_batch(batch, **kwargs)
+            out.append(probs)
+
+        return np.concatenate(out, axis=0)
+
+    def predict_batch(self, batch, sort=True, debug=False):
         batch = np.asarray(batch, dtype=np.float32)
         assert not utils.is_empty(batch)
 
@@ -214,11 +284,14 @@ class TreeClassifier(TreeNode):
 
         while len(queue) > 0:
             node, x, idx = queue.pop(0)
-            if debug: print('POP', str(node), len(queue), len(node.children))
+            if debug:
+                print('POP', str(node), len(queue), f'child: {len(node.children)}')
 
             if node.is_leaf or len(node.children) == 0:
                 # repeat `prob` x.shape[0] times
-                if debug: print(node.class_counts)
+                if debug:
+                    print(node.class_counts)
+
                 prob = np.repeat(node.prob()[None, :], repeats=x.shape[0], axis=0)
                 probs.append(prob)
                 indices.append(idx)
@@ -235,7 +308,9 @@ class TreeClassifier(TreeNode):
 
                 if data.shape[0] > 0:
                     queue.append((node.children[i], data, idx[mask]))
-                    if debug: print('\tadded', i)
+
+                    if debug:
+                        print('\tadded', i)
 
         probs = np.concatenate(probs, axis=0)
 
@@ -245,6 +320,20 @@ class TreeClassifier(TreeNode):
             return probs[indices]
 
         return probs
+
+    def total_impurity(self) -> float:
+        impurity = 0.0
+        queue = [self]
+
+        while len(queue) > 0:
+            node = queue.pop(0)
+
+            if node.is_leaf or len(node.children):
+                impurity += node.impurity
+            else:
+                queue.extend([child for child in node.children])
+
+        return impurity
 
 
 class TreeRegressor:

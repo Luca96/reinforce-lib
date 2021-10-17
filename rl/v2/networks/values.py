@@ -3,6 +3,8 @@ import tensorflow as tf
 
 from tensorflow.keras.layers import *
 
+from rl import utils
+from rl.layers import preprocessing
 from rl.v2.agents import Agent
 from rl.v2.networks import Network, backbones
 
@@ -18,18 +20,23 @@ class ValueNetwork(Network):
         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
 
     def structure(self, inputs: Dict[str, Input], name='ValueNetwork', **kwargs) -> tuple:
-        inputs = inputs['state']
+        # inputs = inputs['state']
+        #
+        # x = inputs
+        # for args in kwargs.pop('preprocess', []):
+        #     x = preprocessing.get(**args)(x)
+        #
+        # if len(inputs.shape) <= 2:
+        #     x = backbones.dense(layer=x, **kwargs)
+        # else:
+        #     x = backbones.convolutional(layer=x, **kwargs)
+        #
+        # output = self.output_layer(x)
+        # return inputs, output, name
+        return super().structure(inputs, name=name, **kwargs)
 
-        if len(inputs.shape) <= 2:
-            x = backbones.dense(layer=inputs, **kwargs)
-        else:
-            x = backbones.convolutional(layer=inputs, **kwargs)
-
-        output = self.output_layer(x)
-        return inputs, output, name
-
-    def output_layer(self, layer: Layer) -> Layer:
-        return Dense(units=1, activation='linear', name='value', **self.output_args)(layer)
+    def output_layer(self, layer: Layer, **kwargs) -> Layer:
+        return Dense(units=1, activation='linear', name='value', **kwargs)(layer)
 
     @tf.function
     def objective(self, batch, reduction=tf.reduce_mean) -> tuple:
@@ -37,7 +44,11 @@ class ValueNetwork(Network):
         values = self(states, training=True)
 
         loss = 0.5 * reduction(tf.square(returns - values))
-        return loss, dict(loss=loss)
+        debug = dict(loss=loss,
+                     explained_variance=tf.stop_gradient(utils.tf_explained_variance(values, returns, eps=1e-3)),
+                     residual_variance=tf.stop_gradient(utils.tf_residual_variance(values, returns, eps=1e-3)))
+
+        return loss, debug
 
 
 @Network.register(name='DecomposedValueNetwork')
@@ -52,12 +63,15 @@ class DecomposedValueNetwork(ValueNetwork):
 
         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
 
-    def output_layer(self, layer: Layer) -> Layer:
-        base = Dense(units=1, activation=tf.nn.tanh, name='v-base', **self.output_args)(layer)
+    def output_layer(self, layer: Layer, **kwargs) -> Layer:
+        base = Dense(units=1, activation=tf.nn.tanh, name='v-base', **kwargs)(layer)
         exp = Dense(units=1, activation=lambda x: self.exp_scale * tf.nn.sigmoid(x), name='v-exp',
-                    **self.output_args)(layer)
+                    **kwargs)(layer)
 
         return concatenate([base, exp], axis=1)
+
+    def structure(self, inputs: Dict[str, Input], name='DecomposedValueNetwork', **kwargs) -> tuple:
+        return super().structure(inputs, name=name, **kwargs)
 
     @tf.function
     def objective(self, batch, reduction=tf.reduce_mean) -> tuple:

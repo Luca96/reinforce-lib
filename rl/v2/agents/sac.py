@@ -29,6 +29,7 @@ class SAC(Agent):
         assert optimization_steps >= 1
 
         super().__init__(*args, name=name, **kwargs)
+        self.horizon = 1  # for compatibility with Q-network and N-step estimator
 
         # Hyper-parameters
         self.memory_size = int(memory_size)
@@ -71,9 +72,9 @@ class SAC(Agent):
         self.q1 = Network.create(agent=self, **(critic or {}), base_class='SAC-CriticNetwork')
         self.q2 = Network.create(agent=self, **(critic or {}), base_class='SAC-CriticNetwork')
 
-        self.actor.compile(optimizer, clip_norm=self.clip_norm[0], learning_rate=self.actor_lr)
-        self.q1.compile(optimizer, clip_norm=self.clip_norm[1], learning_rate=self.critic_lr)
-        self.q2.compile(optimizer, clip_norm=self.clip_norm[1], learning_rate=self.critic_lr)
+        self.actor.compile(optimizer, clip_norm=self.clip_norm[0], clip=self.clip_grads, learning_rate=self.actor_lr)
+        self.q1.compile(optimizer, clip_norm=self.clip_norm[1], clip=self.clip_grads, learning_rate=self.critic_lr)
+        self.q2.compile(optimizer, clip_norm=self.clip_norm[1], clip=self.clip_grads, learning_rate=self.critic_lr)
 
         if load:
             self.load()
@@ -133,7 +134,7 @@ class SAC(Agent):
                 # update Policy
                 self.actor.train_step(batch)
 
-                # update target-nets
+                # update target-networks
                 self.update_target_networks()
 
                 # update temperature
@@ -281,7 +282,7 @@ class CriticNetwork(QNetwork):
             return super().output_layer(layer)  # compatible with "dueling" architecture
             # return Dense(units=self.agent.num_classes, name='q-values', **kwargs)
 
-        # TODO: think about a "continuous" dueling architecture
+        # TODO: think about a "continuous" dueling architecture; see paper
         return Dense(units=self.agent.num_actions, name='q-values', **self.output_args)(layer)
 
     def train_step(self, batch: dict):
@@ -304,48 +305,14 @@ class CriticNetwork(QNetwork):
         debug['gradient_global_norm'] = utils.tf_global_norm(debug['gradient_norm'])
 
         if self.should_clip_gradients:
-            gradients, _ = utils.clip_gradients2(gradients, norm=self.clip_norm())
+            gradients, _ = utils.clip_gradients_global(gradients, norm=self.clip_norm())
             debug['gradient_clipped_norm'] = utils.tf_norm(gradients)
             debug['clip_norm'] = self.clip_norm.value
 
         self.optimizer.apply_gradients(zip(gradients, v))
         return debug
 
-    # @staticmethod
-    # def apply_gradients(tape: tf.GradientTape, network, loss: tf.Tensor, debug: dict, postfix=''):
-    #     trainable_vars = network.trainable_variables
-    #
-    #     gradients = tape.gradient(loss, trainable_vars)
-    #     debug[f'gradient_norm_{postfix}'] = [tf.norm(g) for g in gradients]
-    #
-    #     if network.should_clip_gradients:
-    #         gradients, global_norm = utils.clip_gradients2(gradients, norm=network.clip_norm())
-    #         debug[f'gradient_clipped_norm_{postfix}'] = [tf.norm(g) for g in gradients]
-    #         debug[f'gradient_global_norm_{postfix}'] = global_norm
-    #         debug[f'clip_norm_{postfix}'] = network.clip_norm.value
-    #
-    #     network.optimizer.apply_gradients(zip(gradients, trainable_vars))
-
 
 class SACDiscrete:
     pass
 
-
-if __name__ == '__main__':
-    from rl.parameters import StepDecay
-
-    actor = dict(units=64*4, activation='relu', normalization=None, normalize_input=False)
-    critic = dict(units=[64*4, 16*2], activation='relu', dueling=False, normalization=None, normalize_input=False)
-
-    a = SAC(env='LunarLanderContinuous-v2', batch_size=64, actor=actor, critic=critic,
-            name='sac-lunar',
-            lr=StepDecay(3e-4 * 3, steps=160, rate=0.5),
-            # summary=dict(keys=['episode_reward']),
-            clip_norm=(0.5, 30.0),
-            # clip_norm=(0.5, StepDecay(30.0, decay_steps=125, decay_rate=0.5)),
-            summary=dict(log_every=20), prioritized=True,
-            # memory_size=15_000,
-            use_summary=True, temperature=0.1,
-            target_entropy=None, optimization_steps=1, seed=42)
-    a.summary()
-    a.learn(episodes=500, timesteps=200)

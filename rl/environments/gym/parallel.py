@@ -3,13 +3,13 @@
 import gym
 import numpy as np
 
-from typing import Union, Dict
+from typing import Union, Dict, List, Callable
 
 
 class ParallelEnv(gym.Env):
     """A sequential environment that wraps multiple environments in parallel"""
 
-    def __init__(self, env, num=2, **kwargs):
+    def __init__(self, env: Union[str, Callable], num=2, **kwargs):
         assert num >= 1
         self.num_envs = int(num)
 
@@ -19,7 +19,7 @@ class ParallelEnv(gym.Env):
         elif isinstance(env, str):
             self.envs = [gym.make(id=env, **kwargs) for _ in range(self.num_envs)]
         else:
-            raise ValueError(f'Argument `env` must be a "str" or "callable" not {type(env)}.')
+            raise ValueError(f'Argument `env` must be "str" or "callable" not "{type(env)}".')
 
         base_obs_space = self.envs[0].observation_space
 
@@ -36,7 +36,8 @@ class ParallelEnv(gym.Env):
         self.rewards_shape = (self.num_envs, 1)
         self.terminals_shape = (self.num_envs, 1)
 
-    def step(self, actions) -> tuple:
+    def step(self, action: list) -> tuple:
+        actions = action  # to keep `gym.Env` interface unchanged
         states = self._empty_states()
         rewards = np.empty(shape=self.rewards_shape, dtype=np.float64)
         terminals = np.empty(shape=self.terminals_shape, dtype=np.bool)
@@ -52,6 +53,7 @@ class ParallelEnv(gym.Env):
                 assert isinstance(s, dict)
 
                 for key, value in s.items():
+                    # states[key][j] = value
                     states[j][key] = value
             else:
                 states[j] = s
@@ -68,6 +70,10 @@ class ParallelEnv(gym.Env):
 
     def reset(self):
         states = [env.reset() for env in self.envs]
+
+        if self.complex_obs:
+            return states
+
         return np.stack(states)
 
     def render(self, mode='human', **kwargs):
@@ -88,8 +94,15 @@ class ParallelEnv(gym.Env):
             for i, env in enumerate(self.envs):
                 env.seed(seed=seed * (i + 1))
 
-    def _empty_states(self) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+    def _empty_states(self) -> Union[np.ndarray, List[Dict[str, np.ndarray]]]:
         if self.complex_obs:
-            return {k: np.empty(shape, dtype=np.float64) for k, shape in self.states_shape.items()}
+            # return {k: np.empty(shape, dtype=np.float64) for k, shape in self.states_shape.items()}
+
+            states = []
+
+            for _ in range(self.num_envs):
+                states.append({k: np.empty(shape[1:], dtype=np.float64) for k, shape in self.states_shape.items()})
+
+            return states
 
         return np.empty(shape=self.states_shape, dtype=np.float64)

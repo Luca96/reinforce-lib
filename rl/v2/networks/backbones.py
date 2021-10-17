@@ -24,17 +24,13 @@ StrideType = KernelType
 #  - Value Function Approximation in Reinforcement Learning using the Fourier Basis (2011)
 def dense(layer: Layer, units=32, num_layers=2, activation='relu', normalization=None, normalize_input=False,
           use_bias=True, bias_initializer='glorot_uniform', kernel_initializer='glorot_normal', dropout=0.0,
-          weight_decay=0.0, noisy=False, sigma=0.5, noise='factorized', min_max: Union[tuple, list] = None,
-          **kwargs) -> Layer:
+          weight_decay=0.0, noisy=False, sigma=0.5, noise='factorized', **kwargs) -> Layer:
     """Feed-Forward Neural Network architecture with one input"""
     assert num_layers >= 1
     assert weight_decay >= 0.0
 
     if normalize_input:
         x = utils.apply_normalization(layer, name=normalization)
-
-    elif isinstance(min_max, (tuple, list)) and len(min_max) == 2:
-        x = preprocessing.MinMaxScaling(min_value=min_max[0], max_value=min_max[1])(layer)
     else:
         x = layer
 
@@ -59,7 +55,6 @@ def dense(layer: Layer, units=32, num_layers=2, activation='relu', normalization
     return x
 
 
-# TODO: add `min_max` argument
 def dense_branched(*layers: List[Layer], units: Union[int, List[int]] = 32, num_layers: Union[int, List[int]] = 2,
                    activation: Union[str, List[str]] = 'relu', normalization: Union[str, List[str]] = 'layer',
                    normalize_input: Union[bool, List[bool]] = True, use_bias: Union[bool, List[bool]] = True,
@@ -121,7 +116,6 @@ def dense_branched(*layers: List[Layer], units: Union[int, List[int]] = 32, num_
 # -- Convolutional
 # ---------------------------------------------------------------------------------------------------------------------
 
-# TODO: rename to `atari_cnn`?
 def convolutional(layer: Layer, filters: Union[int, List[int]] = None, units: Union[int, List[int]] = None,
                   conv_activation='relu', dense_activation='relu', kernels: KernelType = None, resize=(84, 84),
                   strides: StrideType = None, bias_initializer='he_uniform', kernel_initializer='he_normal',
@@ -183,27 +177,3 @@ def convolutional(layer: Layer, filters: Union[int, List[int]] = None, units: Un
 
 def recurrent():
     raise NotImplementedError
-
-
-if __name__ == '__main__':
-    import numpy as np
-    from tensorflow.keras.datasets import mnist
-
-    (x_train, y_train), (_, _) = mnist.load_data()
-    x_train = np.reshape(x_train, (-1, 28, 28, 1)) / 255.0
-    y_train = tf.keras.utils.to_categorical(y_train, num_classes=10)
-
-    def get_model():
-        images = Input(shape=(28, 28, 1))
-        x = convolutional(images, global_pooling='avg')
-        classes = Dense(units=10, activation='softmax')(x)
-        return tf.keras.Model(images, classes, name='ConvMNIST')
-
-    m = get_model()
-    m.summary()
-
-    m.compile(optimizer='adam', loss='binary_crossentropy', run_eagerly=True,
-              metrics=['accuracy', tf.keras.metrics.AUC()])
-
-    m.fit(x=x_train, y=y_train, batch_size=128, validation_split=0.2, epochs=5)  # acc: 97.13, auc: 99.86
-

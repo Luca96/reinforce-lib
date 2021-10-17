@@ -1,5 +1,6 @@
 """Dynamic step-dependent parameters"""
 
+import numpy as np
 import tensorflow as tf
 
 from typing import Union
@@ -32,7 +33,7 @@ class DynamicParameter:
         if isinstance(value, (DynamicParameter, ScheduleWrapper)):
             return value
 
-        if isinstance(value, (float, int)):
+        if isinstance(value, (float, int, np.ndarray)) or tf.is_tensor(value):
             return ConstantParameter(value)
 
         if isinstance(value, LearningRateSchedule):

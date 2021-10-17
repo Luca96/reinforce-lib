@@ -16,8 +16,8 @@ from rl.v2.networks.q import Network, QNetwork, DoubleQNetwork
 
 
 class DQN(Agent):
+    # TODO: non-terminating summary issue
     # TODO: `cumulative_gamma = tf.pow(gamma, horizon)` ?
-    # TODO: possibility to chose "huber loss" instead of MSE
     # TODO: n_step (horizon) updates
     def __init__(self, *args, name='dqn-agent', lr: utils.DynamicType = 3e-4, optimizer: Union[dict, str] = 'adam',
                  policy='e-greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = None, load=False,
@@ -25,11 +25,12 @@ class DQN(Agent):
                  network: dict = None, dueling=True, horizon=1, prioritized=False, alpha: utils.DynamicType = 0.6,
                  beta: utils.DynamicType = 0.4, memory_size=1024, **kwargs):
         assert horizon >= 1
-        assert policy.lower() in ['boltzmann', 'softmax', 'e-greedy', 'greedy']
+        assert policy.lower() in ['boltzmann', 'boltzmann2', 'softmax', 'e-greedy', 'greedy']
         super().__init__(*args, name=name, **kwargs)
 
         self.memory_size = memory_size
-        self.policy = policy.lower()
+        # self.policy = policy.lower()
+        self.policy_fn = self._init_policy(policy=policy.lower())
         self.epsilon = DynamicParameter.create(value=epsilon)
         self.polyak = DynamicParameter.create(value=polyak)
         self.prioritized = bool(prioritized)
@@ -58,7 +59,7 @@ class DQN(Agent):
             self.dqn = Network.create(agent=self, dueling=dueling, prioritized=self.prioritized, **(network or {}),
                                       base_class=QNetwork)
 
-        self.dqn.compile(optimizer, clip_norm=clip_norm, learning_rate=self.lr)
+        self.dqn.compile(optimizer, clip_norm=clip_norm, clip=self.clip_grads, learning_rate=self.lr)
 
         if load:
             self.load()
@@ -88,42 +89,126 @@ class DQN(Agent):
 
         self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
-    # TODO: implement explorative policies directly into dqn.act?
-    def act(self, state):
-        other, debug = None, {}
+    def _init_policy(self, policy: str):
+        if policy == 'boltzmann':
+            return self._boltzmann_policy
 
-        if self.policy == 'boltzmann':
-            q_values = self.dqn.q_values(state)
-            exp_q = tf.exp(tf.minimum(q_values, 80.0))  # clip to prevent tf.exp go to "inf"
-            action = tf.random.categorical(logits=exp_q, num_samples=1, seed=self.seed)
-            debug['exp_q_values'] = exp_q
+        elif policy == 'softmax':
+            return self._softmax_policy
 
-        elif self.policy == 'softmax':
-            q_values = self.dqn.q_values(state)
-            action = tf.random.categorical(logits=q_values, num_samples=1, seed=self.seed)
+        elif policy == 'e-greedy':
+            return self._epsilon_greedy_policy
 
-        elif self.policy == 'e-greedy':
-            eps = self.epsilon()
+        return self._deterministic_policy
 
-            # compute probabilities for best action (a* = argmax Q(s,a)), and other actions (a != a*)
-            prob_other = tf.cast(eps / self.num_classes, dtype=tf.float32)
-            prob_best = 1.0 - eps + prob_other
+    def act(self, state) -> Tuple[tf.Tensor, dict, dict]:
+        return self.policy_fn(state)
 
-            q_values = self.dqn.q_values(state)
-            best_action = tf.squeeze(tf.argmax(q_values, axis=-1))
+    # def act(self, state):
+    #     other, debug = None, {}
+    #
+    #     if self.policy == 'boltzmann':
+    #         q_values = self.dqn.q_values(state)
+    #         exp_q = tf.exp(tf.minimum(q_values, 80.0))  # clip to prevent tf.exp go to "inf"
+    #         action = tf.random.categorical(logits=exp_q, num_samples=1, seed=self.seed)
+    #         debug['exp_q_values'] = exp_q
+    #
+    #     elif self.policy == 'boltzmann2':
+    #         q_values = self.dqn.q_values(state)
+    #         q_max = tf.reduce_max(q_values)
+    #
+    #         if q_max >= 0.0:
+    #             if q_max <= utils.TF_EPS:
+    #                 logits = tf.exp(q_values / (q_max + 1.0))
+    #             else:
+    #                 logits = tf.exp(q_values)
+    #         else:
+    #             # negative
+    #             if q_max >= -1:
+    #                 logits = tf.exp(q_values - (q_max + 1.0))
+    #             else:
+    #                 logits = tf.exp(q_values)
+    #
+    #         action = tf.random.categorical(logits=logits, num_samples=1, seed=self.seed)
+    #         debug['exp_q_values'] = logits
+    #
+    #     elif self.policy == 'softmax':
+    #         q_values = self.dqn.q_values(state)
+    #         action = tf.random.categorical(logits=q_values, num_samples=1, seed=self.seed)
+    #
+    #     elif self.policy == 'e-greedy':
+    #         eps = self.epsilon()
+    #
+    #         # compute probabilities for best action (a* = argmax Q(s,a)), and other actions (a != a*)
+    #         prob_other = tf.cast(eps / self.num_classes, dtype=tf.float32)
+    #         prob_best = 1.0 - eps + prob_other
+    #
+    #         q_values = self.dqn.q_values(state)
+    #         best_action = tf.squeeze(tf.argmax(q_values, axis=-1))
+    #
+    #         probs = np.full_like(q_values, fill_value=prob_other)
+    #         probs[0][best_action] = prob_best
+    #
+    #         action = tf.random.categorical(logits=probs, num_samples=1, seed=self.seed)
+    #         debug['prob_best'] = prob_best
+    #         debug['prob_other'] = prob_other
+    #     else:
+    #         # greedy (deterministic policy)
+    #         action = self.dqn.act(state)
+    #
+    #     return action, other, debug
 
-            prob = np.full_like(q_values, fill_value=prob_other)
-            prob[0][best_action] = prob_best
+    @tf.function
+    def _boltzmann_policy(self, state):
+        """Boltzmann policy with tricks for numerical stability"""
+        q_values = self.dqn.q_values(state)
+        q_max = tf.reduce_max(q_values)
 
-            action = tf.random.categorical(logits=prob, num_samples=1, seed=self.seed)
-            debug['prob_best'] = prob_best
-            debug['prob_other'] = prob_other
+        if q_max >= 0.0:
+            if q_max <= utils.TF_EPS:
+                logits = tf.exp(q_values / (q_max + 1.0))
+            else:
+                logits = tf.exp(q_values)
         else:
-            # greedy
-            action = self.dqn.act(state)
+            # negative
+            if q_max >= -1:
+                logits = tf.exp(q_values - (q_max + 1.0))
+            else:
+                logits = tf.exp(q_values)
 
-        return action, other, debug
+        action = tf.random.categorical(logits=logits, num_samples=1, seed=self.seed)
+        return action, {}, dict(exp_q_values=logits)
 
+    def _epsilon_greedy_policy(self, state):
+        """Epsilon-greedy policy"""
+        eps = self.epsilon()
+
+        # compute probabilities for best action (a* = argmax Q(s,a)), and other actions (a != a*)
+        prob_other = tf.cast(eps / self.num_classes, dtype=tf.float32)
+        prob_best = 1.0 - eps + prob_other
+
+        q_values = self.dqn.q_values(state)
+        best_action = tf.squeeze(tf.argmax(q_values, axis=-1))
+
+        probs = np.full_like(q_values, fill_value=prob_other)
+        probs[0][best_action] = prob_best
+
+        action = tf.random.categorical(logits=probs, num_samples=1, seed=self.seed)
+        return action, {}, dict(prob_best=prob_best, prob_other=prob_other)
+
+    @tf.function
+    def _softmax_policy(self, state):
+        """Similar to Boltzmann policy, except that q-values are not exponentiated to get the logits"""
+        q_values = self.dqn.q_values(state)
+        action = tf.random.categorical(logits=q_values, num_samples=1, seed=self.seed)
+        return action, {}, {}
+
+    @tf.function
+    def _deterministic_policy(self, state):
+        """Deterministic/greedy/argmax policy: always takes action with higher q-value"""
+        return self.dqn.act(state), {}, {}
+
+    @tf.function
     def act_randomly(self, state) -> Tuple[tf.Tensor, dict, dict]:
         actions = tf.random.categorical(logits=tf.ones(shape=(1, self.num_classes)), num_samples=1, seed=self.seed)
         return actions, {}, {}
@@ -142,6 +227,7 @@ class DQN(Agent):
             self.dqn.train_step(batch)
             self.memory.on_update()
 
+    # TODO: debug "distance" from target
     def update_target_network(self):
         if self.should_update_target:
             self.update_target_freq -= 1

@@ -12,18 +12,28 @@ from typing import Dict, Callable, Union, List
 from rl import utils
 
 
-# TODO: clip log-prob at [-1,+1] or [-1,0]
 # TODO: replace nan, inf in prob & log_prob
 # TODO: put @tf.function to all dist's methods?
 class Distribution(Layer):
     """Abstract probability distribution layer that wraps a `tfp.distribution.Distribution` instance"""
 
-    def __init__(self, independent=True, **kwargs):
+    # TODO: "min_log_prob" change -1 to -10
+    def __init__(self, independent=True, min_log_prob: Union[str, int, float] = -1, **kwargs):
         super().__init__(**kwargs)
 
         self.is_independent = bool(independent)
         self.params_shape: tuple = None
 
+        # value at which log-probs are clipped
+        if min_log_prob == 'uniform':
+            self.min_log_prob = tf.math.log(1.0 / (self.num_actions * self.num_classes))
+
+        elif isinstance(min_log_prob, (int, float)):
+            self.min_log_prob = tf.constant(min_log_prob, dtype=tf.float32)
+        else:
+            raise ValueError(f'"min_log_prob" should be str, int or float not {type(min_log_prob)}.')
+
+    # TODO: use Bernoulli instead of Categorical when there are two (0/1 - bool) actions.
     @staticmethod
     def get(action_space: gym.Space, use_beta=True, **kwargs) -> 'Distribution':
         if isinstance(action_space, gym.spaces.Dict):
@@ -49,6 +59,9 @@ class Distribution(Layer):
             return Gaussian(num_actions, **kwargs)
 
         raise ValueError(f'Unsupported action space type: {type(action_space)}.')
+
+    def deterministic(self, inputs, **kwargs):
+        raise NotImplementedError
 
     def make_distribution_fn(self, params: Union[tf.Tensor, List[tf.Tensor]]) -> tfp.distributions.Distribution:
         base = self.get_base_distribution(params)
@@ -101,7 +114,7 @@ class Distribution(Layer):
 
     def log_prob(self, value, **kwargs):
         log_prob = self.get_built_distribution().log_prob(value, **kwargs)
-        log_prob = tf.clip_by_value(log_prob, clip_value_min=-1.0, clip_value_max=1.0)
+        log_prob = tf.clip_by_value(log_prob, clip_value_min=self.min_log_prob, clip_value_max=1.0)
 
         return self._reshape(log_prob)
 
@@ -179,7 +192,7 @@ class ConcreteDistribution(Distribution):
 # TODO: remove `num_actions`
 class Categorical(ConcreteDistribution):
     """A layer that wraps a Categorical distribution for discrete actions"""
-    def __init__(self, num_actions: int, num_classes: int, weight_scaling=1.0, name=None, **kwargs):
+    def __init__(self, num_actions: int, num_classes: int, name=None, weight_scaling=1.0, **kwargs):
         assert isinstance(num_actions, (int, float))
         assert isinstance(num_classes, (int, float))
         assert num_actions == 1
@@ -201,6 +214,11 @@ class Categorical(ConcreteDistribution):
         categorical: tfp.distributions.Distribution = self.distribution(logits)
 
         return tf.identity(categorical)
+
+    def deterministic(self, inputs, **kwargs):
+        logits = self.logits(inputs)
+        logits = self.reshape(logits)
+        return tf.argmax(logits, axis=-1)
 
     def get_base_distribution(self, params) -> tfp.distributions.Distribution:
         return tfp.distributions.Categorical(logits=params)
@@ -242,8 +260,9 @@ class ContinuousDistribution(ConcreteDistribution):
 class Beta(ContinuousDistribution):
 
     def __init__(self, num_actions: int, min_std=1e-2, eps=1e-3, unimodal=False, independent=True, name=None,
-                 weight_scaling=1.0, **kwargs):
-        super().__init__(num_actions, min_std, eps, weight_scaling=weight_scaling, independent=independent, name=name)
+                 weight_scaling=1.0, min_log_prob=-1, **kwargs):
+        super().__init__(num_actions, min_std, eps, weight_scaling=weight_scaling, independent=independent, name=name,
+                         min_log_prob=min_log_prob)
 
         if unimodal:
             self.min_std += 1.0
@@ -261,6 +280,10 @@ class Beta(ContinuousDistribution):
         distribution = self.distribution([alpha, beta])
         return tf.identity(distribution)
 
+    # TODO: check this hack!
+    def entropy(self, **kwargs):
+        return tf.math.abs(super().entropy(**kwargs))
+
     def get_base_distribution(self, params: list) -> tfp.distributions.Distribution:
         assert len(params) == 2
         return tfp.distributions.Beta(concentration0=params[0], concentration1=params[1])
@@ -274,10 +297,12 @@ class Beta(ContinuousDistribution):
 
 
 # TODO: handle iid and independence
+# TODO: bound actions using tanh? account for extra term in log-prob
 class Gaussian(ContinuousDistribution):
 
-    def __init__(self, num_actions: int, min_std=1e-2, eps=1e-3, weight_scaling=1.0, name=None, **kwargs):
-        super().__init__(num_actions, min_std, eps, weight_scaling=weight_scaling, name=name)
+    def __init__(self, num_actions: int, min_std=1e-2, eps=1e-3, weight_scaling=1.0, min_log_prob=-1, name=None,
+                 **kwargs):
+        super().__init__(num_actions, min_std, eps, weight_scaling=weight_scaling, name=name, min_log_prob=min_log_prob)
 
         self.mu = Dense(units=self.num_actions, activation='linear', **kwargs)
         self.sigma = Dense(units=self.num_actions, activation=utils.softplus(self.min_std), **kwargs)
@@ -289,6 +314,13 @@ class Gaussian(ContinuousDistribution):
         distribution = self.distribution([mu, sigma])
         return tf.identity(distribution)
 
+    def deterministic(self, inputs, **kwargs):
+        return self.mu(inputs)
+
+    def get_base_distribution(self, params: list) -> tfp.distributions.Distribution:
+        assert len(params) == 2
+        return tfp.distributions.Normal(loc=params[0], scale=params[1])
+
     def _scale_weights(self):
         w_mean = [w * self.weight_scaling for w in self.mu.get_weights()]
         w_std = [w * self.weight_scaling for w in self.sigma.get_weights()]
@@ -299,8 +331,9 @@ class Gaussian(ContinuousDistribution):
 
 class TruncatedGaussian(Gaussian):
 
-    def __init__(self, num_actions: int, low, high, min_std=1e-2, eps=1e-3, weight_scaling=1.0, name=None, **kwargs):
-        super().__init__(num_actions, min_std, eps, weight_scaling=weight_scaling, name=name)
+    def __init__(self, num_actions: int, low, high, min_std=1e-2, eps=1e-3, weight_scaling=1.0, min_log_prob=-1,
+                 name=None, **kwargs):
+        super().__init__(num_actions, min_std, eps, weight_scaling=weight_scaling, name=name, min_log_prob=min_log_prob)
 
         self.low = tf.constant(low, dtype=tf.float32)
         self.high = tf.constant(high, dtype=tf.float32)
@@ -308,12 +341,17 @@ class TruncatedGaussian(Gaussian):
         self.mu = Dense(units=self.num_actions, activation='linear', **kwargs)
         self.sigma = Dense(units=self.num_actions, activation=utils.softplus(self.min_std), **kwargs)
 
+    def get_base_distribution(self, params: list) -> tfp.distributions.Distribution:
+        assert len(params) == 2
+        return tfp.distributions.TruncatedNormal(loc=params[0], scale=params[1], low=self.low, high=self.high)
+
 
 class CompoundDistribution(Distribution):
 
-    def __init__(self, distributions: Dict[str, ConcreteDistribution], method: Union[str, Callable] = 'avg', name=None):
+    # TODO: assume independence among distributions, so entropy will sum (as log_prob), and prob is factorized instead.
+    def __init__(self, distributions: Dict[str, ConcreteDistribution], method: Union[str, Callable] = 'sum', name=None):
         assert isinstance(distributions, dict) and len(distributions) > 0
-        assert all([isinstance(d, ConcreteDistribution) for d in distributions.values()])  # all dist. instances, ...
+        assert all([isinstance(d, ConcreteDistribution) for d in distributions.values()])  # all dist instances, ...
         assert all([not isinstance(d, CompoundDistribution) for d in distributions.values()])  # ...but not compound
 
         super().__init__(name=name)
@@ -400,15 +438,24 @@ class CompoundDistribution(Distribution):
         mode = [d.mode(**kwargs) for d in self.distributions.values()]
         return self.aggregation_fn(tf.concat(mode, axis=-1))
 
+    # def prob(self, value: dict, **kwargs):
+    #     assert isinstance(value, dict)
+    #     prob = []
+    #
+    #     for k, dist in self.distributions.items():
+    #         p = dist.prob(value=tf.squeeze(value[k]), **kwargs)
+    #         prob.append(p)
+    #
+    #     return self.aggregation_fn(tf.concat(prob, axis=-1))
+
     def prob(self, value: dict, **kwargs):
         assert isinstance(value, dict)
-        prob = []
+        prob = 1.0
 
         for k, dist in self.distributions.items():
-            p = dist.prob(value=tf.squeeze(value[k]), **kwargs)
-            prob.append(p)
+            prob *= dist.prob(value=tf.squeeze(value[k]), **kwargs)
 
-        return self.aggregation_fn(tf.concat(prob, axis=-1))
+        return prob
 
     def quantile(self, value: dict, **kwargs):
         assert isinstance(value, dict)

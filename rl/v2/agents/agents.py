@@ -16,10 +16,10 @@ from rl.v2.memories import Memory, TransitionSpec
 from typing import List, Dict, Union, Tuple
 
 
+# TODO: when saving agent weights, also save a "preset" file with the hyper-parameters so that the agent can be loaded.
 # TODO: observation normalization: e.g. standardization by incremental empirical mean and std
 # TODO: rename `repeat_action` to `frame-skip`?
 # TODO: when frame-skip > 1, adjust the discount factor i.e. to \gamma^n
-# TODO: provide various gradient clipping strategies: "none", "norm", "global_norm", "custom".
 # TODO: summary of agent hyper-parameters?
 # TODO: "evaluation" dict for parameters that what should be set differently during evaluation?
 # TODO: provide a "fake" agent just for debugging components?
@@ -32,7 +32,7 @@ class Agent:
     def __init__(self, env: Union[gym.Env, str], batch_size: int, gamma=0.99, seed=None, weights_dir='weights',
                  use_summary=True, drop_batch_remainder=True, skip_data=0, consider_obs_every=1, shuffle=True,
                  evaluation_dir='evaluation', shuffle_batches=False, traces_dir: str = None, repeat_action=1,
-                 summary: dict = None, name='agent', reward_scale=1.0, clip_rewards: tuple = None):
+                 summary: dict = None, name='agent', reward_scale=1.0, clip_grads='global', clip_rewards: tuple = None):
         assert batch_size >= 1
         assert repeat_action >= 1
 
@@ -51,6 +51,7 @@ class Agent:
         self.gamma = tf.constant(gamma, dtype=tf.float32)
         self._memory = None
         self._dynamic_parameters = None
+        self.clip_grads = clip_grads
         self.repeat_action = int(repeat_action)
 
         self._init_action_space()
@@ -201,6 +202,9 @@ class Agent:
             self.env.seed(seed)
             self.seed = seed
             print(f'Random seed {seed} set.')
+
+    def set_hyper(self, *args, **kwargs):
+        raise NotImplementedError
 
     def act(self, state) -> Tuple[tf.Tensor, dict, dict]:
         """Agent prediction.
@@ -365,6 +369,7 @@ class Agent:
     #
     #     self.on_close(should_close)
 
+    # TODO: adjust learning loop
     def learn(self, episodes: int, timesteps: int, render: Union[bool, int, None] = False, should_close=True,
               evaluation: Union[dict, bool] = None, exploration_steps=0, save=True):
         """Training loop"""
@@ -392,6 +397,7 @@ class Agent:
             evaluation.setdefault('timesteps', timesteps)  # default: evaluate on the same number of timesteps
             evaluation.setdefault('render', render)  # default: same rendering options
         else:
+            evaluation = {}
             eval_freq = episodes + 1  # never evaluate
 
         # Saving:
@@ -409,7 +415,7 @@ class Agent:
         episode = 0
 
         # Learning-loop:
-        while episode < episodes + 1:
+        while episode < episodes:
             episode += 1
             self.on_episode_start(episode, exploration=is_exploring)
 
@@ -417,6 +423,8 @@ class Agent:
             should_evaluate = (not is_exploring) and (episode % eval_freq == 0)
 
             episode_reward = 0.0
+            discount = 1.0
+            discounted_reward = 0.0
             t0 = time.time()
 
             state = self.env.reset()
@@ -447,7 +455,10 @@ class Agent:
                 # Environment step
                 for _ in range(self.repeat_action):
                     next_state, reward, terminal, info = self.env.step(action=action_env)
+
                     episode_reward += reward
+                    discounted_reward += reward * discount
+                    discount *= self.gamma
 
                     if terminal:
                         break
@@ -479,6 +490,7 @@ class Agent:
                     state = self.preprocess(state)
 
             self.on_episode_end(episode, episode_reward, exploration=is_exploring)
+            self.log(episode_reward_discounted=discounted_reward)
 
             if should_evaluate:
                 eval_rewards = self.evaluate(**evaluation)
@@ -503,7 +515,8 @@ class Agent:
 
     # TODO: provide choice for evaluation criterion: mean, median, std...
     # TODO: during evaluation the behaviour of some agents (e.g. DQN) changes (e.g. different `epsilon` if used)
-    def evaluate(self, episodes: int, timesteps: int, render: Union[bool, int] = True, should_close=False) -> list:
+    def evaluate(self, episodes: int, timesteps: int, render: Union[bool, int] = True,
+                 should_close=False) -> np.ndarray:
         if render is True:
             render_freq = 1  # render each episode
 
@@ -512,7 +525,7 @@ class Agent:
         else:
             render_freq = int(render)  # render at specified frequency
 
-        episodic_rewards = [0.0] * episodes
+        episodic_rewards = np.zeros(shape=[episodes], dtype=np.float32)
 
         for episode in range(1, episodes + 1):
             self.on_episode_start(episode, evaluation=True)
@@ -582,9 +595,19 @@ class Agent:
     def preprocess_transition(self, transition: dict, exploration=False):
         transition['reward'] = self.preprocess_reward(transition['reward'])
 
+    # TODO: supports only one-depth nested dicts
+    # TODO: what about tuples?
     def log(self, average=False, **kwargs):
         if self.should_log:
-            self.summary_queue.put(dict(average=average, **kwargs))
+            data = dict(average=average)
+
+            for key, value in kwargs.items():
+                if isinstance(value, dict):
+                    data.update({f'{key}__{k}': v for k, v in value.items()})
+                else:
+                    data[key] = value
+
+            self.summary_queue.put(data)
 
     def log_transition(self, transition: dict):
         action = transition['action']
@@ -641,6 +664,9 @@ class Agent:
         raise NotImplementedError
 
     def save_weights(self):
+        raise NotImplementedError
+
+    def set_weights(self, agent: 'Agent'):
         raise NotImplementedError
 
     def on_episode_start(self, episode: int, evaluation=False, exploration=False):
@@ -710,6 +736,7 @@ class Agent:
             self.statistics.close()
 
 
+# TODO: use a collection of Memory instances, instead of a single and complex mem structure
 # TODO: better name SynchronousAgent or SyncAgent?
 class ParallelAgent(Agent):
     """Base class for Agents that uses parallel environments (e.g. A2C, PPO, ...)"""
@@ -921,22 +948,33 @@ class AsyncAgent(Agent):
 class RandomAgent(Agent):
 
     def __init__(self, *args, name='random-agent', **kwargs):
+        kwargs['batch_size'] = 1
+        kwargs['use_summary'] = False
+
         super().__init__(*args, name=name, **kwargs)
 
+        # if isinstance(action_space, gym.spaces.Discrete):
+        #     # sample action from categorical distribution with uniform probabilities
+        #     logits = tf.ones(shape=(1, action_space.n), dtype=tf.float32)
+        #     self.sample = lambda _: tf.random.categorical(logits=logits, num_samples=1, seed=self.seed)
+        #
+        # elif isinstance(action_space, gym.spaces.Box) and action_space.is_bounded():
+        #     self.sample = lambda _: tf.random.uniform(shape=action_space.shape, minval=action_space.low,
+        #                                               maxval=action_space.high, seed=self.seed)
+        # else:
+        #     raise ValueError('Only bounded environments are supported: Discrete, and Box.')
+
+        # self.convert_action = lambda a: tf.squeeze(a).numpy()
+
+    def _init_action_space(self):
         action_space = self.env.action_space
+        self.action_space: gym.Space = action_space
 
-        if isinstance(action_space, gym.spaces.Discrete):
-            # sample action from categorical distribution with uniform probabilities
-            logits = tf.ones(shape=(1, action_space.n), dtype=tf.int32)
-            self.sample = lambda _: tf.random.categorical(logits=logits, num_samples=1, seed=self.seed)
+        assert isinstance(action_space, gym.Space)
+        self.convert_action = lambda a: a
 
-        elif isinstance(action_space, gym.spaces.Box) and action_space.is_bounded():
-            self.sample = lambda _: tf.random.uniform(shape=action_space.shape, minval=action_space.low,
-                                                      maxval=action_space.high, seed=self.seed)
-        else:
-            raise ValueError('Only bounded environments are supported: Discrete, and Box.')
-
-        self.convert_action = lambda a: tf.squeeze(a).numpy()
+    def sample(self, *args, **kwargs):
+        return self.action_space.sample()
 
     def act(self, state) -> Tuple[tf.Tensor, dict, dict]:
         return self.sample(state), {}, {}

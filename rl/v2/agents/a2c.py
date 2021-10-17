@@ -40,17 +40,16 @@ class A2C(ParallelAgent):
         self.actor = Network.create(agent=self, log_prefix='actor', **(actor or {}), base_class='A2C-ActorNetwork')
         self.critic = Network.create(agent=self, log_prefix='critic', **(critic or {}), base_class='A2C-CriticNetwork')
 
-        # self.actor = ActorNetwork(agent=self, log_prefix='actor', **(actor or {}))
-        # self.critic = CriticNetwork(agent=self, log_prefix='critic', **(critic or {}))
-
         if isinstance(optimizer, dict):
             opt_args = optimizer
             optimizer = opt_args.pop('name', 'rmsprop')
         else:
             opt_args = {}
 
-        self.actor.compile(optimizer, clip_norm=clip_norm[0], learning_rate=self.actor_lr, **opt_args)
-        self.critic.compile(optimizer, clip_norm=clip_norm[1], learning_rate=self.critic_lr, **opt_args)
+        self.actor.compile(optimizer, clip_norm=clip_norm[0], clip=self.clip_grads, learning_rate=self.actor_lr,
+                           **opt_args)
+        self.critic.compile(optimizer, clip_norm=clip_norm[1], clip=self.clip_grads, learning_rate=self.critic_lr,
+                            **opt_args)
 
         self.weights_path = dict(policy=os.path.join(self.base_path, 'actor'),
                                  value=os.path.join(self.base_path, 'critic'))
@@ -169,7 +168,7 @@ class ActorNetwork(PolicyNetwork):
         debug['gradient_global_norm'] = utils.tf_global_norm(debug['gradient_norm'])
 
         if self.should_clip_gradients:
-            gradients, _ = utils.clip_gradients2(gradients, norm=self.clip_norm())
+            gradients, _ = utils.clip_gradients_global(gradients, norm=self.clip_norm())
             debug['gradient_clipped_norm'] = utils.tf_norm(gradients)
             debug['clip_norm'] = self.clip_norm.value
 
@@ -205,7 +204,7 @@ class CriticNetwork(ValueNetwork):
         debug['gradient_global_norm'] = utils.tf_global_norm(debug['gradient_norm'])
 
         if self.should_clip_gradients:
-            gradients, _ = utils.clip_gradients2(gradients, norm=self.clip_norm())
+            gradients, _ = utils.clip_gradients_global(gradients, norm=self.clip_norm())
             debug['gradient_clipped_norm'] = utils.tf_norm(gradients)
             debug['clip_norm'] = self.clip_norm.value
 
@@ -243,7 +242,8 @@ class ParallelGAEMemory(EpisodicMemory):
     def _store(self, data, spec, key, value):
         if not isinstance(value, dict):
             array = np.asanyarray(value, dtype=np.float32)
-            array = np.reshape(array, newshape=(self.shape[0], spec['shape'][-1]))  # TODO: check spec['shape']
+            # array = np.reshape(array, newshape=(self.shape[0], spec['shape'][-1]))  # TODO: check spec['shape']
+            array = np.reshape(array, newshape=utils.to_tuple(self.shape[0]) + spec['shape'])  # TODO: test
 
             # indexing: key, env, index (timestep)
             #   - `array` has shape (n_envs, horizon)

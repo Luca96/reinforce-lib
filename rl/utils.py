@@ -31,7 +31,6 @@ TF_EPS = tf.constant(NP_EPS, dtype=tf.float32)
 TF_ZERO = tf.constant(0.0, dtype=tf.float32)
 TF_PI = tf.constant(np.pi, dtype=tf.float32)
 
-# TODO: use `tf.keras.optimizers.get` instead?
 OPTIMIZERS = dict(adadelta=tf.keras.optimizers.Adadelta,
                   adagrad=tf.keras.optimizers.Adagrad,
                   adam=tf.keras.optimizers.Adam,
@@ -91,7 +90,7 @@ def apply_normalization(layer: tf.keras.layers.Layer, name: str, **kwargs) -> tf
         return tf.keras.layers.LayerNormalization(**kwargs)(layer)
 
 
-def get_normalization_fn(arg: Union[str, Callable], **kwargs):
+def get_normalization_fn(arg: Union[str, Callable] = None, **kwargs):
     if callable(arg):
         return arg
 
@@ -176,8 +175,19 @@ def get_random_generator(seed=None) -> np.random.Generator:
     if seed is not None:
         seed = int(seed)
         assert 0 <= seed < 2 ** 32
+    else:
+        seed = GLOBAL_SEED
 
     return np.random.default_rng(np.random.MT19937(seed=seed))
+
+
+def get_seed(seed):
+    if seed is None:
+        return GLOBAL_SEED
+
+    assert isinstance(seed, (float, int))
+    assert 0 <= seed < 2 ** 32
+    return seed
 
 
 def np_normalize(x, epsilon=NP_EPS):
@@ -191,7 +201,7 @@ def discount_cumsum(x, discount: float):
     return scipy.signal.lfilter([1.0], [1.0, float(-discount)], x[::-1], axis=0)[::-1]
 
 
-def gae(rewards, values, gamma: float, lambda_: float, normalize=False):
+def gae(rewards, values, gamma: float, lambda_: float):
     """Generalized Advantage Estimation (GAE) formula"""
     if lambda_ == 0.0:
         # special case: GAE(\gamma, 0)
@@ -199,14 +209,10 @@ def gae(rewards, values, gamma: float, lambda_: float, normalize=False):
 
     elif lambda_ == 1.0:
         # special case: GAE(\gamma, 1)
-        advantages = rewards_to_go(rewards[:-1], discount=gamma) - values[:-1]
+        advantages = rewards_to_go(rewards, discount=gamma) - values[:-1]
     else:
         deltas = rewards[:-1] + gamma * values[1:] - values[:-1]
         advantages = discount_cumsum(deltas, discount=gamma * lambda_)
-
-    # TODO: remove "normalize" in fn signature
-    if normalize:
-        advantages = tf_normalize(advantages)
 
     return advantages
 
@@ -262,25 +268,11 @@ def clip(value, min_value, max_value):
     return min(max_value, max(value, min_value))
 
 
-# TODO: deprecate in favor of `polyak_averaging2`
-def polyak_averaging(model: tf.keras.Model, old_weights: list, alpha=0.99):
-    new_weights = model.get_weights()
-    weights = []
-
-    for w_old, w_new in zip(old_weights, new_weights):
-        w = alpha * w_new + (1.0 - alpha) * w_old
-        weights.append(w)
-
-    model.set_weights(weights)
-
-
-# TODO: as method of Network?
-def polyak_averaging2(model, target, alpha: float):
+def polyak_averaging(model, target, alpha: float):
     for var, var_target in zip(model.trainable_variables, target.trainable_variables):
         value = alpha * var_target + (1.0 - alpha) * var
 
         var_target.assign(value, read_value=False)
-        # var_target.assign(value, use_locking=True)
 
 
 def clip_gradients(gradients: list, norm: float) -> list:
@@ -289,7 +281,7 @@ def clip_gradients(gradients: list, norm: float) -> list:
 
 
 @tf.function
-def clip_gradients2(gradients: List[tf.Tensor], norm: float) -> tuple:
+def clip_gradients_global(gradients: List[tf.Tensor], norm: float) -> tuple:
     """Clip given list of gradients w.r.t their `global norm`"""
     return tf.clip_by_global_norm(gradients, clip_norm=norm)  # returns: (grads, g_norm)
 
@@ -690,20 +682,6 @@ def tf_minmax_norm(x, lower=0.0, upper=1.0, eps=TF_EPS):
     return (x - x_min) / (tf.maximum(x) - x_min) * (upper - lower) + lower
 
 
-def tf_explained_variance(x, y, eps=TF_EPS) -> float:
-    """Computes fraction of variance that `x` explains about `y`.
-       Interpretation:
-            - ev = 0  =>  might as well have predicted zero
-            - ev = 1  =>  perfect prediction
-            - ev < 0  =>  worse than just predicting zero
-
-        - Source: https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/common/math_util.py#L25
-    """
-    assert tf.shape(x) == tf.shape(y)
-
-    return 1.0 - (tf.math.reduce_variance(y - x) / (tf.math.reduce_variance(y) + eps))
-
-
 def tf_shuffle_tensors(*tensors, indices=None):
     """Shuffles all the given tensors in the SAME way.
        Source: https://stackoverflow.com/questions/56575877/shuffling-two-tensors-in-the-same-order
@@ -717,7 +695,6 @@ def tf_shuffle_tensors(*tensors, indices=None):
     return [tf.gather(t, indices) for t in tensors]
 
 
-# TODO: rename to `tensors_to_batches`
 def data_to_batches(tensors: Union[list, dict, tuple], batch_size: int, shuffle_batches=False, take: int = None,
                     drop_remainder=False, map_fn=None, prefetch_size=2, num_shards=1, skip=0, seed=None, shuffle=False,
                     filter_fn: Callable[[Any], bool] = None):
@@ -853,9 +830,11 @@ def tf_norm(items: list, **kwargs) -> list:
     return [tf.norm(x, **kwargs) for x in items]
 
 
-# TODO: change to accept `optional` norm argument
-def tf_global_norm(norms: list):
-    return tf.sqrt(tf.reduce_sum([norm * norm for norm in norms]))
+def tf_global_norm(values: list, from_norms=True, **kwargs):
+    if not from_norms:
+        values = tf_norm(values, **kwargs)
+
+    return tf.sqrt(tf.reduce_sum([norm * norm for norm in values]))
 
 
 @tf.function
@@ -866,7 +845,7 @@ def huber_loss(errors: tf.Tensor, kappa=1.0) -> tf.Tensor:
     abs_errors = tf.abs(errors)
 
     case_one = to_float(abs_errors <= kappa) * 0.5 * tf.square(errors)  # MSE
-    case_two = to_float(abs_errors > kappa) * kappa * (abs_errors - 0.5 * kappa)  #  k * (|x| - 1/2 k)
+    case_two = to_float(abs_errors > kappa) * kappa * (abs_errors - 0.5 * kappa)  # k * (|x| - 1/2 k)
 
     return case_one + case_two
 
@@ -1032,8 +1011,24 @@ def copy_folder(src: str, dst: str):
 
 
 # -------------------------------------------------------------------------------------------------
-# -- Statistics utils
+# -- Statistics
 # -------------------------------------------------------------------------------------------------
+
+def tf_explained_variance(x, y, eps=TF_EPS) -> float:
+    """Computes fraction of variance that `x` explains about `y`.
+       Interpretation:
+            - ev = 0  =>  might as well have predicted zero
+            - ev = 1  =>  perfect prediction
+            - ev < 0  =>  worse than just predicting zero
+
+        - Source: https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/common/math_util.py#L25
+    """
+    return 1.0 - (tf.math.reduce_variance(y - x) / (tf.math.reduce_variance(y) + eps))
+
+
+def tf_residual_variance(x: tf.Tensor, y: tf.Tensor, eps=TF_EPS):
+    return tf.math.reduce_variance(y - x) / (tf.math.reduce_variance(y) + eps)
+
 
 class SummaryProcess(mp.Process):
     """Easy and efficient tf.summary with multiprocessing"""
@@ -1085,13 +1080,14 @@ class SummaryProcess(mp.Process):
             if not self.should_log_key(key):
                 continue
 
-            if key not in self.steps:
-                self.steps[key] = 0
-
-            step = self.steps[key]
+            # if key not in self.steps:
+            #     self.steps[key] = 0
+            #
+            # step = self.steps[key]
+            step = self.steps.setdefault(key, 0)
             value = tf.convert_to_tensor(value)
 
-            if 'weight-' in key or 'bias-' in key:
+            if ('_hist' in key) or ('weight-' in key) or ('bias-' in key):
                 if self.should_log(step):
                     tf.summary.histogram(name=key, data=value, step=step)
 

@@ -237,8 +237,8 @@ class DDPGAgent(Agent):
 
     def update_target_networks(self):
         """Updates the weights of the target networks by Polyak average"""
-        utils.polyak_averaging2(model=self.actor, target=self.actor_target, alpha=self.polyak_coeff)
-        utils.polyak_averaging2(model=self.critic, target=self.critic_target, alpha=self.polyak_coeff)
+        utils.polyak_averaging(model=self.actor, target=self.actor_target, alpha=self.polyak_coeff)
+        utils.polyak_averaging(model=self.critic, target=self.critic_target, alpha=self.polyak_coeff)
 
     def get_actor_gradients(self, batch):
         with tf.GradientTape() as tape:

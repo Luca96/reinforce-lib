@@ -5,9 +5,11 @@ from tensorflow.keras.layers import *
 
 from rl import utils
 from rl.agents import Agent
+from rl.layers import DuelingLayer
 
 from rl.v2.networks import backbones, Network
 
+from functools import partial
 from typing import Dict, Union, Callable
 
 
@@ -20,9 +22,18 @@ class QNetwork(Network):
     """
 
     def __init__(self, agent: Agent, target=True, dueling=False, operator='avg', log_prefix='q', prioritized=False,
-                 **kwargs):
+                 loss: Union[str, float, callable] = 'mse', **kwargs):
         self._base_model_initialized = True
         self.has_prioritized_mem = bool(prioritized)
+
+        # choose loss function (huber, mse, or user-defined)
+        if isinstance(loss, (int, float)):
+            self.loss_fn = partial(utils.huber_loss, kappa=tf.constant(loss, dtype=tf.float32))
+
+        elif callable(loss):
+            self.loss_fn = loss
+        else:
+            self.loss_fn = tf.function(lambda x: 0.5 * tf.square(x))  # mse
 
         if dueling:
             assert isinstance(operator, str) and operator.lower() in ['avg', 'max']
@@ -40,7 +51,7 @@ class QNetwork(Network):
     def call(self, inputs, actions=None, training=None):
         q_values = super().call(inputs, training=training)
 
-        # TODO: consider to multiply q-values times one_hot(actions) instead of indexing
+        # TODO: consider to multiply q-values times one_hot(actions) + sum, instead of indexing
         if tf.is_tensor(actions):
             # actions = tf.one_hot(actions, self.agent.num_classes, 1.0, 0.0)
             # return tf.reduce_sum(q_values * actions, axis=1)
@@ -57,62 +68,73 @@ class QNetwork(Network):
 
     @tf.function
     def act(self, inputs):
-        q_values = self(inputs)
+        q_values = self(inputs, training=False)
         return tf.argmax(q_values, axis=-1)
 
     def structure(self, inputs: Dict[str, Input], name='Deep-Q-Network', **kwargs) -> tuple:
         utils.remove_keys(kwargs, keys=['dueling', 'operator', 'prioritized'])
+        # inputs = inputs['state']
+        #
+        # if len(inputs.shape) <= 2:
+        #     x = backbones.dense(layer=inputs, **kwargs)
+        # else:
+        #     x = backbones.convolutional(layer=inputs, **kwargs)
+        #
+        # output = self.output_layer(layer=x)
+        # return inputs, output, name
+        return super().structure(inputs, name=name, **kwargs)
 
-        inputs = inputs['state']
-
-        if len(inputs.shape) <= 2:
-            x = backbones.dense(layer=inputs, **kwargs)
-        else:
-            x = backbones.convolutional(layer=inputs, **kwargs)
-
-        output = self.output_layer(layer=x)
-        return inputs, output, name
-
-    def output_layer(self, layer: Layer) -> Layer:
+    def output_layer(self, layer: Layer, **kwargs) -> Layer:
         assert self.agent.num_actions == 1
 
         if self.use_dueling:
             return self.dueling_architecture(layer)
 
-        return Dense(units=self.agent.num_classes, name='q-values', **self.output_args)(layer)
+        return Dense(units=self.agent.num_classes, name='q-values', **kwargs)(layer)
+
+    # def dueling_architecture(self, layer: Layer) -> Layer:
+    #     # two streams (branches)
+    #     value = Dense(units=1, name='value', **self.output_args)(layer)
+    #     advantage = Dense(units=self.agent.num_classes, name='advantage', **self.output_args)(layer)
+    #
+    #     if self.operator == 'max':
+    #         k = tf.reduce_max(advantage, axis=-1, keepdims=True)
+    #     else:
+    #         k = tf.reduce_mean(advantage, axis=-1, keepdims=True)
+    #
+    #     q_values = value + (advantage - k)
+    #     return q_values
 
     def dueling_architecture(self, layer: Layer) -> Layer:
-        # two streams (branches)
-        value = Dense(units=1, name='value', **self.output_args)(layer)
-        advantage = Dense(units=self.agent.num_classes, name='advantage', **self.output_args)(layer)
-
-        if self.operator == 'max':
-            k = tf.reduce_max(advantage, axis=-1, keepdims=True)
-        else:
-            k = tf.reduce_mean(advantage, axis=-1, keepdims=True)
-
-        q_values = value + (advantage - k)
-        return q_values
+        dueling = DuelingLayer(units=self.agent.num_classes, operator=self.operator.lower(), **self.output_args)
+        return dueling(layer)
 
     @tf.function
     def objective(self, batch: dict, reduction=tf.reduce_mean) -> tuple:
-        q_values = self(inputs=batch['state'], actions=batch['action'], training=True)
+        actions = batch['action']
+        q_values = self(inputs=batch['state'], actions=actions, training=True)
         q_targets = self.targets(batch)
+        td_error = q_targets - q_values
 
         if self.has_prioritized_mem:
-            td_error = q_targets - q_values
-
             # inform agent's memory about td-error, to later update priorities
-            self.agent.memory.td_error.assign(tf.squeeze(td_error))
+            self.agent.memory.td_error.assign(tf.stop_gradient(tf.squeeze(td_error)))
 
             loss = reduction(td_error * batch['_weights'])
         else:
-            # TODO: consider `huber_loss` instead (as in original paper)
-            loss = 0.5 * reduction(tf.square(q_values - q_targets))
-            # loss = reduction(utils.huber_loss(q_values - q_targets))
+            loss = reduction(self.loss_fn(td_error))
 
         debug = dict(loss=loss, targets=q_targets, values=q_values, returns=batch['return'],
-                     td_error=q_targets - q_values)
+                     td_error=td_error, values_hist=q_values, targets_hist=q_targets)
+
+        # find q-values and targets of each action, separately
+        for a in range(self.agent.num_classes):
+            mask = actions == a
+
+            if mask.shape[0] > 0:
+                debug[f'value({a})'] = q_values[mask]
+                debug[f'target({a})'] = q_targets[mask]
+                debug[f'td-error({a})'] = td_error[mask]
 
         if '_weights' in batch:
             debug['weights_IS'] = batch['_weights']
