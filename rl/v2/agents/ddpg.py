@@ -1,40 +1,120 @@
-"""Deep Deterministic Policy Gradient (DDPG) Agent"""
+"""Deep Deterministic Policy Gradient (DDPG)"""
 
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
+import gym
+import numpy as np
 import tensorflow as tf
 
-from tensorflow.keras.layers import Layer, Dense, Input
+from tensorflow.keras.layers import Layer, Dense, Concatenate, Input
+from typing import Dict, Tuple, Union
 
 from rl import utils
 from rl.parameters import DynamicParameter
 
 from rl.v2.agents import Agent
-from rl.v2.memories import PrioritizedMemory, ReplayMemory, TransitionSpec
-from rl.v2.networks import Network, DeterministicPolicyNetwork, QNetwork, backbones
+from rl.v2.memories import TransitionSpec, ReplayMemory, PrioritizedMemory
+from rl.v2.networks import backbones, Network, DeterministicPolicyNetwork
 
-from typing import Dict, Tuple, Union
+
+class ActorNetwork(DeterministicPolicyNetwork):
+    # def output_layer(self, layer: Layer, **kwargs) -> Layer:
+    #     num_actions = self.agent.num_actions
+    #
+    #     # output is continuous and bounded
+    #     return Dense(units=num_actions, activation='tanh', name='actions', **kwargs)(layer)
+
+    @tf.function
+    def objective(self, batch, reduction=tf.reduce_mean) -> tuple:
+        states = batch['state']
+        actions = self(states, training=True)
+
+        q_values = self.agent.critic((states, actions), training=False)
+        loss = -reduction(q_values)
+
+        return loss, dict(loss=loss, actions=actions, q_values=q_values)
+
+
+class CriticNetwork(Network):
+
+    def call(self, *inputs, training=None, **kwargs):
+        return super().call(inputs, training=training, **kwargs)
+
+    def structure(self, inputs: Dict[str, Input], name='DDPG-CriticNetwork', **kwargs) -> tuple:
+        state_in = inputs['state']
+        action_in = inputs['action']
+
+        # preprocessing
+        preproc_in = self.apply_preprocessing(inputs, preprocess=kwargs.pop('preprocess', None))
+
+        # x = Concatenate()([state_in, action_in])
+        x = Concatenate()([preproc_in['state'], preproc_in['action']])
+        x = backbones.dense(x, **kwargs)
+
+        out = self.output_layer(x, **self.output_kwargs)
+        return (state_in, action_in), out, name
+
+    def output_layer(self, layer: Layer, **kwargs) -> Layer:
+        return Dense(units=self.agent.num_actions, name='q-values', **kwargs)(layer)
+
+    def get_inputs(self) -> Dict[str, Input]:
+        inputs = super().get_inputs()
+        inputs['action'] = Input(shape=(self.agent.num_actions,), name='action', dtype=tf.float32)
+        return inputs
+
+    @tf.function
+    def objective(self, batch: dict, reduction=tf.reduce_mean) -> tuple:
+        q_values = self((batch['state'], batch['action']), training=True)
+        q_targets, debug = self.targets(batch)
+        td_error = q_values - q_targets
+
+        if self.agent.prioritized:
+            # inform agent's memory about td-error, to later update priorities;
+            # compared to DQN, we take the mean over the action-axis
+            self.agent.memory.td_error.assign(tf.stop_gradient(tf.reduce_mean(td_error, axis=-1)))
+
+            loss = 0.5 * reduction(tf.square(td_error * batch['_weights']))
+        else:
+            loss = 0.5 * reduction(tf.square(td_error))
+
+        debug.update(loss=loss, q_values=q_values, td_error=td_error)
+
+        if '_weights' in batch:
+            debug['weights_IS'] = batch['_weights']
+            debug['td_error_weighted'] = tf.stop_gradient(td_error * batch['_weights'])
+
+        return loss, debug
+
+    @tf.function
+    def targets(self, batch: dict):
+        next_states = batch['next_state']
+
+        argmax_a = self.agent.actor.target(next_states, training=False)
+        q_values = self.target((next_states, argmax_a), training=False)
+
+        targets = batch['reward'] + self.agent.gamma * q_values * (1.0 - batch['terminal'])
+        targets = tf.stop_gradient(targets)
+
+        return targets, dict(next_actions=argmax_a, next_q_values=q_values, targets=targets)
 
 
 class DDPG(Agent):
-    def __init__(self, *args, optimizer='adam', actor_lr: utils.DynamicType = 1e-4, critic_lr: utils.DynamicType = 1e-3,
-                 memory_size=1024, name='ddpg-agent', actor: dict = None, critic: dict = None, load=False,
-                 clip_norm: utils.DynamicType = None, polyak: utils.DynamicType = 0.999, optimization_steps=1,
-                 noise: utils.DynamicType = 0.05, prioritized=False, alpha: utils.DynamicType = 0.6,
-                 beta: utils.DynamicType = 0.4, **kwargs):
-        assert optimization_steps >= 1
 
+    def __init__(self, *args, name='ddpg', actor_lr: utils.DynamicType = 1e-4, critic_lr: utils.DynamicType = 1e-3,
+                 optimizer='adam', actor: dict = None, critic: dict = None, clip_norm=(None, None), polyak=0.95,
+                 memory_size=1024, noise: utils.DynamicType = 0, prioritized=False,
+                 alpha: utils.DynamicType = 0.6, beta: utils.DynamicType = 0.1, **kwargs):
+        assert 0.0 < polyak <= 1.0
         super().__init__(*args, name=name, **kwargs)
 
-        # Hyper-parameters
+        # hyper-parameters
         self.memory_size = int(memory_size)
-        self.clip_norm = self._init_clip_norm(clip_norm)
-        self.polyak = DynamicParameter.create(value=polyak)
-        self.optimization_steps = int(optimization_steps)
-        self.noise = DynamicParameter.create(value=noise)
-        self.prioritized = bool(prioritized)
-
         self.critic_lr = DynamicParameter.create(value=critic_lr)
         self.actor_lr = DynamicParameter.create(value=actor_lr)
+        self.polyak = float(polyak)
+        self.noise = DynamicParameter.create(value=noise)
+        self.prioritized = bool(prioritized)
 
         # PER memory params:
         if self.prioritized:
@@ -46,213 +126,169 @@ class DDPG(Agent):
                                  critic=os.path.join(self.base_path, 'critic'))
 
         self.actor = Network.create(agent=self, target=True, log_prefix='actor', **(actor or {}),
-                                    base_class='DDPG-ActorNetwork')
-        self.critic = Network.create(agent=self, log_prefix='critic', **(critic or {}), base_class='DDPG-CriticNetwork')
+                                    base_class=ActorNetwork)
 
-        self.actor.compile(optimizer, clip_norm=self.clip_norm[0], clip=self.clip_grads, learning_rate=self.actor_lr)
-        self.critic.compile(optimizer, clip_norm=self.clip_norm[1], clip=self.clip_grads, learning_rate=self.critic_lr)
+        self.critic = Network.create(agent=self, target=True, log_prefix='critic', **(critic or {}),
+                                     base_class=CriticNetwork)
 
-        if load:
-            self.load()
+        self.actor.compile(optimizer, clip_norm=clip_norm[0], clip=self.clip_grads, learning_rate=self.actor_lr)
+        self.critic.compile(optimizer, clip_norm=clip_norm[1], clip=self.clip_grads, learning_rate=self.critic_lr)
 
     @property
     def transition_spec(self) -> TransitionSpec:
-        if self.distribution_type == 'categorical':
-            action_shape = (self.num_classes,)
-        else:
-            action_shape = (self.num_actions,)
+        return TransitionSpec(state=self.state_spec, next_state=True, action=self.num_actions, terminal=True)
 
-        return TransitionSpec(state=self.state_spec, next_state=True, action=action_shape)
+    def define_memory(self) -> Union[ReplayMemory, PrioritizedMemory]:
+        if self.prioritized:
+            return PrioritizedMemory(self.transition_spec, shape=self.memory_size, gamma=self.gamma,
+                                     alpha=self.alpha, beta=self.beta, seed=self.seed)
 
-    @property
-    def memory(self) -> Union[ReplayMemory, PrioritizedMemory]:
-        if self._memory is None:
-            if self.prioritized:
-                self._memory = PrioritizedMemory(self.transition_spec, shape=self.memory_size, alpha=self.alpha,
-                                                 beta=self.beta, seed=self.seed)
-            else:
-                self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size, seed=self.seed)
-
-        return self._memory
-
-    def _init_clip_norm(self, clip_norm):
-        if clip_norm is None:
-            return None, None
-
-        if isinstance(clip_norm, float) or isinstance(clip_norm, int):
-            return clip_norm, clip_norm
-
-        if isinstance(clip_norm, tuple):
-            assert len(clip_norm) > 0
-
-            if len(clip_norm) < 2:
-                return clip_norm[0], clip_norm[0]
-            else:
-                return clip_norm
-
-        raise ValueError(f'Parameter "clip_norm" should be `int`, `float` or `tuple` not {type(clip_norm)}.')
+        return ReplayMemory(self.transition_spec, shape=self.memory_size, seed=self.seed)
 
     def _init_action_space(self):
-        super()._init_action_space()
+        action_space = self.env.action_space
 
-        if self.distribution_type == 'categorical':
-            def convert_action(logits):
-                actions = tf.argmax(logits, axis=-1)
-                return tf.cast(tf.squeeze(actions), dtype=tf.int32).numpy()
+        assert isinstance(action_space, gym.spaces.Box)
+        assert action_space.is_bounded()
 
-            self.convert_action = convert_action
+        self.action_low = tf.constant(action_space.low, dtype=tf.float32)
+        self.action_high = tf.constant(action_space.high, dtype=tf.float32)
+        self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
 
-        elif self.distribution_type == 'beta':
-            action_range = self.action_range
-            action_low = self.action_low
+        self.num_actions = action_space.shape[0]
 
-            def convert_action(action):
-                # action comes from a `tanh` output, so lying within [-1, 1]
-                action = tf.clip_by_value(action, -1.0, 1.0)
-                action = (action + 1.0) / 2.0  # transform to [0, 1] (as Beta would do)
-                return tf.squeeze(action * action_range + action_low).numpy()
+        # `a` \in (-1, 1), so add 1 and divide by 2 (to rescale in 0-1)
+        self.convert_action = lambda a: tf.squeeze((a + 1.0) / 2.0 * self.action_range + self.action_low).numpy()
 
-            self.convert_action = convert_action
+    def act(self, state, deterministic=False, **kwargs) -> Tuple[tf.Tensor, dict, dict]:
+        greedy_action = self.actor(state, **kwargs)
+        debug = {}
 
-    # @tf.function
-    def act(self, state) -> Tuple[tf.Tensor, dict, dict]:
-        action = self.actor(state, training=True)
+        if (not deterministic) and (self.noise.value > 0.0):
+            # add random noise for exploration
+            noise = tf.random.normal(shape=greedy_action.shape, stddev=self.noise(), seed=self.seed)
+            action = tf.clip_by_value(greedy_action + noise, clip_value_min=-1.0, clip_value_max=1.0)
 
-        if self.noise.value > 0.0:
-            noise = tf.random.normal(shape=action.shape, stddev=self.noise(), seed=self.seed)
-            debug = dict(noise=noise, noise_std=self.noise.value, action_without_noise=action)
-        else:
-            debug = {}
-            noise = 0.0
+            debug.update(noise=noise, noise_std=self.noise.value,
+                         noise_ratio=tf.reduce_mean(tf.abs((greedy_action - action) / self.action_range)))
+            return action, {}, debug
 
-        # TODO: should clip actions + noise?
-        return action + noise, {}, debug
+        return greedy_action, {}, debug
 
+    @tf.function
     def act_randomly(self, state) -> Tuple[tf.Tensor, dict, dict]:
-        if self.distribution_type == 'categorical':
-            # sample `logits` instead of actions
-            action = tf.random.uniform(shape=(self.num_classes,), seed=self.seed)
+        action = self.actor(state)
 
-        elif self.distribution_type == 'beta':
-            action = tf.random.uniform(shape=(self.num_actions,), minval=-1.0, maxval=1.0, seed=self.seed)
-        else:
-            action = tf.random.normal(shape=(self.num_actions,), seed=self.seed)
+        # add random noise for exploration
+        noise = tf.random.normal(shape=action.shape, stddev=self.noise(), seed=self.seed)
+        action = tf.clip_by_value(action + noise, clip_value_min=-1.0, clip_value_max=1.0)
 
         return action, {}, {}
-
-    def update(self):
-        if not self.memory.full_enough(amount=self.batch_size):
-            return self.memory.update_warning(self.batch_size)
-
-        for _ in range(self.optimization_steps):
-            batch = self.memory.sample(batch_size=self.batch_size)
-
-            self.critic.train_step(batch)
-            self.actor.train_step(batch)
-
-            self.update_target_networks()
-
-            if self.prioritized:
-                self.memory.update_priorities()
-
-    def update_target_networks(self):
-        if self.polyak.value < 1.0:
-            self.actor.update_target_network(polyak=self.polyak())
-            self.critic.update_target_network(polyak=self.polyak.value)
 
     def learn(self, *args, **kwargs):
         with utils.Timed('Learn'):
             super().learn(*args, **kwargs)
 
-    def on_transition(self, transition: dict, timestep: int, episode: int, exploration=False):
-        super().on_transition(transition, timestep, episode, exploration)
+    def update(self):
+        batch = self.memory.get_batch(batch_size=self.batch_size)
+
+        self.critic.train_step(batch)
+        self.actor.train_step(batch)
+
+        self.update_target_networks()
+
+    def update_target_networks(self):
+        self.critic.update_target_network(polyak=self.polyak)
+        self.actor.update_target_network(polyak=self.polyak)
+
+        self.log(target_actor_distance=self.actor.debug_target_network(),
+                 target_critic_distance=self.critic.debug_target_network())
+
+    def on_transition(self, *args, exploration=False):
+        super().on_transition(*args, exploration=exploration)
 
         if not exploration:
             self.update()
 
-    def save_weights(self):
-        self.actor.save_weights(filepath=self.weights_path['actor'])
-        self.critic.save_weights(filepath=self.weights_path['critic'])
-
-    def load_weights(self):
-        self.actor.load_weights(filepath=self.weights_path['actor'], by_name=False)
-        self.critic.load_weights(filepath=self.weights_path['critic'], by_name=False)
-
-    def summary(self):
-        self.actor.summary()
-        self.critic.summary()
-
-
-@Network.register(name='DDPG-ActorNetwork')
-class ActorNetwork(DeterministicPolicyNetwork):
-
-    @tf.function
-    def objective(self, batch: dict, reduction=tf.reduce_mean) -> tuple:
-        states = batch['state']
-        actions = self(states, training=True)
-
-        q_values = self.agent.critic(states, actions, training=False)
-        loss = -reduction(q_values)
-
-        return loss, dict(loss=loss, actions=actions, q_values=q_values)
-
-
-@Network.register(name='DDPG-CriticNetwork')
-class CriticNetwork(QNetwork):
-
-    def call(self, *inputs, training=None, **kwargs):
-        return super().call(inputs, actions=None, training=training)
-
-    def act(self, inputs):
-        raise NotImplementedError
-
-    def structure(self, inputs: Dict[str, Input], name='CriticNetwork', **kwargs) -> tuple:
-        utils.remove_keys(kwargs, ['dueling', 'operator', 'prioritized'])
-        state_in = inputs['state']
-
-        if self.agent.distribution_type == 'categorical':
-            action_in = Input(shape=(self.agent.num_classes,), name='action', dtype=tf.float32)
-        else:
-            action_in = Input(shape=(self.agent.num_actions,), name='action', dtype=tf.float32)
-
-        x = backbones.dense_branched(state_in, action_in, **kwargs)
-
-        output = self.output_layer(**self.output_args)(x)
-        return (state_in, action_in), output, name
-
-    @tf.function
-    def objective(self, batch: dict, reduction=tf.reduce_mean) -> tuple:
-        q_values = self(batch['state'], batch['action'], training=True)
-        targets, debug = self.targets(batch)
-
-        loss = reduction(tf.square(targets - q_values))
-        debug.update(loss=loss, q_values=q_values)
-
-        return loss, debug
-
-    @tf.function
-    def targets(self, batch):
-        next_actions = self.agent.actor.target(batch['next_state'], training=False)
-        next_q_values = self.target(batch['next_state'], next_actions, training=False)
-
-        targets = tf.stop_gradient(batch['reward'] + self.agent.gamma * (1.0 - batch['terminal']) * next_q_values)
-
-        return targets, dict(next_actions=next_actions, next_q_values=next_q_values, targets=targets)
-
-    def output_layer(self, **kwargs) -> Layer:
-        if self.agent.distribution_type == 'categorical':
-            return Dense(units=self.agent.num_classes, name='q-values', **kwargs)
-
-        return Dense(units=self.agent.num_actions, name='q-values', **kwargs)
+    def save_weights(self, path: str):
+        self.critic.save_weights(filepath=os.path.join(path, 'critic'))
+        self.actor.save_weights(filepath=os.path.join(path, 'actor'))
+    #
+    # def load_weights(self):
+    #     self.actor.load_weights(filepath=self.weights_path['actor'], by_name=False)
+    #     self.critic.load_weights(filepath=self.weights_path['critic'], by_name=False)
+    #
+    # def summary(self):
+    #     self.actor.summary()
+    #     self.critic.summary()
 
 
 if __name__ == '__main__':
-    env1 = 'LunarLanderContinuous-v2'
-    env2 = 'CartPole-v0'
+    utils.tf_enable_debug()
+    utils.set_random_seed(42)
 
-    actor = dict(units=32, output=dict(kernel_initializer='glorot_uniform', bias_initializer='zeros'))
+    # agent = DDPG(env='Pendulum-v1', actor_lr=1e-3, critic_lr=1e-3, polyak=0.995,
+    #              memory_size=100_000, batch_size=256, name='ddpg-pendulum', use_summary=False,
+    #              actor=dict(units=256), critic=dict(units=256), noise=0.1)
+    #
+    # # fix specific to pendulum env
+    # agent._convert_action = agent.convert_action
+    # agent.convert_action = lambda a: np.reshape(agent._convert_action(a), newshape=[1])
+    #
+    # agent.learn(episodes=150, timesteps=200, evaluation=dict(freq=10, episodes=10),
+    #             exploration_steps=5 * agent.batch_size, save=False)
 
-    a = DDPG(env=env2, batch_size=64, name='ddpg-cart', noise=0.01, use_summary=True,
-             actor=actor, critic=dict(units=[64, 16]), memory_size=4096, polyak=0.995, prioritized=True,
-             optimization_steps=1, clip_norm=1.0, critic_lr=1e-3, reward_scale=1.0 / 4, seed=42)
-    a.learn(250, 200, exploration_steps=4096)
+    from rl.parameters import StepDecay
+
+    # achieves > 100 reward
+    # agent = DDPG(env='LunarLanderContinuous-v2', seed=42,
+    #              actor_lr=1e-3, critic_lr=1e-3, polyak=0.995,
+    #              memory_size=256_000, batch_size=128, name='ddpg-lunar_c', use_summary=True,
+    #              actor=dict(units=64), critic=dict(units=64),
+    #              noise=StepDecay(0.1, steps=50, rate=0.5))
+
+    from rl.layers.preprocessing import StandardScaler, MinMaxScaling
+    preprocess = dict(state=StandardScaler(eps=1e-5))
+    preprocess2 = dict(state=MinMaxScaling(min_value=-2, max_value=2))
+
+    # try more training (reward > -80)
+    agent = DDPG(env='LunarLanderContinuous-v2', seed=42,
+                 actor_lr=1e-3, critic_lr=1e-3, polyak=0.995,
+                 memory_size=256_000, batch_size=128, name='ddpg-lunar_c', use_summary=False,
+                 actor=dict(units=64, preprocess=preprocess),
+                 critic=dict(units=64, preprocess=preprocess),
+                 noise=StepDecay(0.1, steps=100, rate=0.5))
+
+    agent.learn(episodes=250 + 100, timesteps=200, evaluation=dict(freq=10-9, episodes=25-22),
+                exploration_steps=5 * agent.batch_size, save=True)
+
+    # more training
+    # agent = DDPG(env='LunarLanderContinuous-v2', seed=42,
+    #              actor_lr=3e-3, critic_lr=3e-3, polyak=0.999,
+    #              memory_size=256_000, batch_size=128, name='ddpg-lunar_c', use_summary=True,
+    #              actor=dict(units=64, kernel_initializer='orthogonal', preprocess=preprocess),
+    #              critic=dict(units=64, kernel_initializer='orthogonal', preprocess=preprocess),
+    #              noise=StepDecay(0.1, steps=100, rate=0.5))
+
+    agent = DDPG(env='LunarLanderContinuous-v2', seed=42,
+                 actor_lr=3e-3, critic_lr=3e-3, polyak=0.999,
+                 memory_size=256_000, batch_size=128, name='ddpg-lunar_c', use_summary=True,
+                 actor=dict(units=64, preprocess=preprocess2),
+                 critic=dict(units=64, preprocess=preprocess2),
+                 noise=StepDecay(0.1, steps=100, rate=0.5))
+
+    # agent = DDPG(env='LunarLanderContinuous-v2', seed=42,
+    #              actor_lr=1e-3, critic_lr=1e-3, polyak=0.995, prioritized=True,
+    #              memory_size=256_000, batch_size=128, name='ddpg-lunar_c', use_summary=True,
+    #              actor=dict(units=64), critic=dict(units=64),
+    #              noise=StepDecay(0.1, steps=50, rate=0.5))
+
+    # agent = DDPG(env='LunarLanderContinuous-v2', seed=42,
+    #              actor_lr=1e-3, critic_lr=1e-3, polyak=0.9999, prioritized=True,
+    #              memory_size=256_000, batch_size=128, name='ddpg-lunar_c', use_summary=True,
+    #              actor=dict(units=64, preprocess=preprocess),
+    #              critic=dict(units=64, preprocess=preprocess),
+    #              noise=StepDecay(0.2, steps=50, rate=0.5))
+
+    agent.learn(episodes=250 + 100, timesteps=200, evaluation=dict(freq=10, episodes=25),
+                exploration_steps=5 * agent.batch_size, save=True)

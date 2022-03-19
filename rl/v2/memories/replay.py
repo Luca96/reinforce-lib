@@ -25,8 +25,6 @@ class ReplayMemory(Memory):
         batch = dict()
 
         # random indices
-        # indices = tf.range(start=0, limit=self.current_size, dtype=tf.int32)
-        # indices = tf.random.shuffle(indices, seed=self.seed)[:batch_size]
         indices = self.random.choice(self.current_size, size=batch_size, replace=False)
 
         for key, value in self.data.items():
@@ -34,16 +32,12 @@ class ReplayMemory(Memory):
 
         return batch
 
-    def _gather(self, value, indices: tf.Tensor) -> Union[tf.Tensor, dict]:
+    def _gather(self, value: np.ndarray, indices: np.ndarray) -> Union[np.ndarray, dict]:
         if not isinstance(value, dict):
-            return tf.gather(value, indices)
+            # return tf.gather(value, indices)
+            return value[indices]
 
-        tensors = dict()
-
-        for k, v in value.items():
-            tensors[k] = self._gather(value=v, indices=indices)
-
-        return tensors
+        return {k: self._gather(value=v, indices=indices) for k, v in value.items()}
 
 
 class NStepMemory(ReplayMemory):
@@ -51,9 +45,7 @@ class NStepMemory(ReplayMemory):
 
     def __init__(self, *args, gamma: float, **kwargs):
         super().__init__(*args, **kwargs)
-
-        if 'return' in self.data:
-            raise ValueError('Key "return" is reserved!')
+        self.assert_reserved(keys=['return'])
 
         self.data['return'] = np.zeros_like(self.data['reward'])
         self.gamma = gamma
@@ -81,17 +73,22 @@ class NStepMemory(ReplayMemory):
 
 
 # TODO: use "sum-tree structure" when memory size is large (> 4/8/16k ?)
-class PrioritizedMemory(ReplayMemory):
+#  https://adventuresinmachinelearning.com/sumtree-introduction-python/
+class PrioritizedMemory(NStepMemory):
     """Prioritized Experience Replay (PER) memory, proportional-variant
         - Based on https://github.com/BY571/Soft-Actor-Critic-and-Extensions/blob/master/SAC_PER.py
     """
 
     def __init__(self, *args, alpha: DynamicParameter, beta: DynamicParameter, **kwargs):
+        """Arguments:
+            - alpha: if 0 => uniform sampling, 1 => prioritized sampling.
+            - beta: if 0 => no IS-weights correction, 1 => full bias correction.
+        """
         super().__init__(*args, **kwargs)
 
         self.alpha = alpha
         self.beta = beta
-        self.priorities = np.ones(shape=self.size, dtype=np.float32)
+        self.priorities = np.ones(shape=self.size, dtype=np.float64)
 
         self.indices = None
         self.weights = None
@@ -111,24 +108,24 @@ class PrioritizedMemory(ReplayMemory):
         self.td_error = self._get_var(batch_size)
 
         # sample transitions according to priority
-        prob = self.priorities[:size] ** float(self.alpha())
-        prob /= prob.sum()
-        prob = np.nan_to_num(prob, nan=0.0, posinf=0.0, neginf=0.0)
+        probs = self.priorities[:size] ** float(self.alpha())
+        probs /= probs.sum()
+        probs = np.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
 
-        indices = self.random.choice(size, size=batch_size, replace=False, p=prob)
+        indices = self.random.choice(size, size=batch_size, replace=False, p=probs)
         self.indices = indices
 
         for key, value in self.data.items():
             batch[key] = self._gather(value, indices)
 
         # Importance-sampling weights
-        weights = (size * prob[indices]) ** float(-self.beta())
+        weights = (size * probs[indices]) ** float(-self.beta())
         weights /= weights.max()
 
         if '_weights' in batch:
             raise ValueError('Key "_weights" is reserved for `PrioritizedMemory`.')
 
-        batch['_weights'] = tf.expand_dims(weights, axis=-1)
+        batch['_weights'] = tf.expand_dims(tf.cast(weights, dtype=tf.float32), axis=-1)
         return batch
 
     def on_update(self):
@@ -143,6 +140,7 @@ class PrioritizedMemory(ReplayMemory):
         self.priorities[self.indices] = np.abs(self.td_error.value()) + eps
 
 
+# TODO: test
 class EmphasizingMemory(ReplayMemory):
     """Emphasizing Experience Replay (ERE) memory
         - Based on https://github.com/BY571/Soft-Actor-Critic-and-Extensions/blob/master/SAC_ERE_PER.py

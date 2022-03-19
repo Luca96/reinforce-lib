@@ -22,12 +22,18 @@ StrideType = KernelType
 # TODO: learn about FourierBasis networks:
 #  - https://github.com/google/dopamine/blob/master/dopamine/discrete_domains/gym_lib.py#L162
 #  - Value Function Approximation in Reinforcement Learning using the Fourier Basis (2011)
-def dense(layer: Layer, units=32, num_layers=2, activation='relu', normalization=None, normalize_input=False,
-          use_bias=True, bias_initializer='glorot_uniform', kernel_initializer='glorot_normal', dropout=0.0,
-          weight_decay=0.0, noisy=False, sigma=0.5, noise='factorized', **kwargs) -> Layer:
+def dense(layer: Layer, units: Union[List[int], int] = 32, num_layers=2, activation='relu', normalization=None,
+          normalize_input=False, use_bias=True, bias_initializer='glorot_uniform', kernel_initializer='glorot_normal',
+          dropout=0.0, weight_decay=0.0, noisy=False, sigma=0.5, noise='factorized', **kwargs) -> Layer:
     """Feed-Forward Neural Network architecture with one input"""
     assert num_layers >= 1
     assert weight_decay >= 0.0
+
+    if isinstance(units, list):
+        num_layers = len(units)
+        assert num_layers >= 1
+    else:
+        units = [units] * int(num_layers)
 
     if normalize_input:
         x = utils.apply_normalization(layer, name=normalization)
@@ -39,12 +45,14 @@ def dense(layer: Layer, units=32, num_layers=2, activation='relu', normalization
     else:
         weight_decay = None
 
-    for _ in range(num_layers):
+    for unit in units:
+        unit = int(unit)
+
         if noisy:
-            x = NoisyDense(units, activation=activation, use_bias=use_bias, bias_initializer=bias_initializer,
+            x = NoisyDense(unit, activation=activation, use_bias=use_bias, bias_initializer=bias_initializer,
                            kernel_initializer=kernel_initializer, sigma=sigma, noise=noise, **kwargs)(x)
         else:
-            x = Dense(units, activation=activation, use_bias=use_bias, bias_initializer=bias_initializer,
+            x = Dense(unit, activation=activation, use_bias=use_bias, bias_initializer=bias_initializer,
                       kernel_initializer=kernel_initializer, kernel_regularizer=weight_decay, **kwargs)(x)
 
         if dropout > 0.0:

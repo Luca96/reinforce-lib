@@ -12,10 +12,9 @@ def ppo_cartpole_test(b=20, seed=42, seeds=(42, 31, 91)):
     utils.print_info(env)
 
     for seed in seeds:
-        # TODO: test with lambda=1
         agent = PPOAgent(env, name='ppo-cartPole-baseline2',
                          # policy_lr=1e-3 / 8,
-                         policy_lr=StepDecay(1e-3, decay_rate=0.5, decay_steps=80, min_value=1e-7),
+                         policy_lr=StepDecay(1e-3, rate=0.5, steps=80, min_value=1e-7),
                          value_lr=3e-4, clip_ratio=0.20,
                          optimization_steps=(1, 2), batch_size=b,
                          shuffle=True,
@@ -39,8 +38,8 @@ def ppo_lunar_lander_discrete(e=200, t=200, b=20, load=False, evaluate=False):
     utils.print_info(env)
 
     agent = PPOAgent(env,
-                     policy_lr=ExponentialDecay(1e-3, decay_steps=2000, decay_rate=0.95, staircase=True),
-                     value_lr=ExponentialDecay(3e-4, decay_steps=2000, decay_rate=0.95, staircase=True),
+                     policy_lr=ExponentialDecay(1e-3, steps=2000, rate=0.95, staircase=True),
+                     value_lr=ExponentialDecay(3e-4, steps=2000, rate=0.95, staircase=True),
                      clip_ratio=0.20, entropy_regularization=0.01, name='ppo-LunarLander-discrete',
                      optimization_steps=(2, 2), batch_size=b, clip_norm=(0.5, 0.5),
                      network=dict(value=dict(components=3)),
@@ -78,7 +77,7 @@ def ppo_lunar_lander(e: int, t: int, b: int, load=False, save_every='end'):
     agent = PPOAgent(env, name='ppo-LunarLander',
                      # decay at 100~120 (original: 80 * 3)
                      # also decay value (every 200~250 or more?)
-                     policy_lr=StepDecay(1e-3, decay_rate=0.5, decay_steps=85, min_value=1e-7),
+                     policy_lr=StepDecay(1e-3, rate=0.5, steps=85, min_value=1e-7),
                      value_lr=3e-4, clip_ratio=0.20, lambda_=0.99,
                      optimization_steps=(1 + 1, 2 - 1), batch_size=b,
                      shuffle=True, polyak=0.999,
@@ -134,8 +133,8 @@ def ppo_car_racing_discrete(e: int, t: int, b: int, load=False):
             return shufflenet_v2(inputs['state'], leak=0.0, linear_units=last_units, **kwargs)
 
     agent = PPOAgent(CarRacingDiscrete(bins=8),
-                     policy_lr=ExponentialDecay(1e-3, decay_steps=100, decay_rate=0.95, staircase=True),
-                     value_lr=ExponentialDecay(1e-3, decay_steps=200, decay_rate=0.95, staircase=True),
+                     policy_lr=ExponentialDecay(1e-3, steps=100, rate=0.95, staircase=True),
+                     value_lr=ExponentialDecay(1e-3, steps=200, rate=0.95, staircase=True),
                      clip_ratio=0.10,
                      entropy_regularization=-1.0,
                      name='ppo-CarRacing-discrete',

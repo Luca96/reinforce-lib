@@ -22,6 +22,9 @@ class TransitionSpec:
                 self.specs['next_state'] = self.specs['state']
 
         if action is not None:
+            if isinstance(action, dict) and list(action.keys()) == ['action']:
+                action = action['action']
+
             self.specs['action'] = self.get_spec(spec=action)
 
         if reward is True:
@@ -64,6 +67,9 @@ class TransitionSpec:
     def get_spec(self, spec) -> dict:
         if isinstance(spec, tuple):
             return dict(shape=spec, dtype=np.float32)
+
+        elif isinstance(spec, (int, float)):
+            return dict(shape=(spec,), dtype=np.float32)
 
         elif isinstance(spec, dict):
             if 'shape' in spec:

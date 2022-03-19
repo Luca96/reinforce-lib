@@ -1,6 +1,8 @@
 """Deep Q-Learning (DQN) with Experience Replay"""
 
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
 import gym
 import numpy as np
 import tensorflow as tf
@@ -17,24 +19,22 @@ from rl.v2.networks.q import Network, QNetwork, DoubleQNetwork
 
 class DQN(Agent):
     # TODO: non-terminating summary issue
-    # TODO: `cumulative_gamma = tf.pow(gamma, horizon)` ?
-    # TODO: n_step (horizon) updates
-    def __init__(self, *args, name='dqn-agent', lr: utils.DynamicType = 3e-4, optimizer: Union[dict, str] = 'adam',
-                 policy='e-greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = None, load=False,
+    def __init__(self, *args, name='dqn-cart_v1', lr: utils.DynamicType = 3e-4, optimizer: Union[dict, str] = 'adam',
+                 policy='e-greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = None,
                  update_target_network: Union[bool, int] = False, polyak: utils.DynamicType = 0.995, double=True,
                  network: dict = None, dueling=True, horizon=1, prioritized=False, alpha: utils.DynamicType = 0.6,
-                 beta: utils.DynamicType = 0.4, memory_size=1024, **kwargs):
+                 beta: utils.DynamicType = 0.1, memory_size=1024, **kwargs):
         assert horizon >= 1
         assert policy.lower() in ['boltzmann', 'boltzmann2', 'softmax', 'e-greedy', 'greedy']
         super().__init__(*args, name=name, **kwargs)
 
-        self.memory_size = memory_size
-        # self.policy = policy.lower()
+        self.memory_size = int(memory_size)
         self.policy_fn = self._init_policy(policy=policy.lower())
-        self.epsilon = DynamicParameter.create(value=epsilon)
+        self.epsilon = DynamicParameter.create(value=epsilon)  # or `temperature` for "softmax" and "boltzmann"
         self.polyak = DynamicParameter.create(value=polyak)
         self.prioritized = bool(prioritized)
         self.horizon = int(horizon)
+        self.rng = utils.get_random_generator(seed=self.seed)
 
         # PER memory params:
         if self.prioritized:
@@ -61,26 +61,18 @@ class DQN(Agent):
 
         self.dqn.compile(optimizer, clip_norm=clip_norm, clip=self.clip_grads, learning_rate=self.lr)
 
-        if load:
-            self.load()
-
     @property
     def transition_spec(self) -> TransitionSpec:
         return TransitionSpec(state=self.state_spec, next_state=True, action=(self.num_actions,))
 
-    @property
-    def memory(self) -> Union[ReplayMemory, PrioritizedMemory]:
-        if self._memory is None:
-            if self.prioritized:
-                self._memory = PrioritizedMemory(self.transition_spec, shape=self.memory_size, alpha=self.alpha,
-                                                 beta=self.beta, seed=self.seed)
-            else:
-                # self._memory = ReplayMemory(self.transition_spec, shape=self.memory_size, seed=self.seed)
-                self._memory = NStepMemory(self.transition_spec, shape=self.memory_size, gamma=self.gamma,
-                                           seed=self.seed)
-        return self._memory
+    def define_memory(self) -> Union[ReplayMemory, PrioritizedMemory]:
+        if self.prioritized:
+            return PrioritizedMemory(self.transition_spec, shape=self.memory_size, gamma=self.gamma,
+                                     alpha=self.alpha, beta=self.beta, seed=self.seed)
 
-    # TODO: add `MultiDiscrete` action-space support
+        return NStepMemory(self.transition_spec, shape=self.memory_size, gamma=self.gamma, seed=self.seed)
+
+    # TODO: add `MultiDiscrete/Binary` action-space support
     def _init_action_space(self):
         assert isinstance(self.env.action_space, gym.spaces.Discrete)
 
@@ -101,67 +93,16 @@ class DQN(Agent):
 
         return self._deterministic_policy
 
-    def act(self, state) -> Tuple[tf.Tensor, dict, dict]:
-        return self.policy_fn(state)
+    def act(self, state, deterministic=False, **kwargs) -> Tuple[tf.Tensor, dict, dict]:
+        if deterministic:
+            return self._deterministic_policy(state, **kwargs)
 
-    # def act(self, state):
-    #     other, debug = None, {}
-    #
-    #     if self.policy == 'boltzmann':
-    #         q_values = self.dqn.q_values(state)
-    #         exp_q = tf.exp(tf.minimum(q_values, 80.0))  # clip to prevent tf.exp go to "inf"
-    #         action = tf.random.categorical(logits=exp_q, num_samples=1, seed=self.seed)
-    #         debug['exp_q_values'] = exp_q
-    #
-    #     elif self.policy == 'boltzmann2':
-    #         q_values = self.dqn.q_values(state)
-    #         q_max = tf.reduce_max(q_values)
-    #
-    #         if q_max >= 0.0:
-    #             if q_max <= utils.TF_EPS:
-    #                 logits = tf.exp(q_values / (q_max + 1.0))
-    #             else:
-    #                 logits = tf.exp(q_values)
-    #         else:
-    #             # negative
-    #             if q_max >= -1:
-    #                 logits = tf.exp(q_values - (q_max + 1.0))
-    #             else:
-    #                 logits = tf.exp(q_values)
-    #
-    #         action = tf.random.categorical(logits=logits, num_samples=1, seed=self.seed)
-    #         debug['exp_q_values'] = logits
-    #
-    #     elif self.policy == 'softmax':
-    #         q_values = self.dqn.q_values(state)
-    #         action = tf.random.categorical(logits=q_values, num_samples=1, seed=self.seed)
-    #
-    #     elif self.policy == 'e-greedy':
-    #         eps = self.epsilon()
-    #
-    #         # compute probabilities for best action (a* = argmax Q(s,a)), and other actions (a != a*)
-    #         prob_other = tf.cast(eps / self.num_classes, dtype=tf.float32)
-    #         prob_best = 1.0 - eps + prob_other
-    #
-    #         q_values = self.dqn.q_values(state)
-    #         best_action = tf.squeeze(tf.argmax(q_values, axis=-1))
-    #
-    #         probs = np.full_like(q_values, fill_value=prob_other)
-    #         probs[0][best_action] = prob_best
-    #
-    #         action = tf.random.categorical(logits=probs, num_samples=1, seed=self.seed)
-    #         debug['prob_best'] = prob_best
-    #         debug['prob_other'] = prob_other
-    #     else:
-    #         # greedy (deterministic policy)
-    #         action = self.dqn.act(state)
-    #
-    #     return action, other, debug
+        return self.policy_fn(state, **kwargs)
 
     @tf.function
-    def _boltzmann_policy(self, state):
+    def _boltzmann_policy(self, state, **kwargs):
         """Boltzmann policy with tricks for numerical stability"""
-        q_values = self.dqn.q_values(state)
+        q_values = self.dqn.q_values(state, **kwargs)
         q_max = tf.reduce_max(q_values)
 
         if q_max >= 0.0:
@@ -178,8 +119,21 @@ class DQN(Agent):
 
         action = tf.random.categorical(logits=logits, num_samples=1, seed=self.seed)
         return action, {}, dict(exp_q_values=logits)
+    
+    # TODO: test vs `boltzmann`
+    @tf.function
+    def _boltzmann2_policy(self, state, **kwargs):
+        q_values = self.dqn.q_values(state, **kwargs)
+        temperature = self.epsilon()
 
-    def _epsilon_greedy_policy(self, state):
+        # normalize `q_values` for numerical stability
+        logits = q_values / (temperature + utils.TF_EPS)
+        logits = logits - tf.reduce_max(logits)
+
+        action = tf.random.categorical(logits=tf.exp(logits), num_samples=1, seed=self.seed)
+        return action, {}, {}
+
+    def _epsilon_greedy_policy(self, state, **kwargs):
         """Epsilon-greedy policy"""
         eps = self.epsilon()
 
@@ -187,26 +141,47 @@ class DQN(Agent):
         prob_other = tf.cast(eps / self.num_classes, dtype=tf.float32)
         prob_best = 1.0 - eps + prob_other
 
-        q_values = self.dqn.q_values(state)
+        q_values = self.dqn.q_values(state, **kwargs)
         best_action = tf.squeeze(tf.argmax(q_values, axis=-1))
 
         probs = np.full_like(q_values, fill_value=prob_other)
         probs[0][best_action] = prob_best
 
-        action = tf.random.categorical(logits=probs, num_samples=1, seed=self.seed)
+        # from `probs` obtain `logits` (= log-probs), since tf.random.categorical wants un-normalized probs.
+        logits = tf.math.log(probs)
+        action = tf.random.categorical(logits=logits, num_samples=1, seed=self.seed)
+
         return action, {}, dict(prob_best=prob_best, prob_other=prob_other)
 
-    @tf.function
-    def _softmax_policy(self, state):
-        """Similar to Boltzmann policy, except that q-values are not exponentiated to get the logits"""
-        q_values = self.dqn.q_values(state)
-        action = tf.random.categorical(logits=q_values, num_samples=1, seed=self.seed)
+    def _epsilon_greedy_policy2(self, state, **kwargs):
+        """Epsilon-greedy policy"""
+        if self.rng.random() > self.epsilon():
+            # greedy action
+            q_values = self.dqn.q_values(state, **kwargs)
+            action = tf.argmax(q_values, axis=-1)
+        else:
+            # random action (note: with prob e / |A| is can be still greedy)
+            action = self.rng.choice(len(self.num_classes))
+
         return action, {}, {}
 
     @tf.function
-    def _deterministic_policy(self, state):
+    def _softmax_policy(self, state, **kwargs):
+        """Similar to Boltzmann policy, except that q-values are not exponentiated to get the logits"""
+        q_values = self.dqn.q_values(state, **kwargs)
+        temperature = self.epsilon()  # 1 => no effect, should decay close to 0 (=> almost greedy selection)
+
+        # normalize `q_values` for numerical stability
+        logits = q_values / (temperature + utils.TF_EPS)
+        logits = logits - tf.reduce_max(logits)
+
+        action = tf.random.categorical(logits=logits, num_samples=1, seed=self.seed)
+        return action, {}, {}
+
+    @tf.function
+    def _deterministic_policy(self, state, **kwargs):
         """Deterministic/greedy/argmax policy: always takes action with higher q-value"""
-        return self.dqn.act(state), {}, {}
+        return self.dqn.act(state, **kwargs), {}, {}
 
     @tf.function
     def act_randomly(self, state) -> Tuple[tf.Tensor, dict, dict]:
@@ -227,54 +202,82 @@ class DQN(Agent):
             self.dqn.train_step(batch)
             self.memory.on_update()
 
-    # TODO: debug "distance" from target
     def update_target_network(self):
         if self.should_update_target:
             self.update_target_freq -= 1
 
             if self.update_target_freq == 0:
-                self.dqn.update_target_network(copy_weights=True)
+                self.dqn.update_target_network(polyak=self.polyak(), copy_weights=True)
                 self.update_target_freq = self._update_target_freq
             else:
-                self.dqn.update_target_network(copy_weights=False, polyak=self.polyak())
+                self.dqn.update_target_network(polyak=self.polyak(), copy_weights=False)
 
-    def on_transition(self, transition: dict, timestep: int, episode: int, exploration=False):
-        super().on_transition(transition, timestep, episode, exploration)
+        self.log(target_weight_distance=self.dqn.debug_target_network())
 
-        if (timestep % self.horizon == 0) or transition['terminal'] or (timestep == self.max_timesteps):
+    def on_transition(self, transition: dict, terminal, exploration=False):
+        super().on_transition(transition, terminal, exploration)
+
+        if (self.timestep % self.horizon == 0) or transition['terminal'] or (self.timestep == self.max_timesteps):
             self.memory.end_trajectory()
 
             if not exploration:
                 self.update()
                 self.update_target_network()
 
-    def save_weights(self):
-        self.dqn.save_weights(filepath=self.weights_path['dqn'])
+    # def save_weights(self, path: str):
+    #     self.dqn.save_weights(filepath=os.path.join(path, 'dqn'))
+    #
+    # def load_weights(self):
+    #     self.dqn.load_weights(filepath=self.weights_path['dqn'], by_name=False)
 
-    def load_weights(self):
-        self.dqn.load_weights(filepath=self.weights_path['dqn'], by_name=False)
-
-    def summary(self):
-        self.dqn.summary()
+    # def summary(self):
+    #     self.dqn.summary()
 
 
 if __name__ == '__main__':
-    from rl import parameters as p
-    from rl.presets import DQNPresets
+    from rl.parameters import StepDecay, LinearDecay
+    from rl.presets import Preset
+    from rl.layers.preprocessing import MinMaxScaling
+    utils.set_random_seed(42)
 
-    cart_min = DQNPresets.CARTPOLE_MIN
-    cart_max = DQNPresets.CARTPOLE_MAX
+    min_max_scaler = MinMaxScaling(min_value=Preset.CARTPOLE_MIN, max_value=Preset.CARTPOLE_MAX)
 
-    # mse
-    agent = DQN(env='CartPole-v0', batch_size=128, policy='boltzmann', memory_size=50_000,
-                name='dqn-cart', epsilon=0.01, lr=0.001,
-                network=dict(num_layers=2, units=64, min_max=(cart_min, cart_max), noisy=False),
-                reward_scale=1.0, prioritized=False, horizon=1, gamma=0.97,
-                polyak=1.0, update_target_network=100,
-                use_summary=not False, double=True, dueling=False, seed=42)
+    # [double+dueling] solved at episode 150
+    # agent = DQN(env='CartPole-v1', batch_size=128, policy='e-greedy', clip_norm=None,
+    #             epsilon=StepDecay(0.2, steps=100, rate=0.5), lr=1e-3, name='dqn-cart_v1',
+    #             dueling=True, prioritized=False, double=True, memory_size=50_000,
+    #             gamma=0.99, update_target_network=500, seed=42,
+    #             network=dict(units=64, preprocess=dict(state=min_max_scaler)))
 
-    # agent = DQN.from_preset(DQNPresets.CART_POLE, load=True)
-    agent.summary()
+    # # [double] solved at 160?
+    # agent = DQN(env='CartPole-v1', batch_size=128, policy='e-greedy', clip_norm=None,
+    #             epsilon=StepDecay(0.2, steps=100, rate=0.5), lr=1e-3, name='dqn-cart_v1',
+    #             dueling=False, prioritized=False, double=True, memory_size=50_000,
+    #             gamma=0.99, update_target_network=500, seed=42,
+    #             network=dict(units=64, preprocess=dict(state=min_max_scaler)))
 
-    agent.learn(episodes=500, timesteps=200, render=1000, exploration_steps=500,
-                evaluation=dict(episodes=50, freq=100))
+    # [DQN] solved at 90
+    agent = DQN(env='CartPole-v1', batch_size=128, policy='e-greedy', clip_norm=None,
+                epsilon=StepDecay(0.2, steps=100, rate=0.5), lr=1e-3, name='dqn-cart_v1',
+                dueling=False, prioritized=False, double=False, memory_size=50_000,
+                gamma=0.99, update_target_network=500, seed=42,
+                network=dict(units=64, preprocess=dict(state=min_max_scaler)))
+
+    # # DQN + PER: solved at episode 130
+    # agent = DQN(env='CartPole-v1', batch_size=128, policy='e-greedy', clip_norm=None,
+    #             epsilon=StepDecay(0.2, steps=100, rate=0.5), lr=1e-3, name='dqn_per-cart_v1',
+    #             dueling=False, double=False, use_summary=True,
+    #             prioritized=True, alpha=0.6, beta=0.1, memory_size=50_000,
+    #             gamma=0.99, update_target_network=500, seed=42,
+    #             network=dict(units=64, preprocess=dict(state=min_max_scaler)))
+
+    # agent.learn(episodes=200, timesteps=500, save=True, render=False,
+    #             evaluation=dict(episodes=20, freq=10), exploration_steps=512)
+
+    agent.load()
+
+    for i in range(20):
+        agent.env.seed(42 + i)
+        agent.record(timesteps=500)
+
+

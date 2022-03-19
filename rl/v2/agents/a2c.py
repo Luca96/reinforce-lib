@@ -1,322 +1,312 @@
-"""Synchronous Advantage Actor-Critic (A2C)"""
+"""Advantage Actor-Critic (A2C)"""
 
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
 import tensorflow as tf
 import numpy as np
 
 from rl import utils
 from rl.parameters import DynamicParameter
 
-from rl.v2.agents import ParallelAgent
+from rl.v2.agents.agents import ParallelAgent
+from rl.v2.agents.ppo import GlobalMemory
 from rl.v2.memories import TransitionSpec
-from rl.v2.memories.episodic import EpisodicMemory
-from rl.v2.networks import Network, ValueNetwork, PolicyNetwork
+from rl.v2.networks import Network, ValueNetwork
+from rl.v2.networks.policies import PolicyNetwork
 
-from typing import List, Tuple, Union, Dict
+from typing import Tuple, Union
 
 
-# TODO: check update method
+class ActorNetwork(PolicyNetwork):
+
+    # @tf.function
+    # def call(self, inputs, actions=None, **kwargs):
+    #     distribution = Network.call(self, inputs, **kwargs)
+    #
+    #     if isinstance(actions, dict) or tf.is_tensor(actions):
+    #         log_prob = distribution.log_prob(actions)
+    #         entropy = distribution.entropy()
+    #
+    #         if entropy is None:
+    #             # estimate entropy
+    #             entropy = -tf.reduce_mean(log_prob)
+    #
+    #         return log_prob, entropy
+    #
+    #     return tf.identity(distribution), distribution.mean(), distribution.stddev()
+
+    def structure(self, inputs, name='A2C-ActorNetwork', **kwargs) -> tuple:
+        return super().structure(inputs, name=name, **kwargs)
+
+
 class A2C(ParallelAgent):
-    """Sequential (single-process) implementation of A2C"""
+    """A2C agent"""
 
-    def __init__(self, env, name='a2c-agent', parallel_actors=16, horizon=5, entropy=0.01, load=False, gamma=0.99,
-                 optimizer='rmsprop', lambda_=1.0, normalize_advantages: Union[None, str] = 'sign', actor: dict = None,
-                 critic: dict = None, advantage_scale: utils.DynamicType = 1.0, actor_lr: utils.DynamicType = 7e-4,
-                 clip_norm: Tuple[utils.DynamicType] = (1.0, 1.0), critic_lr: utils.DynamicType = 7e-4, **kwargs):
+    def __init__(self, env, horizon: int, gamma=0.99, name='a2c-agent', optimizer='adam',
+                 actor_lr: utils.DynamicType = 1e-3, critic_lr: utils.DynamicType = 3e-4, clip_norm=(None, None),
+                 lambda_=1.0, num_actors=16, entropy: utils.DynamicType = 0.01, actor: dict = None, critic: dict = None,
+                 **kwargs):
         assert horizon >= 1
+
+        super().__init__(env, num_actors=num_actors, batch_size=horizon * num_actors, gamma=gamma,
+                         name=name, **kwargs)
+
+        # Hyper-parameters:
         self.horizon = int(horizon)
-
-        super().__init__(env, batch_size=self.horizon, num_actors=parallel_actors, gamma=gamma, name=name, **kwargs)
-
         self.lambda_ = tf.constant(lambda_, dtype=tf.float32)
         self.entropy_strength = DynamicParameter.create(value=entropy)
-        self.adv_scale = DynamicParameter.create(value=advantage_scale)
-        self.adv_normalization_fn = utils.get_normalization_fn(arg=normalize_advantages)
+
+        self.adv_scale = DynamicParameter.create(value=1.0)
+        self.adv_normalization_fn = utils.get_normalization_fn(arg='identity')
+        self.returns_norm_fn = utils.get_normalization_fn(arg='identity')
 
         self.actor_lr = DynamicParameter.create(value=actor_lr)
         self.critic_lr = DynamicParameter.create(value=critic_lr)
 
-        # shared networks (and optimizer)
-        self.actor = Network.create(agent=self, log_prefix='actor', **(actor or {}), base_class='A2C-ActorNetwork')
-        self.critic = Network.create(agent=self, log_prefix='critic', **(critic or {}), base_class='A2C-CriticNetwork')
-
-        if isinstance(optimizer, dict):
-            opt_args = optimizer
-            optimizer = opt_args.pop('name', 'rmsprop')
-        else:
-            opt_args = {}
-
-        self.actor.compile(optimizer, clip_norm=clip_norm[0], clip=self.clip_grads, learning_rate=self.actor_lr,
-                           **opt_args)
-        self.critic.compile(optimizer, clip_norm=clip_norm[1], clip=self.clip_grads, learning_rate=self.critic_lr,
-                            **opt_args)
-
+        # Networks
         self.weights_path = dict(policy=os.path.join(self.base_path, 'actor'),
                                  value=os.path.join(self.base_path, 'critic'))
 
-        if load:
-            self.load()
+        self.actor = Network.create(agent=self, **(actor or {}), base_class=ActorNetwork)
+        self.critic = Network.create(agent=self, **(critic or {}), base_class=ValueNetwork)
+
+        if clip_norm is None:
+            clip_norm = (None, None)
+
+        self.actor.compile(optimizer, clip_norm=clip_norm[0], clip=self.clip_grads, learning_rate=self.actor_lr)
+        self.critic.compile(optimizer, clip_norm=clip_norm[1], clip=self.clip_grads, learning_rate=self.critic_lr)
 
     @property
     def transition_spec(self) -> TransitionSpec:
-        state_spec = {k: (self.horizon,) + shape for k, shape in self.state_spec.items()}
+        return TransitionSpec(state=self.state_spec, action=(self.num_actions,), next_state=False, terminal=False,
+                              reward=(1,), other=dict(value=(1,)))
 
-        return TransitionSpec(state=state_spec, action=(self.horizon, self.num_actions), next_state=False,
-                              terminal=False, reward=(self.horizon, 1), other=dict(value=(self.horizon, 1)))
+    def define_memory(self) -> GlobalMemory:
+        return GlobalMemory(self.transition_spec, agent=self, shape=self.horizon * self.num_actors)
 
-    @property
-    def memory(self) -> 'ParallelGAEMemory':
-        if self._memory is None:
-            self._memory = ParallelGAEMemory(self.transition_spec, agent=self, shape=self.num_actors)
-
-        return self._memory
-
-    def act(self, states) -> Tuple[tf.Tensor, dict, dict]:
-        actions, _, means, std = self.actor(states, training=False)
+    @tf.function
+    def act(self, states, **kwargs) -> Tuple[tf.Tensor, dict, dict]:
+        actions, mean, std = self.actor(states, training=False)
         values = self.critic(states, training=False)
 
         other = dict(value=values)
-        debug = dict()
-
-        if self.distribution_type != 'categorical':
-            for i, (mu, sigma) in enumerate(zip(means, std)):
-                debug[f'distribution_mean_{i}'] = mu
-                debug[f'distribution_std_{i}'] = sigma
+        debug = dict(distribution_mean=tf.reduce_mean(mean), distribution_std=tf.reduce_mean(std))
 
         return actions, other, debug
 
-    @staticmethod
-    def average_gradients(gradients_list) -> list:
-        n = 1.0 / len(gradients_list)
+    @tf.function
+    def act_evaluation(self, state, **kwargs):
+        actions, _, _ = self.actor(state, training=False, deterministic=True, **kwargs)
+        return actions
 
-        gradients = gradients_list[0]
+    # def learn(self, episodes: int, timesteps: int, render: Union[bool, int, None] = False, should_close=True,
+    #           evaluation: Union[dict, bool] = None, exploration_steps=0, save=True):
+    #     assert episodes > 0
+    #     assert timesteps > 0
+    #
+    #     import time
+    #     t0 = time.time()
+    #     total_sec = 0
+    #
+    #     self.on_start(episodes, timesteps)
+    #
+    #     # init evaluation args:
+    #     if isinstance(evaluation, dict):
+    #         eval_freq = evaluation.pop('freq', episodes + 1)  # default: never evaluate
+    #         assert isinstance(eval_freq, int)
+    #
+    #         evaluation['should_close'] = False
+    #         evaluation.setdefault('episodes', 1)  # default: evaluate on just 1 episode
+    #         evaluation.setdefault('timesteps', timesteps)  # default: evaluate on the same number of timesteps
+    #         evaluation.setdefault('render', render)  # default: same rendering options
+    #     else:
+    #         evaluation = {}
+    #         eval_freq = episodes + 1  # never evaluate
+    #
+    #     for episode in range(1, episodes + 1):
+    #         self.on_episode_start(episode)
+    #
+    #         episode_reward = 0.0
+    #         discounted_reward = 0.0
+    #         discount = 1.0
+    #         ti = time.time()
+    #
+    #         states = self.env.reset()
+    #         states = self.preprocess(states)
+    #
+    #         # inner-loop:
+    #         t = 0
+    #
+    #         while t < timesteps + 1:
+    #             t += 1
+    #             self.timestep = t
+    #             self.total_steps += 1
+    #
+    #             # Agent prediction
+    #             actions, other, debug = self.act(states)
+    #             actions_env = self.convert_action(actions)
+    #
+    #             # Environment step
+    #             next_states, rewards, terminals, info = self.env.step(action=actions_env)
+    #
+    #             is_truncated = [x.get('TimeLimit.truncated', False) for x in info.values()]
+    #             is_failure = np.logical_and(terminals, np.logical_not(is_truncated))
+    #
+    #             episode_reward += np.mean(rewards)
+    #             discounted_reward += np.mean(rewards) * discount
+    #             discount *= self.gamma
+    #
+    #             transition = dict(state=states, action=actions, reward=rewards, next_state=next_states,
+    #                               terminal=is_failure, info=info, **(other or {}))
+    #
+    #             self.on_transition(transition, terminals)
+    #             self.log_env(action=actions_env, **debug)
+    #
+    #             if (t == timesteps) or self.memory.is_full():
+    #                 seconds = time.time() - ti
+    #                 total_sec += seconds
+    #
+    #                 print(f'Episode {episode} terminated after {t} timesteps in {round(seconds, 3)}s ' +
+    #                       f'with reward {round(episode_reward, 3)}')
+    #
+    #                 self.log(timestep=t, total_steps=self.total_steps, time_seconds=total_sec,
+    #                          seconds_per_epoch=seconds)
+    #                 self.on_termination(last_transition=transition)
+    #                 break
+    #             else:
+    #                 states = next_states
+    #                 states = self.preprocess(states)
+    #
+    #         self.on_episode_end(episode, episode_reward)
+    #
+    #         # Evaluate
+    #         if episode % eval_freq == 0:
+    #             eval_rewards = self.evaluate2(**evaluation)
+    #             self.log(eval_rewards=eval_rewards)
+    #
+    #             print(f'[Evaluation] average return: {np.round(np.mean(eval_rewards), 2)}, '
+    #                   f'std: {np.round(np.std(eval_rewards), 2)}')
+    #
+    #     print(f'Time taken {round(time.time() - t0, 3)}s.')
+    #     self.on_close(should_close)
 
-        for i in range(1, len(gradients_list)):
-            grads = gradients_list[i]
-
-            for j, g in enumerate(grads):
-                gradients[j] += g
-
-        return [g * n for g in gradients]
+    def learn(self, *args, **kwargs):
+        with utils.Timed('Learn'):
+            super().learn(*args, **kwargs)
 
     def update(self):
-        batches = self.memory.get_data()
+        with utils.Timed('Update'):
+            batch = self.memory.get_data()
 
-        all_batches = {k: v for k, v in batches[0].items()}
-        for i in range(1, len(batches)):
-            for k, v in batches[i].items():
-                all_batches[k] = tf.concat([v, all_batches[k]], axis=0)
+            self.actor.train_step(batch)
+            self.critic.train_step(batch)
 
-        actor_grads = self.actor.train_step(all_batches)
-        critic_grads = self.critic.train_step(all_batches)
+            self.memory.on_update()
+            self.memory.clear()
 
-        # update weights
-        self.actor.update(gradients=actor_grads)
-        self.critic.update(gradients=critic_grads)
+    def on_transition(self, transition: dict, terminal: np.ndarray, exploration=False):
+        any_terminal = any(terminal)
 
-    def on_transition(self, transition: Dict[str, list], timestep: int, episode: int, exploration=False):
-        super().on_transition(transition, timestep, episode, exploration)
+        if any_terminal:
+            # adjust terminal states for `MultiprocessingEnv` only
+            #  - a state is `transition['next_state']` if non-terminal, or
+            #  - `info['__terminal_state']` is truly terminal
+            terminal_states = transition['next_state']
 
-        if any(transition['terminal']) or (timestep % self.horizon == 0) or (timestep == self.max_timesteps):
+            for i, info in transition['info'].items():
+                if '__terminal_state' in info:
+                    terminal_states[i] = info.pop('__terminal_state')
+
+            transition['next_state'] = terminal_states
+
+        # TODO: temporary fix
+        transition.pop('info')
+
+        super().on_transition(transition, terminal, exploration)
+
+        if any_terminal or (self.timestep % self.horizon == 0) or (self.timestep == self.max_timesteps):
+            is_failure = tf.reshape(transition['terminal'], shape=(-1, 1))
             terminal_states = self.preprocess(transition['next_state'])
 
             values = self.critic(terminal_states, training=False)
-            values = values * utils.to_float(tf.logical_not(transition['terminal']))
+            values = values * utils.to_float(tf.logical_not(is_failure))
 
             debug = self.memory.end_trajectory(last_values=values)
             self.log(average=True, **debug)
 
-            if not exploration:
-                self.update()
-                self.memory.clear()
+        if not exploration and self.memory.is_full():
+            self.update()
 
-    def load_weights(self):
-        self.actor.load_weights(filepath=self.weights_path['actor'], by_name=False)
-        self.critic.load_weights(filepath=self.weights_path['critic'], by_name=False)
-
-    def save_weights(self):
-        self.actor.save_weights(filepath=self.weights_path['actor'])
-        self.critic.save_weights(filepath=self.weights_path['critic'])
-
-    def summary(self):
-        self.actor.summary()
-        self.critic.summary()
-
-
-@Network.register(name='A2C-ActorNetwork')
-class ActorNetwork(PolicyNetwork):
-
-    def train_step(self, batch: dict):
-        if isinstance(batch, tuple):
-            batch = batch[0]
-
-        debug, grads = self.train_on_batch(batch)
-        self.agent.log(average=True, **({f'{self.prefix}_{k}': v for k, v in debug.items()}))
-
-        return grads
-
-    def objective(self, batch, reduction=tf.reduce_sum) -> tuple:
-        return super().objective(batch, reduction=reduction)
-
-    @tf.function
-    def train_on_batch(self, batch):
-        with tf.GradientTape() as tape:
-            loss, debug = self.objective(batch)
-
-        gradients = tape.gradient(loss, self.trainable_variables)
-        debug['gradient_norm'] = utils.tf_norm(gradients)
-        debug['gradient_global_norm'] = utils.tf_global_norm(debug['gradient_norm'])
-
-        if self.should_clip_gradients:
-            gradients, _ = utils.clip_gradients_global(gradients, norm=self.clip_norm())
-            debug['gradient_clipped_norm'] = utils.tf_norm(gradients)
-            debug['clip_norm'] = self.clip_norm.value
-
-        return debug, gradients
-
-    @tf.function
-    def update(self, gradients):
-        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
-
-
-@Network.register(name='A2C-CriticNetwork')
-class CriticNetwork(ValueNetwork):
-
-    def train_step(self, batch: dict):
-        if isinstance(batch, tuple):
-            batch = batch[0]
-
-        debug, grads = self.train_on_batch(batch)
-        self.agent.log(average=True, **({f'{self.prefix}_{k}': v for k, v in debug.items()}))
-
-        return grads
-
-    def objective(self, batch, reduction=tf.reduce_sum) -> tuple:
-        return super().objective(batch, reduction=reduction)
-
-    @tf.function
-    def train_on_batch(self, batch):
-        with tf.GradientTape() as tape:
-            loss, debug = self.objective(batch)
-
-        gradients = tape.gradient(loss, self.trainable_variables)
-        debug['gradient_norm'] = utils.tf_norm(gradients)
-        debug['gradient_global_norm'] = utils.tf_global_norm(debug['gradient_norm'])
-
-        if self.should_clip_gradients:
-            gradients, _ = utils.clip_gradients_global(gradients, norm=self.clip_norm())
-            debug['gradient_clipped_norm'] = utils.tf_norm(gradients)
-            debug['clip_norm'] = self.clip_norm.value
-
-        return debug, gradients
-
-    @tf.function
-    def update(self, gradients):
-        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
-
-
-class ParallelGAEMemory(EpisodicMemory):
-
-    def __init__(self, *args, agent: A2C, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        if 'return' in self.data:
-            raise ValueError('Key "return" is reserved!')
-
-        if 'advantage' in self.data:
-            raise ValueError('Key "advantage" is reserved!')
-
-        self.data['return'] = np.zeros_like(self.data['value'])
-        self.data['advantage'] = np.zeros(shape=self.shape + (1,), dtype=np.float32)
-        self.agent = agent
-
-    def is_full(self) -> bool:
-        if self.full:
-            return True
-
-        if self.index * self.shape[0] >= self.size:
-            self.full = True
-
-        return self.full
-
-    def _store(self, data, spec, key, value):
-        if not isinstance(value, dict):
-            array = np.asanyarray(value, dtype=np.float32)
-            # array = np.reshape(array, newshape=(self.shape[0], spec['shape'][-1]))  # TODO: check spec['shape']
-            array = np.reshape(array, newshape=utils.to_tuple(self.shape[0]) + spec['shape'])  # TODO: test
-
-            # indexing: key, env, index (timestep)
-            #   - `array` has shape (n_envs, horizon)
-            #   - each `v` in `array` is data for the corresponding env
-            for env_index, v in enumerate(array):
-                data[key][env_index][self.index] = v
-        else:
-            for k, v in value.items():
-                self._store(data=data[key], spec=spec[k], key=k, value=v)
-
-    def end_trajectory(self, last_values) -> dict:
-        debug = dict()
-        data_reward, data_value = self.data['reward'], self.data['value']
-        data_return, data_adv = self.data['return'], self.data['advantage']
-
-        for i in range(self.agent.num_actors):
-            v = tf.expand_dims(last_values[i], axis=-1)
-            rewards = np.concatenate([data_reward[i][:self.index], v], axis=0)
-            values = np.concatenate([data_value[i][:self.index], v], axis=0)
-
-            # compute returns and advantages for i-th environment
-            returns = self.compute_returns(rewards)
-            adv, advantages = self.compute_advantages(rewards, values)
-
-            # store them
-            data_return[i][:self.index] = returns
-            data_adv[i][:self.index] = advantages
-
-            # debug
-            debug[f'returns_{i}'] = returns
-            debug[f'advantages_normalized_{i}'] = advantages
-            debug[f'advantages_{i}'] = adv
-            debug[f'values_{i}'] = values
-
-        return debug
-
-    def compute_returns(self, rewards):
-        returns = utils.rewards_to_go(rewards, discount=self.agent.gamma)
-        return returns
-
-    def compute_advantages(self, rewards, values):
-        advantages = utils.gae(rewards, values=values, gamma=self.agent.gamma, lambda_=self.agent.lambda_)
-        norm_adv = self.agent.adv_normalization_fn(advantages) * self.agent.adv_scale()
-        return advantages, norm_adv
-
-    def get_data(self) -> List[dict]:
-        """Returns a batch of data for each environment/actor"""
-        if self.full:
-            index = self.agent.horizon
-        else:
-            index = self.index
-
-        n_envs = self.agent.num_actors
-
-        def _get(data_list, _k, _v):
-            if not isinstance(_v, dict):
-                for i in range(n_envs):
-                    data_list[i][_k] = _v[i][:index]
-            else:
-                for data in data_list:
-                    data[_k] = dict()
-
-                for k, v in _v.items():
-                    _get([data[_k] for data in data_list], k, v)
-
-        batches = [dict() for _ in range(n_envs)]
-
-        for key, value in self.data.items():
-            _get(batches, key, value)
-
-        return batches
+    # def load_weights(self):
+    #     self.actor.load_weights(filepath=self.weights_path['actor'], by_name=False)
+    #     self.critic.load_weights(filepath=self.weights_path['critic'], by_name=False)
+    #
+    # def save_weights(self, path: str):
+    #     self.actor.save_weights(filepath=os.path.join(path, 'actor'))
+    #     self.critic.save_weights(filepath=os.path.join(path, 'critic'))
+    #
+    # def summary(self):
+    #     self.actor.summary()
+    #     self.critic.summary()
 
 
 if __name__ == '__main__':
-    a2c = A2C(env='CartPole-v0', horizon=5, use_summary=True, seed=42)
-    a2c.learn(250, 200)
+    import gym
+    utils.set_random_seed(42)
+
+    # # achieves 390+ reward
+    # agent = A2C(env='CartPole-v1', name='a2c-cart_v1', horizon=16, num_actors=16,
+    #             actor_lr=3e-4, entropy=1e-4, clip_norm=None, use_summary=True,
+    #             actor=dict(units=32), critic=dict(units=64),
+    #             seed=utils.GLOBAL_SEED, parallel_env=SequentialEnv)
+    #
+    # agent.learn(episodes=250, timesteps=500, save=True, render=False, should_close=True,
+    #             evaluation=dict(episodes=25, freq=10))
+    # exit()
+
+    # agent = A2C(env='Pendulum-v1', name='a2c-pendulum', horizon=64, num_actors=8,
+    #             actor_lr=1e-3, critic_lr=1e-3, entropy=1e-3, clip_norm=None, use_summary=True,
+    #             actor=dict(units=128), critic=dict(units=128),
+    #             seed=utils.GLOBAL_SEED, parallel_env=SequentialEnv)
+
+    # agent.learn(episodes=250, timesteps=500, save=False, render=False, should_close=True,
+    #             evaluation=dict(episodes=20, freq=5))
+
+    from rl.parameters import LinearDecay, ExponentialDecay
+
+    agent = A2C(env='LunarLanderContinuous-v2', name='a2c-lunar_c', horizon=16*2, num_actors=16,
+                actor_lr=3e-4, critic_lr=1e-3, clip_norm=(2.5, 10.0), use_summary=True and False,
+                entropy=LinearDecay(1.0, end_value=0.0, steps=400),
+                # entropy=ExponentialDecay(1.0, steps=500, rate=0.99),
+                actor=dict(units=128, num_layers=4), critic=dict(units=128), lambda_=0.95,
+                seed=utils.GLOBAL_SEED)
+
+    def convert_action():
+        space = agent.env.action_space
+        assert isinstance(space, gym.spaces.Box) and space.is_bounded()
+
+        low = tf.constant(space.low, dtype=tf.float32)
+        delta = tf.constant(space.high - space.low, dtype=tf.float32)
+
+        return lambda actions: [np.squeeze(a * delta + low) for a in actions]  # lunar-c
+        # return lambda actions: [np.reshape(a * delta + low, newshape=1) for a in actions]  # pendulum
+
+    agent.convert_action = convert_action()
+
+    # agent.summary()
+    # breakpoint()
+
+    # agent.load()
+
+    # runs = [agent.record(timesteps=1000, force=True, rename=True) for _ in range(50)]  # [(reward, path)]
+    # runs = sorted(runs, key=lambda x: x[0])  # sort by reward
+    # runs = runs[:-10]  # keep only best 10, so remove the others
+    #
+    # for _, path in runs:
+    #     utils.remove_folder(path)
+    #
+    # exit()
+
+    agent.learn(episodes=500, timesteps=1000, save=True, render=False, should_close=True,
+                evaluation=dict(episodes=25, render=20, freq=10))

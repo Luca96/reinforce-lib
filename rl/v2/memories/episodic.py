@@ -8,18 +8,23 @@ from rl.v2.memories import Memory
 
 class EpisodicMemory(Memory):
 
+    def store(self, transition: dict):
+        assert not self.full
+        super().store(transition)
+
     def get_data(self, pad=False) -> dict:
-        if self.full:
+        if self.full or pad:
             index = self.size
         else:
             index = self.index
 
         def _get(_data, _k, val):
             if not isinstance(val, dict):
-                if pad:
-                    _data[_k] = val
-                else:
-                    _data[_k] = val[:index]
+                # if pad:
+                #     _data[_k] = val
+                # else:
+                #     _data[_k] = val[:index]
+                _data[_k] = val[:index]
             else:
                 _data[_k] = dict()
 
@@ -39,12 +44,7 @@ class GAEMemory(EpisodicMemory):
 
     def __init__(self, *args, agent, **kwargs):
         super().__init__(*args, **kwargs)
-
-        if 'return' in self.data:
-            raise ValueError('Key "return" is reserved!')
-
-        if 'advantage' in self.data:
-            raise ValueError('Key "advantage" is reserved!')
+        self.assert_reserved(keys=['return', 'advantage'])
 
         self.data['return'] = np.zeros_like(self.data['value'])
         self.data['advantage'] = np.zeros(shape=self.shape + (1,), dtype=np.float32)
@@ -54,7 +54,7 @@ class GAEMemory(EpisodicMemory):
         data_reward, data_value = self.data['reward'], self.data['value']
         data_return, data_adv = self.data['return'], self.data['advantage']
 
-        v = tf.reshape(last_value, shape=(1, -1))
+        v = np.reshape(last_value, newshape=(1, -1))
         rewards = np.concatenate([data_reward[:self.index], v], axis=0)
         values = np.concatenate([data_value[:self.index], v], axis=0)
 

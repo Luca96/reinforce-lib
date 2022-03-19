@@ -23,7 +23,7 @@ class QNetwork(Network):
 
     def __init__(self, agent: Agent, target=True, dueling=False, operator='avg', log_prefix='q', prioritized=False,
                  loss: Union[str, float, callable] = 'mse', **kwargs):
-        self._base_model_initialized = True
+        self.init_hack()
         self.has_prioritized_mem = bool(prioritized)
 
         # choose loss function (huber, mse, or user-defined)
@@ -45,17 +45,13 @@ class QNetwork(Network):
         super().__init__(agent, target=target, dueling=dueling, operator=operator, log_prefix=log_prefix, **kwargs)
 
         # cumulative gamma
-        self.gamma_n = tf.pow(x=self.agent.gamma, y=self.agent.horizon)
+        # self.gamma_n = tf.pow(x=self.agent.gamma, y=self.agent.horizon)
+        self.gamma_n = tf.pow(x=self.agent.gamma, y=getattr(self.agent, 'horizon', 1))
 
-    @tf.function
-    def call(self, inputs, actions=None, training=None):
-        q_values = super().call(inputs, training=training)
+    def call(self, inputs, actions=None, training=None, **kwargs):
+        q_values = super().call(inputs, training=training, **kwargs)
 
-        # TODO: consider to multiply q-values times one_hot(actions) + sum, instead of indexing
-        if tf.is_tensor(actions):
-            # actions = tf.one_hot(actions, self.agent.num_classes, 1.0, 0.0)
-            # return tf.reduce_sum(q_values * actions, axis=1)
-
+        if utils.is_tensor_like(actions):
             # index q-values by given actions
             q_values = utils.index_tensor(tensor=q_values, indices=actions)
             return tf.expand_dims(q_values, axis=-1)
@@ -66,47 +62,25 @@ class QNetwork(Network):
     def q_values(self, inputs, **kwargs):
         return self(inputs, **kwargs)
 
-    @tf.function
-    def act(self, inputs):
-        q_values = self(inputs, training=False)
-        return tf.argmax(q_values, axis=-1)
+    # @tf.function
+    # def act(self, inputs, **kwargs):
+    #     q_values = self(inputs, training=False, **kwargs)
+    #     return tf.argmax(q_values, axis=-1)
 
     def structure(self, inputs: Dict[str, Input], name='Deep-Q-Network', **kwargs) -> tuple:
         utils.remove_keys(kwargs, keys=['dueling', 'operator', 'prioritized'])
-        # inputs = inputs['state']
-        #
-        # if len(inputs.shape) <= 2:
-        #     x = backbones.dense(layer=inputs, **kwargs)
-        # else:
-        #     x = backbones.convolutional(layer=inputs, **kwargs)
-        #
-        # output = self.output_layer(layer=x)
-        # return inputs, output, name
         return super().structure(inputs, name=name, **kwargs)
 
     def output_layer(self, layer: Layer, **kwargs) -> Layer:
         assert self.agent.num_actions == 1
 
         if self.use_dueling:
-            return self.dueling_architecture(layer)
+            return self.dueling_architecture(layer, **kwargs)
 
         return Dense(units=self.agent.num_classes, name='q-values', **kwargs)(layer)
 
-    # def dueling_architecture(self, layer: Layer) -> Layer:
-    #     # two streams (branches)
-    #     value = Dense(units=1, name='value', **self.output_args)(layer)
-    #     advantage = Dense(units=self.agent.num_classes, name='advantage', **self.output_args)(layer)
-    #
-    #     if self.operator == 'max':
-    #         k = tf.reduce_max(advantage, axis=-1, keepdims=True)
-    #     else:
-    #         k = tf.reduce_mean(advantage, axis=-1, keepdims=True)
-    #
-    #     q_values = value + (advantage - k)
-    #     return q_values
-
-    def dueling_architecture(self, layer: Layer) -> Layer:
-        dueling = DuelingLayer(units=self.agent.num_classes, operator=self.operator.lower(), **self.output_args)
+    def dueling_architecture(self, layer: Layer, **kwargs) -> Layer:
+        dueling = DuelingLayer(units=self.agent.num_classes, operator=self.operator.lower(), **kwargs)
         return dueling(layer)
 
     @tf.function
@@ -114,13 +88,13 @@ class QNetwork(Network):
         actions = batch['action']
         q_values = self(inputs=batch['state'], actions=actions, training=True)
         q_targets = self.targets(batch)
-        td_error = q_targets - q_values
+        td_error = q_values - q_targets
 
         if self.has_prioritized_mem:
             # inform agent's memory about td-error, to later update priorities
             self.agent.memory.td_error.assign(tf.stop_gradient(tf.squeeze(td_error)))
 
-            loss = reduction(td_error * batch['_weights'])
+            loss = reduction(self.loss_fn(td_error * batch['_weights']))
         else:
             loss = reduction(self.loss_fn(td_error))
 
@@ -138,6 +112,7 @@ class QNetwork(Network):
 
         if '_weights' in batch:
             debug['weights_IS'] = batch['_weights']
+            debug['td_error_weighted'] = tf.stop_gradient(td_error * batch['_weights'])
 
         return loss, debug
 
@@ -147,6 +122,8 @@ class QNetwork(Network):
         returns = batch['return']
         q_values = self.target(inputs=batch['next_state'], training=False)
 
+        # TODO: SARSA uses `Q(s_t+1, a_t+1)` instead of `max_a Q(s_t+1, a)`; see GRL page 187
+        # here we use the "returns" for the general case of n-step returns. When n=1, returns=rewards.
         targets = returns + self.gamma_n * (1.0 - batch['terminal']) * tf.reduce_max(q_values, axis=1, keepdims=True)
         return tf.stop_gradient(targets)
 
@@ -160,8 +137,8 @@ class DoubleQNetwork(QNetwork):
         next_states = batch['next_state']
 
         # double q-learning rule
-        q_target = self(inputs=next_states, training=False)
-        argmax_a = tf.expand_dims(tf.argmax(q_target, axis=-1), axis=-1)
+        q_next_a = self(inputs=next_states, training=False)
+        argmax_a = tf.expand_dims(tf.argmax(q_next_a, axis=-1), axis=-1)
         q_values = self.target(inputs=next_states, actions=argmax_a, training=False)
 
         targets = returns + self.gamma_n * (1.0 - batch['terminal']) * q_values

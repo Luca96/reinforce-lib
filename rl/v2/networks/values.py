@@ -4,19 +4,26 @@ import tensorflow as tf
 from tensorflow.keras.layers import *
 
 from rl import utils
-from rl.layers import preprocessing
 from rl.v2.agents import Agent
 from rl.v2.networks import Network, backbones
 
-from typing import Dict
+from typing import Dict, Callable
 
 
 @Network.register(name='ValueNetwork')
 class ValueNetwork(Network):
     """A standard ValueNetwork that predicts values for given states"""
 
-    def __init__(self, agent: Agent, target=False, log_prefix='value', **kwargs):
-        self._base_model_initialized = True
+    def __init__(self, agent: Agent, target=False, log_prefix='value', loss='mse', huber=1.0, **kwargs):
+        self.init_hack()
+
+        if callable(loss):
+            self.loss_fn = loss
+
+        elif isinstance(loss, str):
+            self.huber = tf.constant(huber, dtype=tf.float32)
+            self.loss_fn = self._get_loss_fn(loss=loss.lower())
+
         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
 
     def structure(self, inputs: Dict[str, Input], name='ValueNetwork', **kwargs) -> tuple:
@@ -43,17 +50,43 @@ class ValueNetwork(Network):
         states, returns = batch['state'], batch['return']
         values = self(states, training=True)
 
-        loss = 0.5 * reduction(tf.square(returns - values))
+        loss = self.loss_fn(x=returns, y=values, reduction=reduction)
         debug = dict(loss=loss,
-                     explained_variance=tf.stop_gradient(utils.tf_explained_variance(values, returns, eps=1e-3)),
-                     residual_variance=tf.stop_gradient(utils.tf_residual_variance(values, returns, eps=1e-3)))
+                     explained_variance=utils.tf_explained_variance(values, returns, eps=1e-3),
+                     residual_variance=utils.tf_residual_variance(values, returns, eps=1e-3))
 
         return loss, debug
 
+    @tf.function
+    def mse_loss(self, x: tf.Tensor, y: tf.Tensor, reduction: Callable):
+        return 0.5 * reduction(tf.square(x - y))
 
+    @tf.function
+    def mae_loss(self, x: tf.Tensor, y: tf.Tensor, reduction: Callable):
+        return reduction(tf.math.abs(x - y))
+
+    @tf.function
+    def huber_loss(self, x: tf.Tensor, y: tf.Tensor, reduction: Callable):
+        return reduction(utils.huber_loss(errors=x - y, kappa=self.huber))
+
+    def _get_loss_fn(self, loss: str) -> Callable:
+        assert loss in ['mse', 'mae', 'huber']
+
+        if loss == 'mse':
+            return self.mse_loss
+
+        if loss == 'mae':
+            return self.mae_loss
+
+        return self.huber_loss
+
+
+# TODO: test
 @Network.register(name='DecomposedValueNetwork')
 class DecomposedValueNetwork(ValueNetwork):
-    """A ValueNetwork that predicts values (v) decomposed into bases (b) and exponents (e), such that: v = b * 10^e"""
+    """A ValueNetwork that predicts values (v) decomposed into bases (b) and exponents (e), such that: v = b * 10^e.
+        - See: https://ieeexplore.ieee.org/abstract/document/9506673/, chapter
+    """
 
     def __init__(self, agent: Agent, exponent_scale=6.0, target=False, log_prefix='value', normalize_loss=True,
                  **kwargs):

@@ -23,7 +23,7 @@ from rl.parameters import DynamicParameter
 # -- Constants
 # -------------------------------------------------------------------------------------------------
 
-GLOBAL_SEED = None
+GLOBAL_SEED: int = None
 
 NP_EPS = np.finfo(np.float32).eps
 TF_EPS = tf.constant(NP_EPS, dtype=tf.float32)
@@ -62,6 +62,15 @@ def get_optimizer_by_name(name: str, *args, **kwargs) -> tf.keras.optimizers.Opt
 
     print(f'Optimizer: {name}.')
     return optimizer_class(*args, **kwargs)
+
+
+def get_optimizer(optimizer: Union[str, dict], **kwargs) -> tf.keras.optimizers.Optimizer:
+    if isinstance(optimizer, dict):
+        name = optimizer.pop('name').lower()
+        return get_optimizer_by_name(name, **optimizer, **kwargs)
+
+    assert isinstance(optimizer, str)
+    return get_optimizer_by_name(name=optimizer, **kwargs)
 
 
 def get_normalization_layer(name: str, **kwargs) -> tf.keras.layers.Layer:
@@ -190,6 +199,18 @@ def get_seed(seed):
     return seed
 
 
+def make_env(which: str, rank: int):
+    env = gym.make(id=which)
+    env.seed(42 + rank)
+
+    return env
+
+
+def actual_datetime() -> str:
+    """Returns the current data timestamp, formatted as follows: YearMonthDay-HourMinuteSecond"""
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
 def np_normalize(x, epsilon=NP_EPS):
     return (x - np.mean(x)) / (np.std(x) + epsilon)
 
@@ -247,6 +268,27 @@ def is_empty(x: Union[np.ndarray, tf.Tensor]) -> bool:
     return (x.shape[0] == 0) and (x.shape[-1] == 0)
 
 
+def is_scalar(x: Union[int, float, tuple, list, np.ndarray, tf.Tensor]) -> bool:
+    """Checks whether `x` is a scalar value, thus shapeless"""
+    if isinstance(x, (int, float)) or np.isscalar(x) or (np.ndim(x) == 0):
+        return True
+
+    if isinstance(x, (tuple, list)):
+        return len(np.array(x).shape) == 0
+
+    if isinstance(x, np.ndarray):
+        return len(x.shape) == 0
+
+    if tf.is_tensor(x):
+        return len(tf.shape(x)) == 0
+
+    raise ValueError(f'Argument `x` must be [int, float, np.ndarray, tf.Tensor] not {type(x)}.')
+
+
+def is_tensor_like(x: Union[np.ndarray, tf.Tensor]) -> bool:
+    return tf.is_tensor(x) or (isinstance(x, np.ndarray) and len(x.shape) > 0)
+
+
 def to_tuple(x: Union[int, float, bool, list, tuple]) -> tuple:
     if isinstance(x, (int, float, bool)):
         return tuple([x])
@@ -258,6 +300,36 @@ def to_tuple(x: Union[int, float, bool, list, tuple]) -> tuple:
         raise ValueError(f'Argument must of type int, float, bool, list or tuple not {type(x)}.')
 
     return x
+
+
+def to_dict_for_log(x: Union[dict, int, float, np.ndarray, tf.Tensor], name: str) -> dict:
+    """Returns a dict from given `x` for logging purpose: e.g. the dimensions of x are distinguished etc"""
+    # scalar (single) item
+    if is_scalar(x):
+        return {name: x}
+
+    # multiple scalar items
+    if isinstance(x, np.ndarray) or tf.is_tensor(x):
+        if len(x.shape) == 1:
+            return {f'{name}_{i}': a for i, a in enumerate(x)}
+        else:
+            return {f'{name}_{i}': np.mean(x[:, i]) for i in range(x.shape[-1])}
+
+    # composite items
+    assert isinstance(x, dict)
+    d = {}
+
+    for k, v in x.items():
+        if is_scalar(v):
+            d[f'{name}-{k}'] = v
+
+        if isinstance(v, np.ndarray) or tf.is_tensor(v):
+            if len(v.shape) == 1:
+                d.update({f'{name}_{i}': a for i, a in enumerate(v)})
+            else:
+                d.update({f'{name}_{i}': np.mean(v[:, i]) for i in range(v.shape[-1])})
+
+    return d
 
 
 def depth_concat(*arrays):
@@ -576,6 +648,10 @@ def space_to_flat_spec2(space: gym.Space, name: str) -> Dict[str, dict]:
 # -- TF utils
 # -------------------------------------------------------------------------------------------------
 
+def tf_enable_debug():
+    tf.config.run_functions_eagerly(True)
+
+
 @tf.function
 def to_tensor(x, expand_axis=0):
     if isinstance(x, dict):
@@ -725,6 +801,7 @@ def data_to_batches(tensors: Union[list, dict, tuple], batch_size: int, shuffle_
         dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE,
                               deterministic=True)
 
+    # TODO: add `num_parallel_calls=AUTOTUNE` when updating tf
     dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
 
     if shuffle_batches:
@@ -1010,6 +1087,10 @@ def copy_folder(src: str, dst: str):
     dir_util.copy_tree(src, dst)
 
 
+def remove_folder(path: str, **kwargs):
+    dir_util.remove_tree(path, **kwargs)
+
+
 # -------------------------------------------------------------------------------------------------
 # -- Statistics
 # -------------------------------------------------------------------------------------------------
@@ -1023,13 +1104,16 @@ def tf_explained_variance(x, y, eps=TF_EPS) -> float:
 
         - Source: https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/common/math_util.py#L25
     """
-    return 1.0 - (tf.math.reduce_variance(y - x) / (tf.math.reduce_variance(y) + eps))
+    explained_var = 1.0 - (tf.math.reduce_variance(y - x) / (tf.math.reduce_variance(y) + eps))
+    return tf.stop_gradient(explained_var)
 
 
 def tf_residual_variance(x: tf.Tensor, y: tf.Tensor, eps=TF_EPS):
-    return tf.math.reduce_variance(y - x) / (tf.math.reduce_variance(y) + eps)
+    residual_var = tf.math.reduce_variance(y - x) / (tf.math.reduce_variance(y) + eps)
+    return tf.stop_gradient(residual_var)
 
 
+# TODO: possible bug about logging 1-timestep long envs
 class SummaryProcess(mp.Process):
     """Easy and efficient tf.summary with multiprocessing"""
 
@@ -1049,12 +1133,12 @@ class SummaryProcess(mp.Process):
         else:
             self.allowed_keys = None
 
-        self.summary_dir = os.path.join(folder, name, datetime.now().strftime("%Y%m%d-%H%M%S"))
+        self.summary_dir = os.path.join(folder, name, actual_datetime())
         self.tf_summary_writer = None
         self.summary_args = dict(flush_millis=flush_millis, max_queue=max_queue)
 
     def run(self):
-        import tensorflow as tf  # import here and lazy tf.summary.create is necessary for multiprocessing to work
+        import tensorflow as tf  # import here, and lazy tf.summary.create is necessary for multiprocessing to work
 
         if self.tf_summary_writer is None:
             self.tf_summary_writer = tf.summary.create_file_writer(self.summary_dir, **self.summary_args)
@@ -1172,11 +1256,17 @@ class SummaryProcess(mp.Process):
         return key in self.allowed_keys
 
     def close(self):
+        # TODO: should remaining logs be written?
+        # consume remaining logs
+        while not self.queue.empty():
+            self.queue.get()
+
         if self.is_alive():
             self.join()
             self.terminate()
 
 
+# TODO: deprecate
 class IncrementalStatistics:
     """Compute mean, variance, and standard deviation incrementally."""
     def __init__(self, epsilon=TF_EPS, max_count=10e8):

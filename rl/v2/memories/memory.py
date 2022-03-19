@@ -7,10 +7,14 @@ from rl.v2.memories import TransitionSpec
 from typing import Union, Tuple
 
 
+# TODO: generalize all memory buffers to multiple environments as PPO `GlobalMemory`
+# TODO: parallel memory interface or just an `AbstractMemory` class
+# TODO: implement everything with `numpy`
 # TODO: implement serialization/deserialization
 class Memory:
     """A circular buffer that supports uniform replying"""
 
+    # TODO: add `min_batches` or `min_samples`; to request a minimum amount of experience tuple for updates
     def __init__(self, transition_spec: TransitionSpec, shape: Union[int, Tuple], seed=None):
         self.seed = seed or utils.GLOBAL_SEED
         self.random = utils.get_random_generator(seed=self.seed)
@@ -38,6 +42,7 @@ class Memory:
     def _add_spec(self, spec: dict):
         if 'shape' in spec:
             shape = spec['shape']
+            # TODO: consider initializing with `np.empty`
             return np.zeros(shape=self.shape + shape, dtype=spec['dtype'])
 
         return {k: self._add_spec(v) for k, v in spec.items()}
@@ -51,8 +56,8 @@ class Memory:
         return self.index
 
     def is_full(self) -> bool:
-        if self.full:
-            return True
+        # if self.full:
+        #     return True
 
         if self.index >= self.size:
             self.full = True
@@ -107,6 +112,7 @@ class Memory:
 
         return batches
 
+    # TODO: always "shuffle" data!!!!
     def get_data(self) -> dict:
         """Returns the whole data in memory as a single batch"""
         if self.full:
@@ -163,12 +169,17 @@ class Memory:
 
     def serialize(self, path: str):
         """Saves the entire content of the memory into a numpy's npz file"""
-        pass
+        raise NotImplementedError
 
     @staticmethod
     def deserialize(path: str) -> 'Memory':
         """Creates a Memory instance from a numpy's nps file"""
-        pass
+        raise NotImplementedError
 
     def update_warning(self, batch_size: int):
         print(f'[Not updated] Memory not enough full: {self.current_size}/{batch_size}.')
+
+    def assert_reserved(self, keys: list):
+        for k in keys:
+            if k in self.data:
+                raise ValueError(f'Key "{k}" is reserved.')

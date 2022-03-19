@@ -3,12 +3,15 @@
 import numpy as np
 import tensorflow as tf
 
-from typing import Union
+from rl import utils
 
 from tensorflow.keras.optimizers import schedules
 from tensorflow.keras.optimizers.schedules import LearningRateSchedule
 
+from typing import Union
 
+
+# TODO: cosine decay (+ warm-up?)
 class DynamicParameter:
     """Interface for learning rate schedule wrappers as dynamic-parameters"""
     def __init__(self):
@@ -33,6 +36,9 @@ class DynamicParameter:
         if isinstance(value, (DynamicParameter, ScheduleWrapper)):
             return value
 
+        if utils.is_scalar(np.squeeze(value)):
+            return ConstantParameter(float(np.squeeze(value)))
+
         if isinstance(value, (float, int, np.ndarray)) or tf.is_tensor(value):
             return ConstantParameter(value)
 
@@ -50,17 +56,15 @@ class DynamicParameter:
     def __add__(self, other):
         self._value.assign_add(other)
 
-    def serialize(self) -> dict:
-        return dict(step=int(self.step.value()))
-
     def on_episode(self):
         self.step.assign_add(1)
 
     def load(self, config: dict):
         self.step.assign(value=config.get('step', 0))
+        self._value.assign(value=config['value'])
 
     def get_config(self) -> dict:
-        return {}
+        return dict(value=float(self.value), step=int(self.step.value()))
 
 
 class ScheduleWrapper(LearningRateSchedule, DynamicParameter):
@@ -86,7 +90,9 @@ class ScheduleWrapper(LearningRateSchedule, DynamicParameter):
         return self.value
 
     def get_config(self) -> dict:
-        return self.schedule.get_config()
+        config = self.schedule.get_config()
+        config.update(value=float(self.value), step=int(self.step))
+        return config
 
 
 # TODO: to deprecate when removing old implementation of agents
@@ -121,9 +127,6 @@ class ConstantParameter(DynamicParameter):
 
     def __call__(self, *args, **kwargs):
         return self.value
-
-    def serialize(self) -> dict:
-        return {}
 
 
 class ExponentialDecay(ScheduleWrapper):

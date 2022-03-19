@@ -2,107 +2,292 @@
 
 import gym
 import numpy as np
+import multiprocessing as mp
 
-from typing import Union, Dict, List, Callable
+from typing import Union, List, Callable
 
 
-class ParallelEnv(gym.Env):
-    """A sequential environment that wraps multiple environments in parallel"""
+class CloudPickleWrapper(object):
+    """Uses `cloudpickle` to serialize contents (otherwise multiprocessing tries to use pickle)
+        - Source: OpenAI baselines
+    """
 
-    def __init__(self, env: Union[str, Callable], num=2, **kwargs):
-        assert num >= 1
-        self.num_envs = int(num)
+    def __init__(self, x):
+        self.x = x
+
+    def __getstate__(self):
+        import cloudpickle
+        return cloudpickle.dumps(self.x)
+
+    def __setstate__(self, ob):
+        import pickle
+        self.x = pickle.loads(ob)
+
+
+class AbstractParallelEnv(gym.Env):
+    """Abstract parallel-env interface"""
+    def __init__(self, num: int, processes: int):
+        assert num >= processes
+
+        self.num_environments = num
+        self.num_workers = processes
+
+    def get_evaluation_env(self) -> gym.Env:
+        """Instantiates a single environment, only for agent evaluation"""
+        raise NotImplementedError
+
+    @staticmethod
+    def _flatten_obs(x: Union[list, tuple]) -> Union[dict, np.ndarray]:
+        assert isinstance(x, (list, tuple))
+        assert len(x) > 0
+
+        if isinstance(x[0], dict):
+            keys = x[0].keys()
+            return {k: np.stack([obs[k] for obs in x]) for k in keys}
+
+        return np.stack(x)
+
+    @staticmethod
+    def _flatten_list(x: Union[list, tuple]) -> list:
+        assert isinstance(x, (list, tuple))
+        assert len(x) > 0
+        assert all([len(inner_list) > 0 for inner_list in x])
+
+        return [item for inner_list in x for item in inner_list]
+
+
+class SequentialEnv(AbstractParallelEnv):
+    """An environment that wraps multiple environments in sequence, simulating env parallelism"""
+
+    def __init__(self, env: Union[str, Callable], num=2, seed=None, **kwargs):
+        super().__init__(num, processes=1)
 
         if callable(env):
-            self.envs = [env(**kwargs) for _ in range(self.num_envs)]
+            self.make_env = lambda: env(**kwargs)
+            # self.envs = [env(**kwargs) for _ in range(self.num_environments)]
 
         elif isinstance(env, str):
-            self.envs = [gym.make(id=env, **kwargs) for _ in range(self.num_envs)]
+            self.make_env = lambda: gym.make(id=env, **kwargs)
+            # self.envs = [gym.make(id=env, **kwargs) for _ in range(self.num_environments)]
         else:
             raise ValueError(f'Argument `env` must be "str" or "callable" not "{type(env)}".')
 
-        base_obs_space = self.envs[0].observation_space
+        # instantiate environments
+        self.envs = [self.make_env() for _ in range(self.num_environments)]
+        self.seed(seed)
 
-        if isinstance(base_obs_space, gym.spaces.Dict):
-            self.complex_obs = True
-            self.states_shape = {k: (self.num_envs,) + space.shape for k, space in base_obs_space.spaces.items()}
-        else:
-            self.complex_obs = False
-            self.states_shape = (self.num_envs,) + self.observation_space.shape
-
-        self.observation_space: gym.Space = base_obs_space
+        self.observation_space: gym.Space = self.envs[0].observation_space
         self.action_space: gym.Space = self.envs[0].action_space
 
-        self.rewards_shape = (self.num_envs, 1)
-        self.terminals_shape = (self.num_envs, 1)
-
     def step(self, action: list) -> tuple:
-        actions = action  # to keep `gym.Env` interface unchanged
-        states = self._empty_states()
-        rewards = np.empty(shape=self.rewards_shape, dtype=np.float64)
-        terminals = np.empty(shape=self.terminals_shape, dtype=np.bool)
-        info = {}
+        assert len(action) == self.num_environments
+        actions = action
+        experiences = []
 
-        for j, (action, env) in enumerate(zip(actions, self.envs)):
-            s, r, t, i = env.step(action)
+        for i, (env, action) in enumerate(zip(self.envs, actions)):
+            state, reward, done, info = env.step(action)
 
-            rewards[j] = r
-            terminals[j] = t
+            if done:
+                info['__terminal_state'] = state
+                state = env.reset()
 
-            if self.complex_obs:
-                assert isinstance(s, dict)
+            experiences.append((state, reward, done, info))
 
-                for key, value in s.items():
-                    # states[key][j] = value
-                    states[j][key] = value
-            else:
-                states[j] = s
+        states, rewards, terminals, info = zip(*experiences)
+        info = {i: info_ for i, info_ in enumerate(info)}
 
-            for key, value in i.items():
-                if key not in info:
-                    info[key] = [value]
-                else:
-                    info[key].append(value)
+        return self._flatten_obs(states), np.stack(rewards), np.stack(terminals), info
 
-        info = {k: np.stack(v) for k, v in info.items()}
-
-        return states, rewards, terminals, info
-
-    def reset(self):
-        states = [env.reset() for env in self.envs]
-
-        if self.complex_obs:
-            return states
-
-        return np.stack(states)
+    def reset(self, **kwargs) -> np.ndarray:
+        states = [env.reset(**kwargs) for env in self.envs]
+        return self._flatten_obs(states)
 
     def render(self, mode='human', **kwargs):
-        self.envs[0].render(mode=mode, **kwargs)
+        raise NotImplementedError
 
     def close(self):
         for env in self.envs:
             env.close()
 
-    def seed(self, seed=None, same_seed=False):
+    def seed(self, seed=None):
         if seed is None:
             return
 
-        if same_seed:
-            for env in self.envs:
-                env.seed(seed=seed)
+        if isinstance(seed, (list, tuple)):
+            assert len(seed) == self.num_environments
+
+            for env, seed_ in zip(self.envs, seed):
+                env.seed(seed=seed_)
         else:
+            assert isinstance(seed, (int, float))
+
             for i, env in enumerate(self.envs):
-                env.seed(seed=seed * (i + 1))
+                env.seed(seed=int(seed + i))
 
-    def _empty_states(self) -> Union[np.ndarray, List[Dict[str, np.ndarray]]]:
-        if self.complex_obs:
-            # return {k: np.empty(shape, dtype=np.float64) for k, shape in self.states_shape.items()}
+    def get_evaluation_env(self) -> gym.Env:
+        return self.make_env()
 
-            states = []
 
-            for _ in range(self.num_envs):
-                states.append({k: np.empty(shape[1:], dtype=np.float64) for k, shape in self.states_shape.items()})
+def work(make_env: CloudPickleWrapper, rank: int, num_envs: int, seed: int, remote, parent_remote):
+    """Process's work function. Based on:
+        - https://github.com/openai/baselines/blob/master/baselines/common/vec_env/subproc_vec_env.py#L7-L36
+    """
 
-            return states
+    def step(environment, action, index: int):
+        state, reward, done, info = environment.step(action)
 
-        return np.empty(shape=self.states_shape, dtype=np.float64)
+        if done:
+            info['__terminal_state'] = state
+            state = environment.reset()
+
+        return state, reward, done, (rank + index, info)
+
+    parent_remote.close()
+    envs = [make_env.x() for _ in range(num_envs)]
+
+    for i, env in enumerate(envs):
+        env.seed(seed=int(seed + rank + i))
+
+    try:
+        while True:
+            cmd, data = remote.recv()
+
+            # TODO: set seed here? (would not require `seed` argument on env creation)
+            if cmd == 'reset':
+                remote.send([env.reset(**data) for env in envs])
+
+            elif cmd == 'step':
+                remote.send([step(env, action, index=i) for i, (env, action) in enumerate(zip(envs, data))])
+
+            elif cmd == 'get_spaces_spec':
+                remote.send(CloudPickleWrapper((envs[0].observation_space, envs[0].action_space)))
+            else:
+                # signal to close both environments and communication
+                break
+    finally:
+        # close command
+        for env in envs:
+            env.close()
+
+        remote.close()
+
+
+class MultiProcessEnv(AbstractParallelEnv):
+    """Vector environment that uses multiprocessing for parallelism. Based on:
+        - https://github.com/openai/baselines/blob/master/baselines/common/vec_env/subproc_vec_env.py
+    """
+    def __init__(self, env: Union[str, Callable], num: int, seed: int, processes: int = None, **kwargs):
+        context = mp.get_context('spawn')
+
+        def make_env() -> gym.Env:
+            if isinstance(env, str):
+                return gym.make(id=env, **kwargs)
+
+            assert callable(env)
+            return env(**kwargs)
+
+        env_fn = CloudPickleWrapper(make_env)
+        num = int(num)
+        self.make_env = make_env
+
+        # number of processes to spawn
+        if processes is None:
+            processes = context.cpu_count()
+            processes = min(num, processes)
+        else:
+            assert processes >= 1
+
+        super().__init__(num, processes=int(processes))
+        # self.num_workers = int(processes)
+        #
+        # assert num >= self.num_workers
+        # self.num_environments = num
+
+        # init processes and pipes
+        self.pipes = [context.Pipe() for _ in range(self.num_workers)]
+        self.workers = []
+
+        rank = 0
+        for i, amount in enumerate(self._get_amount_per_process()):
+            parent_pipe, worker_pipe = self.pipes[i]
+
+            worker = context.Process(target=work,
+                                     args=(env_fn, rank, amount, seed, worker_pipe, parent_pipe))
+            self.workers.append(worker)
+            rank += amount
+
+        # start processes
+        for w in self.workers:
+            w.daemon = True
+            w.start()
+
+        for _, worker_pipe in self.pipes:
+            worker_pipe.close()
+
+        # retrieve observation and action spaces
+        parent_pipe, _ = self.pipes[0]
+        parent_pipe.send(('get_spaces_spec', None))
+
+        obs_space, action_space = parent_pipe.recv().x  # `.x` due to CloudPickleWrapper
+
+        self.observation_space = obs_space
+        self.action_space = action_space
+
+    def _get_amount_per_process(self) -> List[int]:
+        """Determines the number of sequential environments to be assigned to each process."""
+        envs_per_proc = self.num_environments // self.num_workers
+        amounts = [envs_per_proc] * self.num_workers
+        remaining = self.num_environments - sum(amounts)
+
+        i = 0
+        while remaining > 0:
+            amounts[i] += 1
+            remaining -= 1
+            i += 1
+
+            if i >= len(amounts):
+                i = 0
+
+        return amounts
+
+    def step(self, action: list) -> tuple:
+        actions = np.array_split(action, self.num_workers)  # list of lists of action
+
+        # async
+        for action_list, (remote, _) in zip(actions, self.pipes):
+            remote.send(('step', action_list))
+
+        # wait
+        results = self.receive()
+        results = self._flatten_list(results)
+
+        states, rewards, terminals, info = zip(*results)
+        info = {env_id: env_info for env_id, env_info in info}
+
+        return self._flatten_obs(states), np.stack(rewards), np.stack(terminals), info
+
+    def render(self, mode='human'):
+        raise NotImplementedError
+
+    def reset(self, **kwargs) -> np.ndarray:
+        self.broadcast(message=('reset', kwargs))
+
+        states = self.receive()
+        states = self._flatten_list(states)
+        return self._flatten_obs(states)
+
+    def close(self):
+        self.broadcast(message=('close', None))
+
+        for w in self.workers:
+            w.join()
+
+    def broadcast(self, message: tuple):
+        for remote, _ in self.pipes:
+            remote.send(message)
+
+    def receive(self) -> list:
+        return [remote.recv() for remote, _ in self.pipes]
+
+    def get_evaluation_env(self) -> gym.Env:
+        return self.make_env()
