@@ -94,7 +94,7 @@ class Agent:
         # Saving stuff (weights, config, evaluation):
         self.save_dir = str(save_dir)
         self.base_path = os.path.join(self.save_dir, self.name, utils.actual_datetime())
-        self.evaluation_path = utils.makedir(os.path.join(evaluation_dir, self.name))
+        # self.evaluation_path = utils.makedir(os.path.join(evaluation_dir, self.name))
 
         # JSON configuration file (keeps track of useful quantities, like dynamic-parameters' value)
         self.config_path = os.path.join(self.base_path, 'config.json')
