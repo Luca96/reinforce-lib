@@ -4,8 +4,8 @@ import tensorflow as tf
 from tensorflow.keras.layers import *
 
 from rl import utils
-from rl.v2.agents import Agent
-from rl.v2.networks import Network, backbones
+from rl.agents import Agent
+from rl.networks import Network, backbones
 
 from typing import Dict, Callable
 

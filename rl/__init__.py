@@ -7,10 +7,10 @@ from rl import layers
 from rl import parameters
 from rl import presets
 
-from rl.v2 import agents
-from rl.v2 import memories
-from rl.v2 import networks
+from rl import agents
+from rl import memories
+from rl import networks
 
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'

@@ -7,7 +7,7 @@ from rl import utils
 from rl.agents import Agent
 from rl.layers import DuelingLayer
 
-from rl.v2.networks import backbones, Network
+from rl.networks import backbones, Network
 
 from functools import partial
 from typing import Dict, Union, Callable

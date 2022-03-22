@@ -11,7 +11,7 @@ from rl import utils
 from rl.parameters import DynamicParameter
 from rl.environments.gym.parallel import AbstractParallelEnv, SequentialEnv
 
-from rl.v2.memories import Memory, TransitionSpec
+from rl.memories import Memory, TransitionSpec
 
 from typing import List, Dict, Union, Tuple
 

@@ -2,7 +2,7 @@
 import numpy as np
 
 from rl import utils
-from rl.v2.memories import TransitionSpec
+from rl.memories import TransitionSpec
 
 from typing import Union, Tuple
 

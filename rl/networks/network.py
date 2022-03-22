@@ -2,10 +2,10 @@
 import tensorflow as tf
 
 from rl import utils
-from rl.v2.agents import Agent
+from rl.agents import Agent
 from rl.parameters import DynamicParameter
 from rl.layers import preprocessing
-from rl.v2.networks import backbones
+from rl.networks import backbones
 
 from typing import Union, List, Dict, Callable
 

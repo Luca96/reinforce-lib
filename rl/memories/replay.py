@@ -4,7 +4,7 @@ import tensorflow as tf
 
 from rl import utils
 from rl.parameters import DynamicParameter
-from rl.v2.memories import Memory
+from rl.memories import Memory
 
 from typing import Union
 

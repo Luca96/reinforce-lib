@@ -14,12 +14,12 @@ from tensorflow.keras.layers import Input, Layer, Dense, Concatenate
 from rl import utils
 from rl.parameters import DynamicParameter
 
-from rl.v2.agents import Agent
-from rl.v2.agents.ddpg import CriticNetwork
-from rl.v2.agents.td3 import TwinCriticNetwork
+from rl.agents import Agent
+from rl.agents.ddpg import CriticNetwork
+from rl.agents.td3 import TwinCriticNetwork
 from rl.layers import Linear
-from rl.v2.memories import TransitionSpec, ReplayMemory, PrioritizedMemory
-from rl.v2.networks import Network
+from rl.memories import TransitionSpec, ReplayMemory, PrioritizedMemory
+from rl.networks import Network
 
 from typing import Dict, Union, Tuple
 

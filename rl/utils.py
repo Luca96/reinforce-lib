@@ -1266,49 +1266,48 @@ class SummaryProcess(mp.Process):
             self.terminate()
 
 
-# TODO: deprecate
-class IncrementalStatistics:
-    """Compute mean, variance, and standard deviation incrementally."""
-    def __init__(self, epsilon=TF_EPS, max_count=10e8):
-        self.mean = 0.0
-        self.variance = 0.0
-        self.std = 0.0
-        self.count = 0
-
-        self.eps = epsilon
-        self.max_count = int(max_count)  # fix: cannot convert 10e8 to EagerTensor of type int32
-
-    def update(self, x, normalize=False):
-        old_mean = self.mean
-        new_mean = tf.reduce_mean(x)
-        m = self.count
-        n = tf.shape(x)[0]
-        c1 = m / (m + n)
-        c2 = n / (m + n)
-
-        # more numerically stable than `c3 = (m * n) / (m + n + eps) ** 2` (no square at the denominator,
-        # does not go to infinite but could became zero when m -> inf, so `m` should be clipped as well)
-        c3 = 1.0 / ((m / n) + 2.0 + (n / m))
-
-        self.mean = c1 * old_mean + c2 * new_mean
-        self.variance = c1 * self.variance + c2 * tf.math.reduce_variance(x) + c3 * (old_mean - new_mean) ** 2 + self.eps
-        self.std = tf.sqrt(self.variance)
-
-        # limit accumulating values to avoid numerical instability
-        self.count = min(self.count + n, self.max_count)
-
-        if normalize:
-            return self.normalize(x)
-
-    def normalize(self, values, eps=TF_EPS):
-        return to_float((values - self.mean) / (self.std + eps))
-
-    def set(self, mean: float, variance: float, std: float, count: int):
-        self.mean = mean
-        self.variance = variance
-        self.std = std
-        self.count = count
-
-    def as_dict(self) -> dict:
-        return dict(mean=np.float(self.mean), variance=np.float(self.variance),
-                    std=np.float(self.std), count=np.int(self.count))
+# class IncrementalStatistics:
+#     """Compute mean, variance, and standard deviation incrementally."""
+#     def __init__(self, epsilon=TF_EPS, max_count=10e8):
+#         self.mean = 0.0
+#         self.variance = 0.0
+#         self.std = 0.0
+#         self.count = 0
+#
+#         self.eps = epsilon
+#         self.max_count = int(max_count)  # fix: cannot convert 10e8 to EagerTensor of type int32
+#
+#     def update(self, x, normalize=False):
+#         old_mean = self.mean
+#         new_mean = tf.reduce_mean(x)
+#         m = self.count
+#         n = tf.shape(x)[0]
+#         c1 = m / (m + n)
+#         c2 = n / (m + n)
+#
+#         # more numerically stable than `c3 = (m * n) / (m + n + eps) ** 2` (no square at the denominator,
+#         # does not go to infinite but could became zero when m -> inf, so `m` should be clipped as well)
+#         c3 = 1.0 / ((m / n) + 2.0 + (n / m))
+#
+#         self.mean = c1 * old_mean + c2 * new_mean
+#         self.variance = c1 * self.variance + c2 * tf.math.reduce_variance(x) + c3 * (old_mean - new_mean) ** 2 + self.eps
+#         self.std = tf.sqrt(self.variance)
+#
+#         # limit accumulating values to avoid numerical instability
+#         self.count = min(self.count + n, self.max_count)
+#
+#         if normalize:
+#             return self.normalize(x)
+#
+#     def normalize(self, values, eps=TF_EPS):
+#         return to_float((values - self.mean) / (self.std + eps))
+#
+#     def set(self, mean: float, variance: float, std: float, count: int):
+#         self.mean = mean
+#         self.variance = variance
+#         self.std = std
+#         self.count = count
+#
+#     def as_dict(self) -> dict:
+#         return dict(mean=np.float(self.mean), variance=np.float(self.variance),
+#                     std=np.float(self.std), count=np.int(self.count))

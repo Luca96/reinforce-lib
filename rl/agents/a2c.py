@@ -6,10 +6,10 @@ import numpy as np
 from rl import utils
 from rl.parameters import DynamicParameter
 
-from rl.v2.agents.agents import ParallelAgent
-from rl.v2.memories import TransitionSpec, GAEMemory
-from rl.v2.networks import Network, ValueNetwork
-from rl.v2.networks.policies import PolicyNetwork
+from rl.agents.agents import ParallelAgent
+from rl.memories import TransitionSpec, GAEMemory
+from rl.networks import Network, ValueNetwork
+from rl.networks.policies import PolicyNetwork
 
 from typing import Tuple, Dict
 

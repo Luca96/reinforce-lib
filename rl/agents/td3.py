@@ -7,7 +7,7 @@ import tensorflow as tf
 from tensorflow.keras.layers import Input, Layer, Dense, Concatenate
 from typing import Dict
 
-from rl.v2.agents.ddpg import DDPG, CriticNetwork
+from rl.agents.ddpg import DDPG, CriticNetwork
 
 
 class TwinCriticNetwork(CriticNetwork):

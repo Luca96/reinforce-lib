@@ -9,9 +9,9 @@ import tensorflow as tf
 from rl import utils
 from rl.parameters import DynamicParameter
 
-from rl.v2.agents import Agent
-from rl.v2.memories import TransitionSpec, EpisodicMemory
-from rl.v2.networks import Network, PolicyNetwork, DecomposedValueNetwork
+from rl.agents import Agent
+from rl.memories import TransitionSpec, EpisodicMemory
+from rl.networks import Network, PolicyNetwork, DecomposedValueNetwork
 
 from typing import Tuple, Union
 

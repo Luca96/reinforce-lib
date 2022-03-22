@@ -3,7 +3,7 @@ import numpy as np
 import tensorflow as tf
 
 from rl import utils
-from rl.v2.memories import Memory
+from rl.memories import Memory
 
 
 class EpisodicMemory(Memory):

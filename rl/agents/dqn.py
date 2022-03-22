@@ -14,9 +14,9 @@ from typing import Union, List, Dict, Tuple
 from rl import utils
 from rl.parameters import DynamicParameter
 
-from rl.v2.agents import Agent
-from rl.v2.memories import TransitionSpec, ReplayMemory, NStepMemory, PrioritizedMemory
-from rl.v2.networks.q import Network, QNetwork, DoubleQNetwork
+from rl.agents import Agent
+from rl.memories import TransitionSpec, ReplayMemory, NStepMemory, PrioritizedMemory
+from rl.networks.q import Network, QNetwork, DoubleQNetwork
 
 
 class DQN(Agent):

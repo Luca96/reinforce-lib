@@ -12,9 +12,9 @@ from typing import Dict, Tuple, Union
 from rl import utils
 from rl.parameters import DynamicParameter
 
-from rl.v2.agents import Agent
-from rl.v2.memories import TransitionSpec, ReplayMemory, PrioritizedMemory
-from rl.v2.networks import backbones, Network, DeterministicPolicyNetwork
+from rl.agents import Agent
+from rl.memories import TransitionSpec, ReplayMemory, PrioritizedMemory
+from rl.networks import backbones, Network, DeterministicPolicyNetwork
 
 
 class ActorNetwork(DeterministicPolicyNetwork):
