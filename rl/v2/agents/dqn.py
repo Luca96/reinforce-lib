@@ -1,8 +1,10 @@
-"""Deep Q-Learning (DQN) with Experience Replay"""
+"""Deep Q-Learning (DQN) with Experience Replay; and variants (Double-DQN, Dueling-DQN):
+    - Playing Atari with Deep Reinforcement Learning (arxiv.org/abs/1312.5602)
+    - Deep Reinforcement Learning with Double Q-learning (arxiv.org/abs/1509.06461)
+    - Dueling Network Architectures for Deep Reinforcement Learning (arxiv.org/abs/1511.06581)
+"""
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-
 import gym
 import numpy as np
 import tensorflow as tf
@@ -153,6 +155,7 @@ class DQN(Agent):
 
         return action, {}, dict(prob_best=prob_best, prob_other=prob_other)
 
+    # TODO: test vs `e-greedy`
     def _epsilon_greedy_policy2(self, state, **kwargs):
         """Epsilon-greedy policy"""
         if self.rng.random() > self.epsilon():
@@ -160,7 +163,7 @@ class DQN(Agent):
             q_values = self.dqn.q_values(state, **kwargs)
             action = tf.argmax(q_values, axis=-1)
         else:
-            # random action (note: with prob e / |A| is can be still greedy)
+            # random action (note: with prob e / |A| it can be still greedy)
             action = self.rng.choice(len(self.num_classes))
 
         return action, {}, {}
@@ -223,61 +226,3 @@ class DQN(Agent):
             if not exploration:
                 self.update()
                 self.update_target_network()
-
-    # def save_weights(self, path: str):
-    #     self.dqn.save_weights(filepath=os.path.join(path, 'dqn'))
-    #
-    # def load_weights(self):
-    #     self.dqn.load_weights(filepath=self.weights_path['dqn'], by_name=False)
-
-    # def summary(self):
-    #     self.dqn.summary()
-
-
-if __name__ == '__main__':
-    from rl.parameters import StepDecay, LinearDecay
-    from rl.presets import Preset
-    from rl.layers.preprocessing import MinMaxScaling
-    utils.set_random_seed(42)
-
-    min_max_scaler = MinMaxScaling(min_value=Preset.CARTPOLE_MIN, max_value=Preset.CARTPOLE_MAX)
-
-    # [double+dueling] solved at episode 150
-    # agent = DQN(env='CartPole-v1', batch_size=128, policy='e-greedy', clip_norm=None,
-    #             epsilon=StepDecay(0.2, steps=100, rate=0.5), lr=1e-3, name='dqn-cart_v1',
-    #             dueling=True, prioritized=False, double=True, memory_size=50_000,
-    #             gamma=0.99, update_target_network=500, seed=42,
-    #             network=dict(units=64, preprocess=dict(state=min_max_scaler)))
-
-    # # [double] solved at 160?
-    # agent = DQN(env='CartPole-v1', batch_size=128, policy='e-greedy', clip_norm=None,
-    #             epsilon=StepDecay(0.2, steps=100, rate=0.5), lr=1e-3, name='dqn-cart_v1',
-    #             dueling=False, prioritized=False, double=True, memory_size=50_000,
-    #             gamma=0.99, update_target_network=500, seed=42,
-    #             network=dict(units=64, preprocess=dict(state=min_max_scaler)))
-
-    # [DQN] solved at 90
-    agent = DQN(env='CartPole-v1', batch_size=128, policy='e-greedy', clip_norm=None,
-                epsilon=StepDecay(0.2, steps=100, rate=0.5), lr=1e-3, name='dqn-cart_v1',
-                dueling=False, prioritized=False, double=False, memory_size=50_000,
-                gamma=0.99, update_target_network=500, seed=42,
-                network=dict(units=64, preprocess=dict(state=min_max_scaler)))
-
-    # # DQN + PER: solved at episode 130
-    # agent = DQN(env='CartPole-v1', batch_size=128, policy='e-greedy', clip_norm=None,
-    #             epsilon=StepDecay(0.2, steps=100, rate=0.5), lr=1e-3, name='dqn_per-cart_v1',
-    #             dueling=False, double=False, use_summary=True,
-    #             prioritized=True, alpha=0.6, beta=0.1, memory_size=50_000,
-    #             gamma=0.99, update_target_network=500, seed=42,
-    #             network=dict(units=64, preprocess=dict(state=min_max_scaler)))
-
-    # agent.learn(episodes=200, timesteps=500, save=True, render=False,
-    #             evaluation=dict(episodes=20, freq=10), exploration_steps=512)
-
-    agent.load()
-
-    for i in range(20):
-        agent.env.seed(42 + i)
-        agent.record(timesteps=500)
-
-

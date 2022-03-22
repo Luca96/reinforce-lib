@@ -14,7 +14,6 @@ from typing import Union, Tuple
 class Memory:
     """A circular buffer that supports uniform replying"""
 
-    # TODO: add `min_batches` or `min_samples`; to request a minimum amount of experience tuple for updates
     def __init__(self, transition_spec: TransitionSpec, shape: Union[int, Tuple], seed=None):
         self.seed = seed or utils.GLOBAL_SEED
         self.random = utils.get_random_generator(seed=self.seed)
@@ -112,7 +111,6 @@ class Memory:
 
         return batches
 
-    # TODO: always "shuffle" data!!!!
     def get_data(self) -> dict:
         """Returns the whole data in memory as a single batch"""
         if self.full:

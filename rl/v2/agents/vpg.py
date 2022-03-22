@@ -1,8 +1,6 @@
 """Vanilla Policy Gradient (VPG) Algorithm"""
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-
 import numpy as np
 import tensorflow as tf
 
@@ -163,78 +161,3 @@ class VPG(Agent):
 
         self.log(action_hist=transition['action'], reward_hist=transition['reward'], state_hist=transition['state'],
                  value_hist=transition['value'])
-
-    # def summary(self):
-    #     self.policy.summary()
-    #     self.value.summary()
-
-    # def load_weights(self):
-    #     self.policy.load_weights(filepath=self.weights_path['policy'], by_name=False)
-    #     self.value.load_weights(filepath=self.weights_path['value'], by_name=False)
-    #
-    # def save_weights(self, path: str):
-    #     # self.policy.save_weights(filepath=self.weights_path['policy'])
-    #     # self.value.save_weights(filepath=self.weights_path['value'])
-    #     self.policy.save_weights(filepath=os.path.join(path, 'policy'))
-    #     self.value.save_weights(filepath=os.path.join(path, 'value'))
-    #
-    # def get_weights(self) -> dict:
-    #     return dict(policy=self.policy.get_weights(), value=self.value.get_weights())
-    #
-    # def set_weights(self, agent: 'VPG' = None, weights: dict = None):
-    #     if agent is not None:
-    #         self.policy.set_weights(agent.policy.get_weights())
-    #         self.value.set_weights(agent.value.get_weights())
-    #
-    #     elif isinstance(weights, dict):
-    #         self.policy.set_weights(weights['policy'])
-    #         self.value.set_weights(weights['value'])
-    #     else:
-    #         raise ValueError
-
-
-if __name__ == '__main__':
-    import gym
-    from rl.layers.preprocessing import MinMaxScaling
-
-    utils.set_random_seed(42)
-
-    # agent = VPG(env='CartPole-v1', name='vpg-cart_v1', horizon=500, gamma=0.99, seed=42,
-    #             policy_lr=5e-4, entropy=0.0, value_lr=7e-4, clip_norm=None, use_summary=True,
-    #             policy=dict(units=[128, 64]), value=dict(units=[256, 128]))
-    #
-    # agent.learn(episodes=500, timesteps=500, save=True, should_close=True,
-    #             evaluation=dict(episodes=20, freq=10))
-    # exit()
-
-    # preprocess = dict(state=['standard'])
-    preprocess = dict(state=[MinMaxScaling(min_value=-7.5, max_value=7.5)])
-
-    agent = VPG(env='Pendulum-v1', name='vpg-pendulum', gamma=0.99, horizon=200, seed=42,
-                policy_lr=1e-3, entropy=-1e-2*10, value_lr=1e-3, use_summary=True,
-                clip_norm=(5.0, None),
-                policy=dict(units=64*2, preprocess=preprocess),
-                value=dict(units=64*2, preprocess=preprocess))
-
-    # agent = VPG(env='LunarLanderContinuous-v2', name='vpg-lunar_c', gamma=0.99, horizon=200,
-    #             policy_lr=1e-3, entropy=0.0, value_lr=1e-3, use_summary=True,
-    #             clip_norm=(5.0, None), seed=42,
-    #             policy=dict(units=64), value=dict(units=64))
-
-    # agent.summary()
-    # breakpoint()
-
-    def convert_action():
-        space = agent.env.action_space
-        assert isinstance(space, gym.spaces.Box) and space.is_bounded()
-
-        low = tf.constant(space.low, dtype=tf.float32)
-        delta = tf.constant(space.high - space.low, dtype=tf.float32)
-
-        # return lambda a: np.squeeze(a * delta + low)  # lunar-c
-        return lambda a: np.reshape(a * delta + low, newshape=1)  # pendulum
-
-    agent.convert_action = convert_action()
-
-    agent.learn(episodes=500, timesteps=200, save=True, should_close=True,
-                evaluation=dict(episodes=20, freq=5))

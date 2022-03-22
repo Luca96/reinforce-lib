@@ -1,8 +1,5 @@
 """Advantage Actor-Critic (A2C)"""
 
-import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-
 import tensorflow as tf
 import numpy as np
 
@@ -10,36 +7,189 @@ from rl import utils
 from rl.parameters import DynamicParameter
 
 from rl.v2.agents.agents import ParallelAgent
-from rl.v2.agents.ppo import GlobalMemory
-from rl.v2.memories import TransitionSpec
+from rl.v2.memories import TransitionSpec, GAEMemory
 from rl.v2.networks import Network, ValueNetwork
 from rl.v2.networks.policies import PolicyNetwork
 
-from typing import Tuple, Union
+from typing import Tuple, Dict
 
 
 class ActorNetwork(PolicyNetwork):
-
-    # @tf.function
-    # def call(self, inputs, actions=None, **kwargs):
-    #     distribution = Network.call(self, inputs, **kwargs)
-    #
-    #     if isinstance(actions, dict) or tf.is_tensor(actions):
-    #         log_prob = distribution.log_prob(actions)
-    #         entropy = distribution.entropy()
-    #
-    #         if entropy is None:
-    #             # estimate entropy
-    #             entropy = -tf.reduce_mean(log_prob)
-    #
-    #         return log_prob, entropy
-    #
-    #     return tf.identity(distribution), distribution.mean(), distribution.stddev()
 
     def structure(self, inputs, name='A2C-ActorNetwork', **kwargs) -> tuple:
         return super().structure(inputs, name=name, **kwargs)
 
 
+class GlobalMemory(GAEMemory):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.num_actors = self.agent.num_actors  # num. parallel workers in env
+        self.horizon = self.agent.horizon  # max trajectory size
+
+        self.debug_keys = ['returns', 'returns_normalized', 'advantages', 'values',
+                           'advantages_normalized', 'advantages_hist', 'returns_hist']
+
+        # offsets for the storing index (`self.index`) for each actor
+        self.offsets = [0] * self.num_actors
+        self.last_offsets = [0] * self.num_actors  # offsets for GAE computation
+
+    @property
+    def current_size(self) -> int:
+        if self.full:
+            return self.size
+
+        return sum(self.offsets)
+
+    def is_full(self) -> bool:
+        if self.current_size >= self.size:
+            self.full = True
+
+        return self.full
+
+    def full_enough(self, amount: int) -> bool:
+        return self.current_size >= amount
+
+    # def store(self, transition: Dict[str, np.ndarray]):
+    #     assert not self.full
+    #     keys = transition.keys()
+    #
+    #     # unpack `transition` to get a list of per-actor tuples
+    #     for i, experience in enumerate(zip(*transition.values())):
+    #         # set the storing index for the i-th actor
+    #         self.index = self.offsets[i] + (self.horizon * i)
+    #
+    #         # store transition
+    #         super().store(transition={k: v for k, v in zip(keys, experience)})
+    #
+    #         # update index for i-th actor
+    #         self.offsets[i] = self.offsets[i] + 1
+
+    def store(self, transition: Dict[str, np.ndarray]):
+        assert not self.full
+
+        # eventually flatten nested dicts in `transition`; e.g. at "state" and "action"
+        items = list(transition.items())  # is `[(key, np.ndarray or {})]`
+
+        for i, (key, value) in enumerate(items):
+            if isinstance(value, dict):
+                # flatten dict into `[(key_, value_)]` structure
+                items[i] = (key, list(value.items()))
+
+        # unpack `items` to get per-actor transitions
+        for i in range(self.num_actors):
+            # set the storing index for the i-th actor
+            self.index = self.offsets[i] + (self.horizon * i)
+
+            # retrieve experience for i-th actor
+            experience = self._index_nested(items, index=i)
+
+            # store transition
+            super().store(transition=experience)
+
+            # update index for i-th actor
+            self.offsets[i] = self.offsets[i] + 1
+
+    def _index_nested(self, items, index: int) -> dict:
+        assert isinstance(items, list) and isinstance(items[0], tuple)
+        out = {}
+
+        for key, value in items:
+            if isinstance(value, list) and isinstance(value[0], tuple):
+                out[key] = self._index_nested(items=value, index=index)
+            else:
+                out[key] = value[index]
+
+        return out
+
+    def end_trajectory(self, last_values: list) -> dict:
+        last_values = tf.unstack(last_values)
+        assert len(last_values) == self.num_actors
+
+        data_reward, data_value = self.data['reward'], self.data['value']
+        data_return, data_adv = self.data['return'], self.data['advantage']
+        debug = {k: [] for k in self.debug_keys}
+
+        for i, last_value in enumerate(last_values):
+            stop_idx = self.offsets[i] + (self.horizon * i)
+            start_idx = self.last_offsets[i] + (self.horizon * i)
+
+            # concat value (0 if state is terminal, else bootstrap)
+            value = np.reshape(last_value, newshape=(1, -1))
+            rewards = np.concatenate([data_reward[start_idx:stop_idx], value], axis=0)
+            values = np.concatenate([data_value[start_idx:stop_idx], value], axis=0)
+
+            # compute returns and advantages for i-th actor
+            returns, ret_norm = self.compute_returns(rewards)
+            adv, adv_norm = self.compute_advantages(rewards, values)
+
+            # store them
+            data_return[start_idx:stop_idx] = ret_norm
+            data_adv[start_idx:stop_idx] = adv_norm
+
+            # update index's offsets
+            self.last_offsets[i] = self.offsets[i]
+
+            # update debug
+            dict_ = dict(returns=returns, returns_normalized=ret_norm, advantages=adv, values=values,
+                         advantages_normalized=adv_norm, advantages_hist=adv_norm, returns_hist=ret_norm)
+
+            for k, v in dict_.items():
+                debug[k].append(v)
+
+        return debug
+
+    def clear(self):
+        super().clear()
+        self.offsets = [0] * self.num_actors
+        self.last_offsets = [0] * self.num_actors
+
+    def get_data(self, **kwargs) -> dict:
+        if self.full:
+            return self.data
+
+        # Get a subset of the data:
+        data = {}
+
+        for key, value in self.data.items():
+            # indexing indices for all the actors
+            indices = []
+
+            for i, offset in enumerate(self.offsets):
+                start_idx = self.horizon * i
+                stop_idx = offset + start_idx
+
+                indices.append(np.arange(start=start_idx, stop=stop_idx))
+
+            indices = np.concatenate(indices)
+            data[key] = value[indices]
+
+        return data
+
+    def to_batches(self, batch_size: int, repeat=1, seed=None) -> tf.data.Dataset:
+        """Returns a tf.data.Dataset iterator over batches of transitions"""
+        assert batch_size >= 1
+        tensors = self.get_data()
+
+        ds = tf.data.Dataset.from_tensor_slices(tensors)
+        ds = ds.shuffle(buffer_size=min(1024, batch_size), reshuffle_each_iteration=True, seed=seed)
+
+        # if size is not a multiple of `batch_size`, just add some data at random
+        size = tensors[list(tensors.keys())[0]].shape[0]
+        remainder = size % batch_size
+
+        if remainder > 0:
+            ds = ds.concatenate(ds.take(count=remainder))
+
+        # batch, repeat, prefetch
+        ds = ds.batch(batch_size)
+        ds = ds.repeat(count=repeat)
+
+        return ds.prefetch(buffer_size=2)
+
+
+# TODO: normalization functions
 class A2C(ParallelAgent):
     """A2C agent"""
 
@@ -65,10 +215,10 @@ class A2C(ParallelAgent):
         self.critic_lr = DynamicParameter.create(value=critic_lr)
 
         # Networks
-        self.weights_path = dict(policy=os.path.join(self.base_path, 'actor'),
-                                 value=os.path.join(self.base_path, 'critic'))
+        # self.weights_path = dict(policy=os.path.join(self.base_path, 'actor'),
+        #                          value=os.path.join(self.base_path, 'critic'))
 
-        self.actor = Network.create(agent=self, **(actor or {}), base_class=ActorNetwork)
+        self.actor = Network.create(agent=self, **(actor or {}), base_class=PolicyNetwork)
         self.critic = Network.create(agent=self, **(critic or {}), base_class=ValueNetwork)
 
         if clip_norm is None:
@@ -99,97 +249,6 @@ class A2C(ParallelAgent):
     def act_evaluation(self, state, **kwargs):
         actions, _, _ = self.actor(state, training=False, deterministic=True, **kwargs)
         return actions
-
-    # def learn(self, episodes: int, timesteps: int, render: Union[bool, int, None] = False, should_close=True,
-    #           evaluation: Union[dict, bool] = None, exploration_steps=0, save=True):
-    #     assert episodes > 0
-    #     assert timesteps > 0
-    #
-    #     import time
-    #     t0 = time.time()
-    #     total_sec = 0
-    #
-    #     self.on_start(episodes, timesteps)
-    #
-    #     # init evaluation args:
-    #     if isinstance(evaluation, dict):
-    #         eval_freq = evaluation.pop('freq', episodes + 1)  # default: never evaluate
-    #         assert isinstance(eval_freq, int)
-    #
-    #         evaluation['should_close'] = False
-    #         evaluation.setdefault('episodes', 1)  # default: evaluate on just 1 episode
-    #         evaluation.setdefault('timesteps', timesteps)  # default: evaluate on the same number of timesteps
-    #         evaluation.setdefault('render', render)  # default: same rendering options
-    #     else:
-    #         evaluation = {}
-    #         eval_freq = episodes + 1  # never evaluate
-    #
-    #     for episode in range(1, episodes + 1):
-    #         self.on_episode_start(episode)
-    #
-    #         episode_reward = 0.0
-    #         discounted_reward = 0.0
-    #         discount = 1.0
-    #         ti = time.time()
-    #
-    #         states = self.env.reset()
-    #         states = self.preprocess(states)
-    #
-    #         # inner-loop:
-    #         t = 0
-    #
-    #         while t < timesteps + 1:
-    #             t += 1
-    #             self.timestep = t
-    #             self.total_steps += 1
-    #
-    #             # Agent prediction
-    #             actions, other, debug = self.act(states)
-    #             actions_env = self.convert_action(actions)
-    #
-    #             # Environment step
-    #             next_states, rewards, terminals, info = self.env.step(action=actions_env)
-    #
-    #             is_truncated = [x.get('TimeLimit.truncated', False) for x in info.values()]
-    #             is_failure = np.logical_and(terminals, np.logical_not(is_truncated))
-    #
-    #             episode_reward += np.mean(rewards)
-    #             discounted_reward += np.mean(rewards) * discount
-    #             discount *= self.gamma
-    #
-    #             transition = dict(state=states, action=actions, reward=rewards, next_state=next_states,
-    #                               terminal=is_failure, info=info, **(other or {}))
-    #
-    #             self.on_transition(transition, terminals)
-    #             self.log_env(action=actions_env, **debug)
-    #
-    #             if (t == timesteps) or self.memory.is_full():
-    #                 seconds = time.time() - ti
-    #                 total_sec += seconds
-    #
-    #                 print(f'Episode {episode} terminated after {t} timesteps in {round(seconds, 3)}s ' +
-    #                       f'with reward {round(episode_reward, 3)}')
-    #
-    #                 self.log(timestep=t, total_steps=self.total_steps, time_seconds=total_sec,
-    #                          seconds_per_epoch=seconds)
-    #                 self.on_termination(last_transition=transition)
-    #                 break
-    #             else:
-    #                 states = next_states
-    #                 states = self.preprocess(states)
-    #
-    #         self.on_episode_end(episode, episode_reward)
-    #
-    #         # Evaluate
-    #         if episode % eval_freq == 0:
-    #             eval_rewards = self.evaluate2(**evaluation)
-    #             self.log(eval_rewards=eval_rewards)
-    #
-    #             print(f'[Evaluation] average return: {np.round(np.mean(eval_rewards), 2)}, '
-    #                   f'std: {np.round(np.std(eval_rewards), 2)}')
-    #
-    #     print(f'Time taken {round(time.time() - t0, 3)}s.')
-    #     self.on_close(should_close)
 
     def learn(self, *args, **kwargs):
         with utils.Timed('Learn'):
@@ -237,76 +296,3 @@ class A2C(ParallelAgent):
 
         if not exploration and self.memory.is_full():
             self.update()
-
-    # def load_weights(self):
-    #     self.actor.load_weights(filepath=self.weights_path['actor'], by_name=False)
-    #     self.critic.load_weights(filepath=self.weights_path['critic'], by_name=False)
-    #
-    # def save_weights(self, path: str):
-    #     self.actor.save_weights(filepath=os.path.join(path, 'actor'))
-    #     self.critic.save_weights(filepath=os.path.join(path, 'critic'))
-    #
-    # def summary(self):
-    #     self.actor.summary()
-    #     self.critic.summary()
-
-
-if __name__ == '__main__':
-    import gym
-    utils.set_random_seed(42)
-
-    # # achieves 390+ reward
-    # agent = A2C(env='CartPole-v1', name='a2c-cart_v1', horizon=16, num_actors=16,
-    #             actor_lr=3e-4, entropy=1e-4, clip_norm=None, use_summary=True,
-    #             actor=dict(units=32), critic=dict(units=64),
-    #             seed=utils.GLOBAL_SEED, parallel_env=SequentialEnv)
-    #
-    # agent.learn(episodes=250, timesteps=500, save=True, render=False, should_close=True,
-    #             evaluation=dict(episodes=25, freq=10))
-    # exit()
-
-    # agent = A2C(env='Pendulum-v1', name='a2c-pendulum', horizon=64, num_actors=8,
-    #             actor_lr=1e-3, critic_lr=1e-3, entropy=1e-3, clip_norm=None, use_summary=True,
-    #             actor=dict(units=128), critic=dict(units=128),
-    #             seed=utils.GLOBAL_SEED, parallel_env=SequentialEnv)
-
-    # agent.learn(episodes=250, timesteps=500, save=False, render=False, should_close=True,
-    #             evaluation=dict(episodes=20, freq=5))
-
-    from rl.parameters import LinearDecay, ExponentialDecay
-
-    agent = A2C(env='LunarLanderContinuous-v2', name='a2c-lunar_c', horizon=16*2, num_actors=16,
-                actor_lr=3e-4, critic_lr=1e-3, clip_norm=(2.5, 10.0), use_summary=True and False,
-                entropy=LinearDecay(1.0, end_value=0.0, steps=400),
-                # entropy=ExponentialDecay(1.0, steps=500, rate=0.99),
-                actor=dict(units=128, num_layers=4), critic=dict(units=128), lambda_=0.95,
-                seed=utils.GLOBAL_SEED)
-
-    def convert_action():
-        space = agent.env.action_space
-        assert isinstance(space, gym.spaces.Box) and space.is_bounded()
-
-        low = tf.constant(space.low, dtype=tf.float32)
-        delta = tf.constant(space.high - space.low, dtype=tf.float32)
-
-        return lambda actions: [np.squeeze(a * delta + low) for a in actions]  # lunar-c
-        # return lambda actions: [np.reshape(a * delta + low, newshape=1) for a in actions]  # pendulum
-
-    agent.convert_action = convert_action()
-
-    # agent.summary()
-    # breakpoint()
-
-    # agent.load()
-
-    # runs = [agent.record(timesteps=1000, force=True, rename=True) for _ in range(50)]  # [(reward, path)]
-    # runs = sorted(runs, key=lambda x: x[0])  # sort by reward
-    # runs = runs[:-10]  # keep only best 10, so remove the others
-    #
-    # for _, path in runs:
-    #     utils.remove_folder(path)
-    #
-    # exit()
-
-    agent.learn(episodes=500, timesteps=1000, save=True, render=False, should_close=True,
-                evaluation=dict(episodes=25, render=20, freq=10))

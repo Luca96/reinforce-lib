@@ -1,7 +1,9 @@
-"""Soft Actor-Critic (SAC)"""
+"""Soft Actor-Critic (SAC)
+    - Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor (arXiv:1801.01290)
+    - Soft Actor-Critic Algorithms and Applications (arXiv:1812.05905)
+"""
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 import gym
 import numpy as np
 import tensorflow as tf
@@ -16,10 +18,10 @@ from rl.v2.agents import Agent
 from rl.v2.agents.ddpg import CriticNetwork
 from rl.v2.agents.td3 import TwinCriticNetwork
 from rl.layers import Linear
-from rl.v2.memories import TransitionSpec, ReplayMemory
-from rl.v2.networks import backbones, Network
+from rl.v2.memories import TransitionSpec, ReplayMemory, PrioritizedMemory
+from rl.v2.networks import Network
 
-from typing import Dict, List, Tuple
+from typing import Dict, Union, Tuple
 
 
 class SquashedGaussianPolicy(Network):
@@ -154,13 +156,12 @@ class SoftTwinCriticNetwork(TwinCriticNetwork):
         return targets, dict(targets=targets, next_q_values=next_q_values)
 
 
-# TODO: support PER? or generic memory support?
-# TODO: inherit from DDPG?
 class SAC(Agent):
 
     def __init__(self, *args, name='sac', entropy_lr=1e-3, target_entropy: utils.DynamicType = None, actor_lr=1e-4,
                  actor: dict = None, critic_lr=1e-4, critic: dict = None, memory_size=1024, polyak=0.995,
-                 entropy=1e-3, clip_norm=(None, None), optimizer='adam', **kwargs):
+                 entropy=1e-3, prioritized=False, alpha: utils.DynamicType = 0.6, beta: utils.DynamicType = 0.1,
+                 optimizer='adam', clip_norm=(None, None), **kwargs):
         assert memory_size >= 1
         assert 0 < polyak <= 1
 
@@ -168,6 +169,7 @@ class SAC(Agent):
 
         # hyper-parameters
         self.memory_size = int(memory_size)
+        self.prioritized = bool(prioritized)
         self.polyak = float(polyak)
         self.entropy_weight = float(entropy)
 
@@ -180,28 +182,33 @@ class SAC(Agent):
 
         if target_entropy is None:
             self.target_entropy = DynamicParameter.create(value=-np.prod(self.action_high.shape))
+        else:
+            self.target_entropy = DynamicParameter.create(value=float(target_entropy))
+
+        # PER memory params:
+        if self.prioritized:
+            self.alpha = DynamicParameter.create(value=alpha)
+            self.beta = DynamicParameter.create(value=beta)
 
         # Networks
         self.weights_path = dict(actor=os.path.join(self.base_path, 'actor'),
-                                 # q1=os.path.join(self.base_path, 'q1'),
-                                 # q2=os.path.join(self.base_path, 'q2'),
                                  critic=os.path.join(self.base_path, 'critic'))
 
         self.actor = Network.create(agent=self, **(actor or {}), target=False, base_class=SquashedGaussianPolicy)
-        # self.q1 = Network.create(agent=self, **(critic or {}), target=True, base_class=CriticNetwork)
-        # self.q2 = Network.create(agent=self, **(critic or {}), target=True, base_class=CriticNetwork)
         self.critic = Network.create(agent=self, **(critic or {}), target=True, base_class=SoftTwinCriticNetwork)
 
         self.actor.compile(optimizer, clip_norm=clip_norm[0], clip=self.clip_grads, learning_rate=self.actor_lr)
-        # self.q1.compile(optimizer, clip_norm=clip_norm[1], clip=self.clip_grads, learning_rate=self.critic_lr)
-        # self.q2.compile(optimizer, clip_norm=clip_norm[1], clip=self.clip_grads, learning_rate=self.critic_lr)
         self.critic.compile(optimizer, clip_norm=clip_norm[1], clip=self.clip_grads, learning_rate=self.critic_lr)
 
     @property
     def transition_spec(self) -> TransitionSpec:
         return TransitionSpec(state=self.state_spec, action=(self.num_actions,), next_state=True, terminal=True)
 
-    def define_memory(self) -> ReplayMemory:
+    def define_memory(self) -> Union[ReplayMemory, PrioritizedMemory]:
+        if self.prioritized:
+            return PrioritizedMemory(self.transition_spec, shape=self.memory_size, gamma=self.gamma,
+                                     alpha=self.alpha, beta=self.beta, seed=self.seed)
+
         return ReplayMemory(self.transition_spec, shape=self.memory_size, seed=self.seed)
 
     def _init_action_space(self):
@@ -242,7 +249,8 @@ class SAC(Agent):
         self.critic.train_step(batch)
         self.actor.train_step(batch)
 
-        self.critic.update_target_network(polyak=self.polyak)
+        # self.critic.update_target_network(polyak=self.polyak)
+        self.update_target_networks()
 
     @tf.function
     def update_alpha(self, batch):
@@ -258,53 +266,12 @@ class SAC(Agent):
         # debug
         self.log(alpha_loss=alpha_loss, alpha_target=target_alpha, alpha_gradient=grads)
 
+    def update_target_networks(self):
+        self.critic.update_target_network(polyak=self.polyak)
+        self.log(target_critic_distance=self.critic.debug_target_network())
+
     def on_transition(self, *args, exploration=False):
         super().on_transition(*args, exploration=exploration)
 
         if not exploration:
             self.update()
-
-    # def save_weights(self):
-    #     self.actor.save_weights(filepath=self.weights_path['actor'])
-    #     # self.q1.save_weights(filepath=self.weights_path['q1'])
-    #     # self.q2.save_weights(filepath=self.weights_path['q2'])
-    #     self.critic.save_weights(filepath=self.weights_path['critic'])
-    #
-    # def load_weights(self):
-    #     self.actor.load_weights(filepath=self.weights_path['actor'], by_name=False)
-    #     # self.q1.load_weights(filepath=self.weights_path['q1'], by_name=False)
-    #     # self.q2.load_weights(filepath=self.weights_path['q2'], by_name=False)
-    #     self.critic.load_weights(filepath=self.weights_path['critic'], by_name=False)
-    #
-    # def summary(self):
-    #     self.actor.summary()
-    #     # self.q1.summary()
-    #     self.critic.summary()
-
-
-if __name__ == '__main__':
-    utils.set_random_seed(42)
-
-    agent = SAC(env='Pendulum-v1', actor_lr=3e-4, critic_lr=5e-4, polyak=0.995,
-                memory_size=100_000, batch_size=256, name='sac-pendulum', use_summary=True,
-                actor=dict(units=256), critic=dict(units=256), seed=utils.GLOBAL_SEED)
-
-    # agent.summary()
-    # breakpoint()
-
-    # fix specific to pendulum env
-    agent._convert_action = agent.convert_action
-    agent.convert_action = lambda a: np.reshape(agent._convert_action(a), newshape=[1])
-
-    agent.learn(episodes=200, timesteps=200, evaluation=dict(freq=10, episodes=20),
-                exploration_steps=5 * agent.batch_size, save=True)
-    exit()
-
-    import pybullet_envs
-
-    agent = SAC(env='HalfCheetahBulletEnv-v0', actor_lr=3e-4, critic_lr=5e-4, polyak=0.999,
-                memory_size=100_000, batch_size=256, name='sac-cheetah', use_summary=False,
-                actor=dict(units=256 // 2), critic=dict(units=256 // 2))
-
-    agent.learn(episodes=1000, timesteps=200, evaluation=dict(freq=100, episodes=50, timesteps=1000),
-                save=False, exploration_steps=5 * agent.batch_size)

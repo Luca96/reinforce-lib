@@ -49,7 +49,7 @@ class ScalingConditioning(Layer):
 
 
 class AffineConditioning(Layer):
-    """Affine transform-based conditioning"""
+    """Affine transform-based conditioning, see: https://arxiv.org/pdf/2202.00424"""
 
     def __init__(self, name=None, **kwargs):
         super().__init__(name=name)

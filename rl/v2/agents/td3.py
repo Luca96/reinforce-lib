@@ -1,21 +1,13 @@
-"""Twin-delayed DDPG (TD3)"""
+"""Twin-delayed DDPG (TD3)
+    - Addressing Function Approximation Error in Actor-Critic Methods (arXiv:1802.09477)
+"""
 
-import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-
-import gym
-import numpy as np
 import tensorflow as tf
 
 from tensorflow.keras.layers import Input, Layer, Dense, Concatenate
-from typing import Dict, List
+from typing import Dict
 
-from rl import utils
-from rl.parameters import DynamicParameter
-
-from rl.v2.agents import Agent
-from rl.v2.agents.ddpg import DDPG, Network, CriticNetwork, ActorNetwork
-from rl.v2.networks import backbones
+from rl.v2.agents.ddpg import DDPG, CriticNetwork
 
 
 class TwinCriticNetwork(CriticNetwork):
@@ -113,58 +105,3 @@ class TD3(DDPG):
         if self.total_steps % self.actor_update_freq == 0:
             self.actor.train_step(batch)
             self.update_target_networks()
-
-
-if __name__ == '__main__':
-    utils.set_random_seed(42)
-
-    # agent = TD3(env='Pendulum-v1', actor_lr=1e-3, critic_lr=1e-3, polyak=0.995, actor_update_freq=2,
-    #             memory_size=100_000, batch_size=256, name='td3-pendulum', use_summary=True,
-    #             actor=dict(units=256), critic=dict(units=256), noise=0.1)
-
-    # agent = TD3(env='Pendulum-v1', actor_lr=1e-3, critic_lr=1e-3, polyak=0.995, actor_update_freq=2,
-    #             memory_size=256_000, batch_size=128, name='td3-pendulum', use_summary=True,
-    #             actor=dict(units=64), critic=dict(units=64), noise=0.1, seed=utils.GLOBAL_SEED)
-    #
-    # # agent.summary()
-    # # breakpoint()
-    #
-    # # fix specific to pendulum env
-    # agent._convert_action = agent.convert_action
-    # agent.convert_action = lambda a: np.reshape(agent._convert_action(a), newshape=[1])
-    #
-    # agent.learn(episodes=200, timesteps=200, evaluation=dict(freq=10, episodes=20),
-    #             exploration_steps=5 * agent.batch_size, save=True)
-
-    # agent = TD3(env='LunarLanderContinuous-v2', actor_lr=1e-3, critic_lr=1e-3, polyak=0.995, actor_update_freq=2,
-    #             memory_size=256_000, batch_size=128, name='td3-lunar', use_summary=True,
-    #             actor=dict(units=64), critic=dict(units=64), noise=0.1, seed=utils.GLOBAL_SEED)
-    #
-    # agent.learn(episodes=250, timesteps=200, evaluation=dict(freq=10, episodes=20),
-    #             exploration_steps=5 * agent.batch_size, save=True)
-    # exit()
-
-    # # solved when r = 300 in 1600 timesteps
-    # agent = TD3(env='BipedalWalker-v3', actor_lr=1e-3, critic_lr=1e-3, polyak=0.999, actor_update_freq=2,
-    #             memory_size=256_000, batch_size=256, name='td3-walker', use_summary=True, seed=42,
-    #             actor=dict(units=256), critic=dict(units=256), noise=0.1)
-    #
-    # agent.learn(episodes=2500, timesteps=1600, evaluation=dict(freq=20, episodes=20),
-    #             save=True, exploration_steps=5 * agent.batch_size)
-    # exit()
-
-    import pybullet_envs
-
-    # 2300+ reward at episode 4690
-
-    agent = TD3(env='HopperBulletEnv-v0', name='td3-hopper',
-                use_summary=True, seed=42,
-                actor_lr=1e-3, critic_lr=1e-3,
-                polyak=0.999, actor_update_freq=2,
-                memory_size=256_000, batch_size=256,
-                actor=dict(units=256), critic=dict(units=256), noise=0.1)
-
-    agent.learn(episodes=5_000, timesteps=1000, evaluation=dict(freq=20, episodes=20),
-                save=True, exploration_steps=5 * agent.batch_size)
-
-    agent.record(timesteps=1000)

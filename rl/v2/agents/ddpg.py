@@ -1,10 +1,9 @@
-"""Deep Deterministic Policy Gradient (DDPG)"""
+"""Deep Deterministic Policy Gradient (DDPG)
+    - Continuous control with deep reinforcement learning (arXiv:1509.02971)
+"""
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-
 import gym
-import numpy as np
 import tensorflow as tf
 
 from tensorflow.keras.layers import Layer, Dense, Concatenate, Input
@@ -105,7 +104,9 @@ class DDPG(Agent):
                  optimizer='adam', actor: dict = None, critic: dict = None, clip_norm=(None, None), polyak=0.95,
                  memory_size=1024, noise: utils.DynamicType = 0, prioritized=False,
                  alpha: utils.DynamicType = 0.6, beta: utils.DynamicType = 0.1, **kwargs):
+        assert memory_size >= 1
         assert 0.0 < polyak <= 1.0
+
         super().__init__(*args, name=name, **kwargs)
 
         # hyper-parameters
@@ -210,85 +211,6 @@ class DDPG(Agent):
         if not exploration:
             self.update()
 
-    def save_weights(self, path: str):
-        self.critic.save_weights(filepath=os.path.join(path, 'critic'))
-        self.actor.save_weights(filepath=os.path.join(path, 'actor'))
-    #
-    # def load_weights(self):
-    #     self.actor.load_weights(filepath=self.weights_path['actor'], by_name=False)
-    #     self.critic.load_weights(filepath=self.weights_path['critic'], by_name=False)
-    #
-    # def summary(self):
-    #     self.actor.summary()
-    #     self.critic.summary()
-
-
-if __name__ == '__main__':
-    utils.tf_enable_debug()
-    utils.set_random_seed(42)
-
-    # agent = DDPG(env='Pendulum-v1', actor_lr=1e-3, critic_lr=1e-3, polyak=0.995,
-    #              memory_size=100_000, batch_size=256, name='ddpg-pendulum', use_summary=False,
-    #              actor=dict(units=256), critic=dict(units=256), noise=0.1)
-    #
-    # # fix specific to pendulum env
-    # agent._convert_action = agent.convert_action
-    # agent.convert_action = lambda a: np.reshape(agent._convert_action(a), newshape=[1])
-    #
-    # agent.learn(episodes=150, timesteps=200, evaluation=dict(freq=10, episodes=10),
-    #             exploration_steps=5 * agent.batch_size, save=False)
-
-    from rl.parameters import StepDecay
-
-    # achieves > 100 reward
-    # agent = DDPG(env='LunarLanderContinuous-v2', seed=42,
-    #              actor_lr=1e-3, critic_lr=1e-3, polyak=0.995,
-    #              memory_size=256_000, batch_size=128, name='ddpg-lunar_c', use_summary=True,
-    #              actor=dict(units=64), critic=dict(units=64),
-    #              noise=StepDecay(0.1, steps=50, rate=0.5))
-
-    from rl.layers.preprocessing import StandardScaler, MinMaxScaling
-    preprocess = dict(state=StandardScaler(eps=1e-5))
-    preprocess2 = dict(state=MinMaxScaling(min_value=-2, max_value=2))
-
-    # try more training (reward > -80)
-    agent = DDPG(env='LunarLanderContinuous-v2', seed=42,
-                 actor_lr=1e-3, critic_lr=1e-3, polyak=0.995,
-                 memory_size=256_000, batch_size=128, name='ddpg-lunar_c', use_summary=False,
-                 actor=dict(units=64, preprocess=preprocess),
-                 critic=dict(units=64, preprocess=preprocess),
-                 noise=StepDecay(0.1, steps=100, rate=0.5))
-
-    agent.learn(episodes=250 + 100, timesteps=200, evaluation=dict(freq=10-9, episodes=25-22),
-                exploration_steps=5 * agent.batch_size, save=True)
-
-    # more training
-    # agent = DDPG(env='LunarLanderContinuous-v2', seed=42,
-    #              actor_lr=3e-3, critic_lr=3e-3, polyak=0.999,
-    #              memory_size=256_000, batch_size=128, name='ddpg-lunar_c', use_summary=True,
-    #              actor=dict(units=64, kernel_initializer='orthogonal', preprocess=preprocess),
-    #              critic=dict(units=64, kernel_initializer='orthogonal', preprocess=preprocess),
-    #              noise=StepDecay(0.1, steps=100, rate=0.5))
-
-    agent = DDPG(env='LunarLanderContinuous-v2', seed=42,
-                 actor_lr=3e-3, critic_lr=3e-3, polyak=0.999,
-                 memory_size=256_000, batch_size=128, name='ddpg-lunar_c', use_summary=True,
-                 actor=dict(units=64, preprocess=preprocess2),
-                 critic=dict(units=64, preprocess=preprocess2),
-                 noise=StepDecay(0.1, steps=100, rate=0.5))
-
-    # agent = DDPG(env='LunarLanderContinuous-v2', seed=42,
-    #              actor_lr=1e-3, critic_lr=1e-3, polyak=0.995, prioritized=True,
-    #              memory_size=256_000, batch_size=128, name='ddpg-lunar_c', use_summary=True,
-    #              actor=dict(units=64), critic=dict(units=64),
-    #              noise=StepDecay(0.1, steps=50, rate=0.5))
-
-    # agent = DDPG(env='LunarLanderContinuous-v2', seed=42,
-    #              actor_lr=1e-3, critic_lr=1e-3, polyak=0.9999, prioritized=True,
-    #              memory_size=256_000, batch_size=128, name='ddpg-lunar_c', use_summary=True,
-    #              actor=dict(units=64, preprocess=preprocess),
-    #              critic=dict(units=64, preprocess=preprocess),
-    #              noise=StepDecay(0.2, steps=50, rate=0.5))
-
-    agent.learn(episodes=250 + 100, timesteps=200, evaluation=dict(freq=10, episodes=25),
-                exploration_steps=5 * agent.batch_size, save=True)
+    # def save_weights(self, path: str):
+    #     self.critic.save_weights(filepath=os.path.join(path, 'critic'))
+    #     self.actor.save_weights(filepath=os.path.join(path, 'actor'))

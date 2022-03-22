@@ -101,7 +101,7 @@ def dense_branched(*layers: List[Layer], units: Union[int, List[int]] = 32, num_
     return concatenate(outputs)
 
 
-# # TODO: implement as a layer?
+# # TODO: implement as Categorical Mixture Distribution by tfp
 # def mixture_density(layer: Layer, units: int, components: int, **kwargs) -> Layer:
 #     """The "head" of a Mixture Density Network (MDN) with factored Gaussian components (called "kernel functions"):
 #         - see chapter 3 of https://publications.aston.ac.uk/id/eprint/373/1/NCRG_94_004.pdf

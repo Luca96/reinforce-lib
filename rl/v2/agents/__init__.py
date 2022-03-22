@@ -18,9 +18,9 @@ from rl.v2.agents.td3 import TD3
 from rl.v2.agents.sac import SAC
 
 # Distributional RL agent:
-# TODO: QR-DQN
-from rl.v2.agents.rainbow import Rainbow
-from rl.v2.agents.iqn import IQN
+# TODO: QR-DQN + check implementations
+# from rl.v2.agents.rainbow import Rainbow
+# from rl.v2.agents.iqn import IQN
 
 # Model-based agents:
 # TODO: MCTS, ...

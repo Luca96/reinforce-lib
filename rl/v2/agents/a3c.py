@@ -1,4 +1,4 @@
-"""Synchronous Advantage Actor-Critic (A2C)"""
+"""Asynchronous Advantage Actor-Critic (A3C)"""
 
 import os
 import time
@@ -28,6 +28,8 @@ class A3C(Agent):
         assert n_steps >= 1
         assert wait_time >= 0.0
         assert callable(env) or isinstance(env, str)
+
+        raise DeprecationWarning('Please use A2C or PPO, instead.')
 
         self.n_steps = int(n_steps)
         self.wait_time = float(wait_time)
