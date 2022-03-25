@@ -10,10 +10,10 @@ import numpy as np
 from rl import utils
 from rl.parameters import DynamicParameter
 from rl.environments.gym.parallel import AbstractParallelEnv, SequentialEnv
-
 from rl.memories import Memory, TransitionSpec
+from rl.agents.actions import ActionConverter, ParallelConverterWrapper
 
-from typing import List, Dict, Union, Tuple
+from typing import List, Dict, Union, Tuple, Type, Optional
 
 
 # TODO: generic memory support: class and arguments
@@ -21,7 +21,7 @@ from typing import List, Dict, Union, Tuple
 # TODO: env.seed will be deprecated, use env.reset(seed=seed) instead..
 # TODO: compile anything numpy-related with `numba`:
 #  https://towardsdatascience.com/supercharging-numpy-with-numba-77ed5b169240
-# TODO: when saving agent weights, also save a "preset" file with the hyper-parameters so that the agent can be loaded?
+# TODO: [agent saving] have a "preset" or "config" file from which agent can be instantiated directly
 # TODO: rename `repeat_action` to `frame-skip`?
 # TODO: when frame-skip > 1, adjust the discount factor i.e. to \gamma^n
 # TODO: summary of agent hyper-parameters?
@@ -31,7 +31,8 @@ class Agent:
     def __init__(self, env: Union[gym.Env, str], batch_size: int, gamma=0.99, seed=None, save_dir='weights',
                  use_summary=True, drop_batch_remainder=True, skip_data=0, consider_obs_every=1, shuffle=True,
                  evaluation_dir='evaluation', shuffle_batches=False, traces_dir: str = None, repeat_action=1,
-                 summary: dict = None, name='agent', reward_scale=1.0, clip_grads='global', clip_rewards: tuple = None):
+                 summary: dict = None, name='agent', reward_scale=1.0, clip_grads='global', clip_rewards: tuple = None,
+                 action_converter: Optional[Union[dict, Type[ActionConverter]]] = None):
         assert batch_size >= 1
         assert repeat_action >= 1
 
@@ -45,7 +46,7 @@ class Agent:
         self.name = str(name)
 
         self.state_spec = utils.space_to_flat_spec(space=self.env.observation_space, name='state')
-        self.action_spec = utils.space_to_flat_spec(space=self.env.action_space, name='action')
+        self.action_spec = utils.space_to_flat_spec(space=self.env.action_space, name='action', max_depth=1)
 
         # TODO: better support for train/eval/explore flags
         self.is_learning = False
@@ -65,7 +66,11 @@ class Agent:
         self.clip_grads = clip_grads
         self.repeat_action = int(repeat_action)
 
-        self._init_action_space()
+        # self.action_converter = ActionConverter.get(action_space=self.env.action_space)
+        self.action_converter = self.define_action_converter(kwargs=action_converter)
+        self.convert_action = self.action_converter.convert
+
+        # self._init_action_space()
 
         # Reward stuff:
         self.reward_scale = DynamicParameter.create(value=reward_scale)
@@ -139,7 +144,7 @@ class Agent:
     def networks(self) -> Dict:
         """A dictionary storing all the network instances, used for weight loading and saving."""
         if self._networks is None:
-            from rl.v2.networks import Network
+            from rl.networks import Network
             self._networks = {k: v for k, v in self.__dict__.items() if isinstance(v, Network)}
 
         return self._networks
@@ -151,35 +156,56 @@ class Agent:
 
         return self._dynamic_parameters
 
-    # TODO: edit
-    def _init_action_space(self):
-        action_space = self.env.action_space
+    def define_action_converter(self, kwargs: Union[None, Type[ActionConverter], dict]) -> ActionConverter:
+        if kwargs is None:
+            # default
+            return ActionConverter.get(action_space=self.env.action_space)
 
-        if isinstance(action_space, gym.spaces.Box):
-            self.num_actions = action_space.shape[0]
-            self.discrete_actions = False
+        if issubclass(kwargs, ActionConverter):
+            # use given custom ActionConverter class, with default args (i.e. no kwargs)
+            converter_class = kwargs
+            return converter_class(space=self.env.action_space)
 
-            # continuous:
-            if action_space.is_bounded():
-                self.distribution_type = 'beta'
+        if isinstance(kwargs, dict):
+            if 'cls' not in kwargs:
+                return ActionConverter.get(action_space=self.env.action_space, **kwargs)
 
-                self.action_low = tf.constant(action_space.low, dtype=tf.float32)
-                self.action_high = tf.constant(action_space.high, dtype=tf.float32)
-                self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
+            # use provided class
+            converter_class = kwargs.pop('cls')
+            assert issubclass(converter_class, ActionConverter)
 
-                self.convert_action = lambda a: tf.squeeze(a * self.action_range + self.action_low).numpy()
-            else:
-                self.distribution_type = 'gaussian'
-                self.convert_action = lambda a: tf.squeeze(a).numpy()
-        else:
-            # discrete:
-            assert isinstance(action_space, gym.spaces.Discrete)
-            self.distribution_type = 'categorical'
-            self.discrete_actions = True
+            return converter_class(space=self.env.action_space, **kwargs)
 
-            self.num_actions = 1
-            self.num_classes = action_space.n
-            self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
+        raise ValueError(f'Not supported argument of type "{type(kwargs)}".')
+
+    # def _init_action_space(self):
+    #     action_space = self.env.action_space
+    #
+    #     if isinstance(action_space, gym.spaces.Box):
+    #         self.num_actions = action_space.shape[0]
+    #         self.discrete_actions = False
+    #
+    #         # continuous:
+    #         if action_space.is_bounded():
+    #             self.distribution_type = 'beta'
+    #
+    #             self.action_low = tf.constant(action_space.low, dtype=tf.float32)
+    #             self.action_high = tf.constant(action_space.high, dtype=tf.float32)
+    #             self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
+    #
+    #             self.convert_action = lambda a: tf.squeeze(a * self.action_range + self.action_low).numpy()
+    #         else:
+    #             self.distribution_type = 'gaussian'
+    #             self.convert_action = lambda a: tf.squeeze(a).numpy()
+    #     else:
+    #         # discrete:
+    #         assert isinstance(action_space, gym.spaces.Discrete)
+    #         self.distribution_type = 'categorical'
+    #         self.discrete_actions = True
+    #
+    #         self.num_actions = 1
+    #         self.num_classes = action_space.n
+    #         self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
     def _init_reward_clipping(self, clip_rewards):
         if clip_rewards is None:
@@ -605,26 +631,11 @@ class Agent:
             self.summary_queue.put(data)
 
     def log_transition(self, transition: dict):
-        # action = transition['action']
-        #
-        # if isinstance(action, dict):
-        #     self.log(reward=transition['reward'], **action)
-        # else:
-        #     self.log(reward=transition['reward'], action=action)
-
         self.log(reward=transition['reward'], **utils.to_dict_for_log(transition['action'], name='action'),
                  state_hist=transition['state'], action_hist=transition['action'])
-        # self.log_action(action=transition['action'])
 
     def log_env(self, action, **kwargs):
-        # if isinstance(action, dict):
-        #     actions_env = {f'action_env_{k}': v for k, v in action.items()}
-        #     self.log(**actions_env, **kwargs)
-        # else:
-        #     self.log(action_env=action, **kwargs)
-
         self.log(**kwargs, **utils.to_dict_for_log(action, name='action_env'))
-        # self.log_action(action, prefix='_env')
 
     # def log_action(self, action: Union[dict, int, float, np.ndarray, tf.Tensor], prefix=''):
     #     # scalar (single) action
@@ -841,31 +852,34 @@ class ParallelAgent(Agent):
 
         assert isinstance(self.env, AbstractParallelEnv)
 
-    def _init_action_space(self):
-        action_space = self.env.action_space
+    def define_action_converter(self, kwargs: Union[None, Type[ActionConverter], dict]) -> ActionConverter:
+        return ParallelConverterWrapper(converter=super().define_action_converter(kwargs))
 
-        if isinstance(action_space, gym.spaces.Box):
-            self.num_actions = action_space.shape[0]
-
-            # continuous:
-            if action_space.is_bounded():
-                self.action_low = tf.constant(action_space.low, dtype=tf.float32)
-                self.action_high = tf.constant(action_space.high, dtype=tf.float32)
-                self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
-
-                def convert_action(actions) -> list:
-                    return [tf.squeeze(a * self.action_range + self.action_low).numpy() for a in actions]
-
-                self.convert_action = convert_action
-            else:
-                self.convert_action = lambda actions: [tf.squeeze(a).numpy() for a in actions]
-        else:
-            # discrete:
-            assert isinstance(action_space, gym.spaces.Discrete)
-
-            self.num_actions = 1
-            self.num_classes = action_space.n
-            self.convert_action = lambda actions: [tf.cast(tf.squeeze(a), dtype=tf.int32).numpy() for a in actions]
+    # def _init_action_space(self):
+    #     action_space = self.env.action_space
+    #
+    #     if isinstance(action_space, gym.spaces.Box):
+    #         self.num_actions = action_space.shape[0]
+    #
+    #         # continuous:
+    #         if action_space.is_bounded():
+    #             self.action_low = tf.constant(action_space.low, dtype=tf.float32)
+    #             self.action_high = tf.constant(action_space.high, dtype=tf.float32)
+    #             self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
+    #
+    #             def convert_action(actions) -> list:
+    #                 return [tf.squeeze(a * self.action_range + self.action_low).numpy() for a in actions]
+    #
+    #             self.convert_action = convert_action
+    #         else:
+    #             self.convert_action = lambda actions: [tf.squeeze(a).numpy() for a in actions]
+    #     else:
+    #         # discrete:
+    #         assert isinstance(action_space, gym.spaces.Discrete)
+    #
+    #         self.num_actions = 1
+    #         self.num_classes = action_space.n
+    #         self.convert_action = lambda actions: [tf.cast(tf.squeeze(a), dtype=tf.int32).numpy() for a in actions]
 
     def act(self, states, deterministic=False, inference=False, **kwargs) -> Tuple[tf.Tensor, dict, dict]:
         raise NotImplementedError
@@ -1164,7 +1178,9 @@ class ParallelAgent(Agent):
     #     self.log(**data)
 
     def log_transition(self, transition: Dict[str, list]):
-        self.log(reward=np.mean(transition['reward']), action=np.mean(transition['action']))
+        self.log(reward=np.mean(transition['reward']), action=transition['action'],
+                 reward_hist=transition['reward'], action_hist=transition['action'],
+                 state_hist=transition['state'])
 
     def log_env(self, action: list, **kwargs):
         if isinstance(action[0], dict):

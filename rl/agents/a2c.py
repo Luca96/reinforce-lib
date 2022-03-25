@@ -19,8 +19,23 @@ class ActorNetwork(PolicyNetwork):
     def structure(self, inputs, name='A2C-ActorNetwork', **kwargs) -> tuple:
         return super().structure(inputs, name=name, **kwargs)
 
+    def mean(self, distribution: utils.DistributionOrDict) -> utils.TensorOrDict:
+        """Returns the mean of the given `distribution`"""
+        if not isinstance(distribution, dict):
+            return distribution.mean()
 
-class GlobalMemory(GAEMemory):
+        return {k: dist.mean() for k, dist in distribution.items()}
+
+    def stddev(self, distribution: utils.DistributionOrDict) -> utils.TensorOrDict:
+        """Returns the standard deviation oof the given `distribution`"""
+        if not isinstance(distribution, dict):
+            return distribution.stddev()
+
+        return {k: dist.stddev() for k, dist in distribution.items()}
+
+
+class ParallelGAEMemory(GAEMemory):
+    """GAE memory that support multiple (parallel) environments"""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -189,14 +204,14 @@ class GlobalMemory(GAEMemory):
         return ds.prefetch(buffer_size=2)
 
 
-# TODO: normalization functions
 class A2C(ParallelAgent):
     """A2C agent"""
 
     def __init__(self, env, horizon: int, gamma=0.99, name='a2c-agent', optimizer='adam',
                  actor_lr: utils.DynamicType = 1e-3, critic_lr: utils.DynamicType = 3e-4, clip_norm=(None, None),
                  lambda_=1.0, num_actors=16, entropy: utils.DynamicType = 0.01, actor: dict = None, critic: dict = None,
-                 **kwargs):
+                 advantage_scale: utils.DynamicType = 1.0, advantage_normalization: utils.OptionalStrOrCallable = None,
+                 return_normalization: utils.OptionalStrOrCallable = None, **kwargs):
         assert horizon >= 1
 
         super().__init__(env, num_actors=num_actors, batch_size=horizon * num_actors, gamma=gamma,
@@ -207,17 +222,14 @@ class A2C(ParallelAgent):
         self.lambda_ = tf.constant(lambda_, dtype=tf.float32)
         self.entropy_strength = DynamicParameter.create(value=entropy)
 
-        self.adv_scale = DynamicParameter.create(value=1.0)
-        self.adv_normalization_fn = utils.get_normalization_fn(arg='identity')
-        self.returns_norm_fn = utils.get_normalization_fn(arg='identity')
+        self.adv_scale = DynamicParameter.create(value=advantage_scale)
+        self.adv_normalization_fn = utils.get_normalization_fn(arg=advantage_normalization)
+        self.returns_norm_fn = utils.get_normalization_fn(arg=return_normalization)
 
         self.actor_lr = DynamicParameter.create(value=actor_lr)
         self.critic_lr = DynamicParameter.create(value=critic_lr)
 
         # Networks
-        # self.weights_path = dict(policy=os.path.join(self.base_path, 'actor'),
-        #                          value=os.path.join(self.base_path, 'critic'))
-
         self.actor = Network.create(agent=self, **(actor or {}), base_class=PolicyNetwork)
         self.critic = Network.create(agent=self, **(critic or {}), base_class=ValueNetwork)
 
@@ -229,11 +241,12 @@ class A2C(ParallelAgent):
 
     @property
     def transition_spec(self) -> TransitionSpec:
-        return TransitionSpec(state=self.state_spec, action=(self.num_actions,), next_state=False, terminal=False,
+        # action=(self.num_actions,)
+        return TransitionSpec(state=self.state_spec, action=self.action_spec, next_state=False, terminal=False,
                               reward=(1,), other=dict(value=(1,)))
 
-    def define_memory(self) -> GlobalMemory:
-        return GlobalMemory(self.transition_spec, agent=self, shape=self.horizon * self.num_actors)
+    def define_memory(self) -> ParallelGAEMemory:
+        return ParallelGAEMemory(self.transition_spec, agent=self, shape=self.horizon * self.num_actors)
 
     @tf.function
     def act(self, states, **kwargs) -> Tuple[tf.Tensor, dict, dict]:
@@ -241,7 +254,7 @@ class A2C(ParallelAgent):
         values = self.critic(states, training=False)
 
         other = dict(value=values)
-        debug = dict(distribution_mean=tf.reduce_mean(mean), distribution_std=tf.reduce_mean(std))
+        debug = dict(distribution_mean=mean, distribution_std=std)
 
         return actions, other, debug
 

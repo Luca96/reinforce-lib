@@ -3,8 +3,7 @@
     - Soft Actor-Critic Algorithms and Applications (arXiv:1812.05905)
 """
 
-import os
-import gym
+# import gym
 import numpy as np
 import tensorflow as tf
 
@@ -17,6 +16,7 @@ from rl.parameters import DynamicParameter
 from rl.agents import Agent
 from rl.agents.ddpg import CriticNetwork
 from rl.agents.td3 import TwinCriticNetwork
+from rl.agents.actions import TanhConverter
 from rl.layers import Linear
 from rl.memories import TransitionSpec, ReplayMemory, PrioritizedMemory
 from rl.networks import Network
@@ -166,6 +166,7 @@ class SAC(Agent):
         assert 0 < polyak <= 1
 
         super().__init__(*args, name=name, **kwargs)
+        self.num_actions = self.action_converter.num_actions
 
         # hyper-parameters
         self.memory_size = int(memory_size)
@@ -181,7 +182,7 @@ class SAC(Agent):
         self.alpha_optimizer = utils.get_optimizer(optimizer, learning_rate=self.entropy_lr)
 
         if target_entropy is None:
-            self.target_entropy = DynamicParameter.create(value=-np.prod(self.action_high.shape))
+            self.target_entropy = DynamicParameter.create(value=-np.prod(self.action_converter.action_high.shape))
         else:
             self.target_entropy = DynamicParameter.create(value=float(target_entropy))
 
@@ -191,8 +192,8 @@ class SAC(Agent):
             self.beta = DynamicParameter.create(value=beta)
 
         # Networks
-        self.weights_path = dict(actor=os.path.join(self.base_path, 'actor'),
-                                 critic=os.path.join(self.base_path, 'critic'))
+        # self.weights_path = dict(actor=os.path.join(self.base_path, 'actor'),
+        #                          critic=os.path.join(self.base_path, 'critic'))
 
         self.actor = Network.create(agent=self, **(actor or {}), target=False, base_class=SquashedGaussianPolicy)
         self.critic = Network.create(agent=self, **(critic or {}), target=True, base_class=SoftTwinCriticNetwork)
@@ -202,7 +203,7 @@ class SAC(Agent):
 
     @property
     def transition_spec(self) -> TransitionSpec:
-        return TransitionSpec(state=self.state_spec, action=(self.num_actions,), next_state=True, terminal=True)
+        return TransitionSpec(state=self.state_spec, action=self.num_actions, next_state=True, terminal=True)
 
     def define_memory(self) -> Union[ReplayMemory, PrioritizedMemory]:
         if self.prioritized:
@@ -211,20 +212,23 @@ class SAC(Agent):
 
         return ReplayMemory(self.transition_spec, shape=self.memory_size, seed=self.seed)
 
-    def _init_action_space(self):
-        action_space = self.env.action_space
+    def define_action_converter(self, kwargs: dict) -> TanhConverter:
+        return TanhConverter(space=self.env.action_space, **(kwargs or {}))
 
-        assert isinstance(action_space, gym.spaces.Box)
-        assert action_space.is_bounded()
-
-        self.action_low = tf.constant(action_space.low, dtype=tf.float32)
-        self.action_high = tf.constant(action_space.high, dtype=tf.float32)
-        self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
-
-        self.num_actions = action_space.shape[0]
-
-        # `a` \in (-1, 1), so add 1 and divide by 2 (to rescale in 0-1)
-        self.convert_action = lambda a: tf.squeeze((a + 1.0) / 2.0 * self.action_range + self.action_low).numpy()
+    # def _init_action_space(self):
+    #     action_space = self.env.action_space
+    #
+    #     assert isinstance(action_space, gym.spaces.Box)
+    #     assert action_space.is_bounded()
+    #
+    #     self.action_low = tf.constant(action_space.low, dtype=tf.float32)
+    #     self.action_high = tf.constant(action_space.high, dtype=tf.float32)
+    #     self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
+    #
+    #     self.num_actions = action_space.shape[0]
+    #
+    #     # `a` \in (-1, 1), so add 1 and divide by 2 (to rescale in 0-1)
+    #     self.convert_action = lambda a: tf.squeeze((a + 1.0) / 2.0 * self.action_range + self.action_low).numpy()
 
     @tf.function
     def act(self, state, deterministic=False, **kwargs) -> Tuple[tf.Tensor, dict, dict]:
@@ -249,7 +253,6 @@ class SAC(Agent):
         self.critic.train_step(batch)
         self.actor.train_step(batch)
 
-        # self.critic.update_target_network(polyak=self.polyak)
         self.update_target_networks()
 
     @tf.function

@@ -143,7 +143,6 @@ class Network(tf.keras.Model):
 
     def structure(self, inputs: Dict[str, tf.keras.Input], name='Network', **kwargs) -> tuple:
         """Specifies the network's structure (i.e. layers)"""
-        # inputs = inputs['state']
         x = self.apply_preprocessing(inputs, preprocess=kwargs.pop('preprocess', None))
         x = x['state']
 

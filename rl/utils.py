@@ -16,6 +16,8 @@ from datetime import datetime
 from gym import spaces
 
 from tensorflow.keras.optimizers.schedules import LearningRateSchedule
+from tensorflow.keras.layers import Layer
+from tensorflow_probability import distributions as tfd
 from rl.parameters import DynamicParameter
 
 
@@ -40,9 +42,12 @@ OPTIMIZERS = dict(adadelta=tf.keras.optimizers.Adadelta,
                   rmsprop=tf.keras.optimizers.RMSprop,
                   sgd=tf.keras.optimizers.SGD)
 
-# Types
+# Type aliases (TODO: consider creating a types module)
 DynamicType = Union[float, LearningRateSchedule, DynamicParameter]
-TensorDictOrTensor = Union[Dict[str, tf.Tensor], tf.Tensor]
+TensorOrDict = Union[Dict[str, tf.Tensor], tf.Tensor]
+OptionalStrOrCallable = Optional[Union[str, Callable]]
+DistributionOrDict = Union[tfd.Distribution, Dict[str, tfd.Distribution]]
+LayerOrDict = Union[Layer, Dict[str, Layer]]
 
 
 def get_optimizer_by_name(name: str, *args, **kwargs) -> tf.keras.optimizers.Optimizer:
@@ -209,6 +214,11 @@ def make_env(which: str, rank: int):
 def actual_datetime() -> str:
     """Returns the current data timestamp, formatted as follows: YearMonthDay-HourMinuteSecond"""
     return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def is_class(x) -> bool:
+    """Check whether given `x` is a class or not"""
+    return isinstance(x, type)
 
 
 def np_normalize(x, epsilon=NP_EPS):
@@ -540,7 +550,8 @@ def print_info(gym_env):
     print('Metadata:', gym_env.metadata)
 
 
-def space_to_flat_spec(space: gym.Space, name: str) -> Dict[str, tuple]:
+# TODO: support for MultiBinary
+def space_to_flat_spec(space: gym.Space, name: str, depth=0, max_depth=np.inf) -> Dict[str, tuple]:
     """From a gym.Space object returns a flat dictionary str -> tuple.
        Naming convention:
          - If space is Box or Discrete, it returns 'dict(name=shape)'
@@ -551,6 +562,7 @@ def space_to_flat_spec(space: gym.Space, name: str) -> Dict[str, tuple]:
            Example:
               Dict(a=x, b=Dict(c=y, d=z)) -> dict(a=x, b_c=y, b_d=z)
     """
+    assert depth <= max_depth, f"Nested spaces of depth more than {max_depth} are not supported."
     spec = dict()
 
     if isinstance(space, spaces.Discrete):
@@ -565,8 +577,12 @@ def space_to_flat_spec(space: gym.Space, name: str) -> Dict[str, tuple]:
 
     elif isinstance(space, spaces.Dict):
         for key, value in space.spaces.items():
-            space_name = f'{name}_{key}'
-            result = space_to_flat_spec(space=value, name=space_name)
+            if depth > 1:
+                space_name = f'{name}_{key}'
+            else:
+                space_name = key
+
+            result = space_to_flat_spec(space=value, name=space_name, depth=depth + 1, max_depth=max_depth)
 
             if isinstance(result, dict):
                 for k, v in result.items():
@@ -1164,16 +1180,16 @@ class SummaryProcess(mp.Process):
             if not self.should_log_key(key):
                 continue
 
-            # if key not in self.steps:
-            #     self.steps[key] = 0
-            #
-            # step = self.steps[key]
             step = self.steps.setdefault(key, 0)
             value = tf.convert_to_tensor(value)
 
             if ('_hist' in key) or ('weight-' in key) or ('bias-' in key):
                 if self.should_log(step):
-                    tf.summary.histogram(name=key, data=value, step=step)
+                    if isinstance(value, dict):
+                        for k, v in value.items():
+                            tf.summary.histogram(name=f'{key}_{k}', data=v, step=step)
+                    else:
+                        tf.summary.histogram(name=key, data=value, step=step)
 
                 self.steps[key] += 1
 

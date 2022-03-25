@@ -1,4 +1,5 @@
 
+# TODO: rename into "Buffers"?
 from rl.memories.transition import TransitionSpec
 from rl.memories.memory import Memory
 from rl.memories.episodic import EpisodicMemory, GAEMemory

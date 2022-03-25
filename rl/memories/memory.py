@@ -36,15 +36,16 @@ class Memory:
         self.full = False
 
         for name, spec in self.specs.items():
-            self.data[name] = self._add_spec(spec)
+            self.data[name] = self._allocate_spec(spec)
 
-    def _add_spec(self, spec: dict):
+    def _allocate_spec(self, spec: dict):
+        """Allocates np.ndarray(s) for the given `spec`"""
         if 'shape' in spec:
             shape = spec['shape']
             # TODO: consider initializing with `np.empty`
             return np.zeros(shape=self.shape + shape, dtype=spec['dtype'])
 
-        return {k: self._add_spec(v) for k, v in spec.items()}
+        return {k: self._allocate_spec(v) for k, v in spec.items()}
 
     @property
     def current_size(self) -> int:
@@ -55,9 +56,6 @@ class Memory:
         return self.index
 
     def is_full(self) -> bool:
-        # if self.full:
-        #     return True
-
         if self.index >= self.size:
             self.full = True
 

@@ -5,7 +5,7 @@
 """
 
 import os
-import gym
+# import gym
 import numpy as np
 import tensorflow as tf
 
@@ -17,6 +17,7 @@ from rl.parameters import DynamicParameter
 from rl.agents import Agent
 from rl.memories import TransitionSpec, ReplayMemory, NStepMemory, PrioritizedMemory
 from rl.networks.q import Network, QNetwork, DoubleQNetwork
+from rl.agents.actions import DiscreteConverter
 
 
 class DQN(Agent):
@@ -28,7 +29,12 @@ class DQN(Agent):
                  beta: utils.DynamicType = 0.1, memory_size=1024, **kwargs):
         assert horizon >= 1
         assert policy.lower() in ['boltzmann', 'boltzmann2', 'softmax', 'e-greedy', 'greedy']
+
         super().__init__(*args, name=name, **kwargs)
+
+        assert isinstance(self.action_converter, DiscreteConverter), "Only discrete action-space is supported."
+        self.num_actions = self.action_converter.num_actions
+        self.num_classes = self.action_converter.num_classes
 
         self.memory_size = int(memory_size)
         self.policy_fn = self._init_policy(policy=policy.lower())
@@ -74,14 +80,13 @@ class DQN(Agent):
 
         return NStepMemory(self.transition_spec, shape=self.memory_size, gamma=self.gamma, seed=self.seed)
 
-    # TODO: add `MultiDiscrete/Binary` action-space support
-    def _init_action_space(self):
-        assert isinstance(self.env.action_space, gym.spaces.Discrete)
-
-        self.num_actions = 1
-        self.num_classes = self.env.action_space.n
-
-        self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
+    # def _init_action_space(self):
+    #     assert isinstance(self.env.action_space, gym.spaces.Discrete)
+    #
+    #     self.num_actions = 1
+    #     self.num_classes = self.env.action_space.n
+    #
+    #     self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
     def _init_policy(self, policy: str):
         if policy == 'boltzmann':

@@ -26,6 +26,9 @@ class QNetwork(Network):
         self.init_hack()
         self.has_prioritized_mem = bool(prioritized)
 
+        self.num_actions = agent.action_converter.num_actions
+        self.num_classes = agent.action_converter.num_classes
+
         # choose loss function (huber, mse, or user-defined)
         if isinstance(loss, (int, float)):
             self.loss_fn = partial(utils.huber_loss, kappa=tf.constant(loss, dtype=tf.float32))
@@ -62,25 +65,25 @@ class QNetwork(Network):
     def q_values(self, inputs, **kwargs):
         return self(inputs, **kwargs)
 
-    # @tf.function
-    # def act(self, inputs, **kwargs):
-    #     q_values = self(inputs, training=False, **kwargs)
-    #     return tf.argmax(q_values, axis=-1)
+    @tf.function
+    def act(self, inputs, **kwargs):
+        q_values = self(inputs, training=False, **kwargs)
+        return tf.argmax(q_values, axis=-1)
 
     def structure(self, inputs: Dict[str, Input], name='Deep-Q-Network', **kwargs) -> tuple:
         utils.remove_keys(kwargs, keys=['dueling', 'operator', 'prioritized'])
         return super().structure(inputs, name=name, **kwargs)
 
     def output_layer(self, layer: Layer, **kwargs) -> Layer:
-        assert self.agent.num_actions == 1
+        assert self.num_actions == 1
 
         if self.use_dueling:
             return self.dueling_architecture(layer, **kwargs)
 
-        return Dense(units=self.agent.num_classes, name='q-values', **kwargs)(layer)
+        return Dense(units=self.num_classes, name='q-values', **kwargs)(layer)
 
     def dueling_architecture(self, layer: Layer, **kwargs) -> Layer:
-        dueling = DuelingLayer(units=self.agent.num_classes, operator=self.operator.lower(), **kwargs)
+        dueling = DuelingLayer(units=self.num_classes, operator=self.operator.lower(), **kwargs)
         return dueling(layer)
 
     @tf.function
@@ -102,7 +105,7 @@ class QNetwork(Network):
                      td_error=td_error, values_hist=q_values, targets_hist=q_targets)
 
         # find q-values and targets of each action, separately
-        for a in range(self.agent.num_classes):
+        for a in range(self.num_classes):
             mask = actions == a
 
             if mask.shape[0] > 0:

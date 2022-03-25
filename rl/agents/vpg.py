@@ -93,8 +93,8 @@ class VPG(Agent):
             clip_norm = (None, None)
 
         # Networks
-        self.weights_path = dict(policy=os.path.join(self.base_path, 'policy'),
-                                 value=os.path.join(self.base_path, 'value'))
+        # self.weights_path = dict(policy=os.path.join(self.base_path, 'policy'),
+        #                          value=os.path.join(self.base_path, 'value'))
 
         self.policy = Network.create(agent=self, **(policy or {}), base_class=DiscountedPolicyNetwork)
         self.value = Network.create(agent=self, **(value or {}), base_class=ValueNetwork)
@@ -104,7 +104,7 @@ class VPG(Agent):
 
     @property
     def transition_spec(self) -> TransitionSpec:
-        return TransitionSpec(state=self.state_spec, action=(self.num_actions,), next_state=False, terminal=False,
+        return TransitionSpec(state=self.state_spec, action=self.action_spec, next_state=False, terminal=False,
                               reward=(1,), other=dict(value=(1,)))
 
     def define_memory(self) -> DiscountedMemory:

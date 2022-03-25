@@ -10,19 +10,14 @@ from tensorflow.keras.layers import Layer, Dense, Concatenate, Input
 from typing import Dict, Tuple, Union
 
 from rl import utils
-from rl.parameters import DynamicParameter
-
 from rl.agents import Agent
+from rl.parameters import DynamicParameter
+from rl.agents.actions import TanhConverter
 from rl.memories import TransitionSpec, ReplayMemory, PrioritizedMemory
 from rl.networks import backbones, Network, DeterministicPolicyNetwork
 
 
 class ActorNetwork(DeterministicPolicyNetwork):
-    # def output_layer(self, layer: Layer, **kwargs) -> Layer:
-    #     num_actions = self.agent.num_actions
-    #
-    #     # output is continuous and bounded
-    #     return Dense(units=num_actions, activation='tanh', name='actions', **kwargs)(layer)
 
     @tf.function
     def objective(self, batch, reduction=tf.reduce_mean) -> tuple:
@@ -47,7 +42,6 @@ class CriticNetwork(Network):
         # preprocessing
         preproc_in = self.apply_preprocessing(inputs, preprocess=kwargs.pop('preprocess', None))
 
-        # x = Concatenate()([state_in, action_in])
         x = Concatenate()([preproc_in['state'], preproc_in['action']])
         x = backbones.dense(x, **kwargs)
 
@@ -98,6 +92,7 @@ class CriticNetwork(Network):
         return targets, dict(next_actions=argmax_a, next_q_values=q_values, targets=targets)
 
 
+# TODO: support for discrete actions?
 class DDPG(Agent):
 
     def __init__(self, *args, name='ddpg', actor_lr: utils.DynamicType = 1e-4, critic_lr: utils.DynamicType = 1e-3,
@@ -108,6 +103,7 @@ class DDPG(Agent):
         assert 0.0 < polyak <= 1.0
 
         super().__init__(*args, name=name, **kwargs)
+        self.num_actions = self.action_converter.num_actions
 
         # hyper-parameters
         self.memory_size = int(memory_size)
@@ -123,8 +119,8 @@ class DDPG(Agent):
             self.beta = DynamicParameter.create(value=beta)
 
         # Networks
-        self.weights_path = dict(actor=os.path.join(self.base_path, 'actor'),
-                                 critic=os.path.join(self.base_path, 'critic'))
+        # self.weights_path = dict(actor=os.path.join(self.base_path, 'actor'),
+        #                          critic=os.path.join(self.base_path, 'critic'))
 
         self.actor = Network.create(agent=self, target=True, log_prefix='actor', **(actor or {}),
                                     base_class=ActorNetwork)
@@ -146,20 +142,23 @@ class DDPG(Agent):
 
         return ReplayMemory(self.transition_spec, shape=self.memory_size, seed=self.seed)
 
-    def _init_action_space(self):
-        action_space = self.env.action_space
+    def define_action_converter(self, kwargs: dict) -> TanhConverter:
+        return TanhConverter(space=self.env.action_space, **(kwargs or {}))
 
-        assert isinstance(action_space, gym.spaces.Box)
-        assert action_space.is_bounded()
-
-        self.action_low = tf.constant(action_space.low, dtype=tf.float32)
-        self.action_high = tf.constant(action_space.high, dtype=tf.float32)
-        self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
-
-        self.num_actions = action_space.shape[0]
-
-        # `a` \in (-1, 1), so add 1 and divide by 2 (to rescale in 0-1)
-        self.convert_action = lambda a: tf.squeeze((a + 1.0) / 2.0 * self.action_range + self.action_low).numpy()
+    # def _init_action_space(self):
+    #     action_space = self.env.action_space
+    #
+    #     assert isinstance(action_space, gym.spaces.Box)
+    #     assert action_space.is_bounded()
+    #
+    #     self.action_low = tf.constant(action_space.low, dtype=tf.float32)
+    #     self.action_high = tf.constant(action_space.high, dtype=tf.float32)
+    #     self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
+    #
+    #     self.num_actions = action_space.shape[0]
+    #
+    #     # `a` \in (-1, 1), so add 1 and divide by 2 (to rescale in 0-1)
+    #     self.convert_action = lambda a: tf.squeeze((a + 1.0) / 2.0 * self.action_range + self.action_low).numpy()
 
     def act(self, state, deterministic=False, **kwargs) -> Tuple[tf.Tensor, dict, dict]:
         greedy_action = self.actor(state, **kwargs)
@@ -170,11 +169,13 @@ class DDPG(Agent):
             noise = tf.random.normal(shape=greedy_action.shape, stddev=self.noise(), seed=self.seed)
             action = tf.clip_by_value(greedy_action + noise, clip_value_min=-1.0, clip_value_max=1.0)
 
-            debug.update(noise=noise, noise_std=self.noise.value,
-                         noise_ratio=tf.reduce_mean(tf.abs((greedy_action - action) / self.action_range)))
+            debug.update(noise=noise, noise_std=self.noise.value, noise_ratio=self._noise_ratio(greedy_action, action))
             return action, {}, debug
 
         return greedy_action, {}, debug
+
+    def _noise_ratio(self, greedy_action, action):
+        return tf.reduce_mean(tf.abs((greedy_action - action) / self.action_converter.action_range))
 
     @tf.function
     def act_randomly(self, state) -> Tuple[tf.Tensor, dict, dict]:
@@ -210,7 +211,3 @@ class DDPG(Agent):
 
         if not exploration:
             self.update()
-
-    # def save_weights(self, path: str):
-    #     self.critic.save_weights(filepath=os.path.join(path, 'critic'))
-    #     self.actor.save_weights(filepath=os.path.join(path, 'actor'))

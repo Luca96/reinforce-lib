@@ -16,8 +16,6 @@ from rl.layers import MyLayer, Linear
 
 
 # TODO: support for mixture distribution
-# TODO: compound distribution for complex action spaces (e.g. gym.spaces.Dict)
-# TODO: should Distributions provide a `convert_action()` method?
 class DistributionLayer(MyLayer):
     """Abstract probability distribution layer that wraps a `tfp.distribution.Distribution` instance"""
 
@@ -100,11 +98,12 @@ class Bernoulli(DistributionLayer):
 class Categorical(DistributionLayer):
 
     class CategoricalDistribution(tfd.Categorical):
-        # TODO: consider "-1" also with the shape of logits
+        # TODO: consider to estimate them from sampled actions
         def _mean(self, **kwargs):
             return utils.TF_ZERO
 
         def _stddev(self, **kwargs):
+            # since its not defined for Categorical, we return a dummy value of zero
             return utils.TF_ZERO
 
     def __init__(self, num_actions: int, num_classes: int, **kwargs):
