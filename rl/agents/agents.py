@@ -25,7 +25,6 @@ from typing import List, Dict, Union, Tuple, Type, Optional
 # TODO: rename `repeat_action` to `frame-skip`?
 # TODO: when frame-skip > 1, adjust the discount factor i.e. to \gamma^n
 # TODO: summary of agent hyper-parameters?
-# TODO: evaluation callbacks?
 class Agent:
     """Agent abstract class"""
     def __init__(self, env: Union[gym.Env, str], batch_size: int, gamma=0.99, seed=None, save_dir='weights',
@@ -177,35 +176,6 @@ class Agent:
             return converter_class(space=self.env.action_space, **kwargs)
 
         raise ValueError(f'Not supported argument of type "{type(kwargs)}".')
-
-    # def _init_action_space(self):
-    #     action_space = self.env.action_space
-    #
-    #     if isinstance(action_space, gym.spaces.Box):
-    #         self.num_actions = action_space.shape[0]
-    #         self.discrete_actions = False
-    #
-    #         # continuous:
-    #         if action_space.is_bounded():
-    #             self.distribution_type = 'beta'
-    #
-    #             self.action_low = tf.constant(action_space.low, dtype=tf.float32)
-    #             self.action_high = tf.constant(action_space.high, dtype=tf.float32)
-    #             self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
-    #
-    #             self.convert_action = lambda a: tf.squeeze(a * self.action_range + self.action_low).numpy()
-    #         else:
-    #             self.distribution_type = 'gaussian'
-    #             self.convert_action = lambda a: tf.squeeze(a).numpy()
-    #     else:
-    #         # discrete:
-    #         assert isinstance(action_space, gym.spaces.Discrete)
-    #         self.distribution_type = 'categorical'
-    #         self.discrete_actions = True
-    #
-    #         self.num_actions = 1
-    #         self.num_classes = action_space.n
-    #         self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
     def _init_reward_clipping(self, clip_rewards):
         if clip_rewards is None:
@@ -606,12 +576,6 @@ class Agent:
         r_min, r_max = self.reward_clip_range
         return np.clip(reward, a_min=r_min, a_max=r_max) * self.reward_scale()
 
-    # def preprocess_action(self, action):
-    #     if isinstance(action, dict):
-    #         return {f'action_{k}': v for k, v in action.items()}
-    #
-    #     return action
-
     def preprocess_transition(self, transition: dict, exploration=False):
         transition['reward'] = self.preprocess_reward(transition['reward'])
         # transition['action'] = self.preprocess_action(transition['action'])
@@ -854,32 +818,6 @@ class ParallelAgent(Agent):
 
     def define_action_converter(self, kwargs: Union[None, Type[ActionConverter], dict]) -> ActionConverter:
         return ParallelConverterWrapper(converter=super().define_action_converter(kwargs))
-
-    # def _init_action_space(self):
-    #     action_space = self.env.action_space
-    #
-    #     if isinstance(action_space, gym.spaces.Box):
-    #         self.num_actions = action_space.shape[0]
-    #
-    #         # continuous:
-    #         if action_space.is_bounded():
-    #             self.action_low = tf.constant(action_space.low, dtype=tf.float32)
-    #             self.action_high = tf.constant(action_space.high, dtype=tf.float32)
-    #             self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
-    #
-    #             def convert_action(actions) -> list:
-    #                 return [tf.squeeze(a * self.action_range + self.action_low).numpy() for a in actions]
-    #
-    #             self.convert_action = convert_action
-    #         else:
-    #             self.convert_action = lambda actions: [tf.squeeze(a).numpy() for a in actions]
-    #     else:
-    #         # discrete:
-    #         assert isinstance(action_space, gym.spaces.Discrete)
-    #
-    #         self.num_actions = 1
-    #         self.num_classes = action_space.n
-    #         self.convert_action = lambda actions: [tf.cast(tf.squeeze(a), dtype=tf.int32).numpy() for a in actions]
 
     def act(self, states, deterministic=False, inference=False, **kwargs) -> Tuple[tf.Tensor, dict, dict]:
         raise NotImplementedError

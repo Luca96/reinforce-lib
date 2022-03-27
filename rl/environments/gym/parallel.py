@@ -172,6 +172,7 @@ def work(make_env: CloudPickleWrapper, rank: int, num_envs: int, seed: int, remo
         remote.close()
 
 
+# TODO: too high RAM usage
 class MultiProcessEnv(AbstractParallelEnv):
     """Vector environment that uses multiprocessing for parallelism. Based on:
         - https://github.com/openai/baselines/blob/master/baselines/common/vec_env/subproc_vec_env.py

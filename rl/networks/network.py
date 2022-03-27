@@ -11,8 +11,6 @@ from typing import Union, List, Dict, Callable
 
 
 # TODO: use tf.device
-# TODO: find a way (e.g. property) to easily change the name of subclasses
-# TODO: also consider "regularization losses" in the loss fn
 # TODO: shared network architecture
 # TODO: distributed strategy
 class Network(tf.keras.Model):
@@ -32,7 +30,9 @@ class Network(tf.keras.Model):
         self.should_clip_gradients = None
 
         # Model:
-        inputs, outputs, name = self.structure(inputs=self.get_inputs(), **kwargs)
+        name = kwargs.pop('name', self.default_name)
+        # inputs, outputs, name = self.structure(inputs=self.get_inputs(), **kwargs)
+        inputs, outputs = self.structure(inputs=self.get_inputs(), **kwargs)
 
         super().__init__(inputs=inputs, outputs=outputs, name=name)
 
@@ -50,6 +50,10 @@ class Network(tf.keras.Model):
             layer.set_kwargs(**kwargs)
 
         return super().call(inputs, training=training, mask=mask)
+
+    @property
+    def default_name(self) -> str:
+        return self.__class__.__name__
 
     @staticmethod
     def create(*args, base_class: Union[str, Callable] = None, **kwargs) -> 'Network':
@@ -141,7 +145,9 @@ class Network(tf.keras.Model):
         # TODO: check `run_eagerly` and `jit_compile`
         super().compile(optimizer=self.optimizer, loss=self.objective, run_eagerly=True)
 
-    def structure(self, inputs: Dict[str, tf.keras.Input], name='Network', **kwargs) -> tuple:
+    # TODO: default architecture when state is dict
+    # def structure(self, inputs: Dict[str, tf.keras.Input], name='Network', **kwargs) -> tuple:
+    def structure(self, inputs: Dict[str, tf.keras.Input], **kwargs) -> tuple:
         """Specifies the network's structure (i.e. layers)"""
         x = self.apply_preprocessing(inputs, preprocess=kwargs.pop('preprocess', None))
         x = x['state']
@@ -152,7 +158,8 @@ class Network(tf.keras.Model):
             x = backbones.convolutional(layer=x, **kwargs)
 
         outputs = self.output_layer(x, **self.output_kwargs)
-        return inputs, outputs, name
+        # return inputs, outputs, name
+        return inputs, outputs
 
     def apply_preprocessing(self, inputs: dict, preprocess: Dict[str, list] = None) -> dict:
         if preprocess is None:
@@ -229,21 +236,12 @@ class Network(tf.keras.Model):
         # keras's model.fit compatibility (unused)
         return dict(loss=loss)
 
-    # TODO: jit compile, and follow-type-hints
+    # TODO: jit compile, and follow-type-hints?
     @tf.function(experimental_relax_shapes=True)
     def train_on_batch(self, batch: dict):
-        # # Trick for variable-sized input
-        # size = batch.get('__size', None)
-        #
-        # if utils.is_scalar(size):
-        #     keys = filter(lambda k: k != '__size', batch.keys())
-        #
-        #     # the batch is padded to always have the same shape, thus avoiding "retracing".
-        #     # So, retrieve the first "size" elements and then discard the remaining padding
-        #     batch = {k: batch[k][:size] for k in keys}
-
         with tf.GradientTape() as tape:
             loss, debug = self.objective(batch)
+            # TODO: also consider "regularization losses" in the loss fn
 
         trainable_vars = self.trainable_variables
 
@@ -285,9 +283,6 @@ class Network(tf.keras.Model):
     def init_hack(self):
         """Weird hack to solve the annoying error when subclassing tf.keras.Model"""
         self._base_model_initialized = True
-
-    # def get_config(self):
-    #     pass
 
 
 class TargetNetwork:

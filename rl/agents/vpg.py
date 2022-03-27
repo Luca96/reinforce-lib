@@ -50,8 +50,8 @@ class DiscountedMemory(EpisodicMemory):
 
 class DiscountedPolicyNetwork(PolicyNetwork):
 
-    def structure(self, inputs, name='DiscountedPolicyNetwork', **kwargs) -> tuple:
-        return super().structure(inputs, name=name, **kwargs)
+    # def structure(self, inputs, name='DiscountedPolicyNetwork', **kwargs) -> tuple:
+    #     return super().structure(inputs, name=name, **kwargs)
 
     @tf.function
     def objective(self, batch, reduction=tf.reduce_mean) -> tuple:
@@ -93,9 +93,6 @@ class VPG(Agent):
             clip_norm = (None, None)
 
         # Networks
-        # self.weights_path = dict(policy=os.path.join(self.base_path, 'policy'),
-        #                          value=os.path.join(self.base_path, 'value'))
-
         self.policy = Network.create(agent=self, **(policy or {}), base_class=DiscountedPolicyNetwork)
         self.value = Network.create(agent=self, **(value or {}), base_class=ValueNetwork)
 
@@ -112,17 +109,17 @@ class VPG(Agent):
 
     @tf.function
     def act(self, state, **kwargs) -> Tuple[tf.Tensor, dict, dict]:
-        action, mean, std = self.policy(state, training=False, **kwargs)
+        action, mean, std, mode = self.policy(state, training=False, **kwargs)
         value = self.value(state, training=False, **kwargs)
 
         other = dict(value=value)
-        debug = dict(distribution_mean=mean, distribution_std=std)
+        debug = dict(distribution_mean=mean, distribution_std=std, distribution_mode=mode)
 
         return action, other, debug
 
     @tf.function
     def act_randomly(self, state) -> Tuple[tf.Tensor, dict, dict]:
-        action, _, _ = self.policy(state, training=False)
+        action, _, _, _ = self.policy(state, training=False)
         return action, {}, {}
 
     def update(self):

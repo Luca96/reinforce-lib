@@ -5,7 +5,6 @@
 """
 
 import os
-# import gym
 import numpy as np
 import tensorflow as tf
 
@@ -79,14 +78,6 @@ class DQN(Agent):
                                      alpha=self.alpha, beta=self.beta, seed=self.seed)
 
         return NStepMemory(self.transition_spec, shape=self.memory_size, gamma=self.gamma, seed=self.seed)
-
-    # def _init_action_space(self):
-    #     assert isinstance(self.env.action_space, gym.spaces.Discrete)
-    #
-    #     self.num_actions = 1
-    #     self.num_classes = self.env.action_space.n
-    #
-    #     self.convert_action = lambda a: tf.cast(tf.squeeze(a), dtype=tf.int32).numpy()
 
     def _init_policy(self, policy: str):
         if policy == 'boltzmann':

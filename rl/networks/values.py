@@ -10,7 +10,7 @@ from rl.networks import Network, backbones
 from typing import Dict, Callable
 
 
-@Network.register(name='ValueNetwork')
+@Network.register()
 class ValueNetwork(Network):
     """A standard ValueNetwork that predicts values for given states"""
 
@@ -26,21 +26,8 @@ class ValueNetwork(Network):
 
         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
 
-    def structure(self, inputs: Dict[str, Input], name='ValueNetwork', **kwargs) -> tuple:
-        # inputs = inputs['state']
-        #
-        # x = inputs
-        # for args in kwargs.pop('preprocess', []):
-        #     x = preprocessing.get(**args)(x)
-        #
-        # if len(inputs.shape) <= 2:
-        #     x = backbones.dense(layer=x, **kwargs)
-        # else:
-        #     x = backbones.convolutional(layer=x, **kwargs)
-        #
-        # output = self.output_layer(x)
-        # return inputs, output, name
-        return super().structure(inputs, name=name, **kwargs)
+    # def structure(self, inputs: Dict[str, Input], name='ValueNetwork', **kwargs) -> tuple:
+    #     return super().structure(inputs, name=name, **kwargs)
 
     def output_layer(self, layer: Layer, **kwargs) -> Layer:
         return Dense(units=1, activation='linear', name='value', **kwargs)(layer)
@@ -82,15 +69,15 @@ class ValueNetwork(Network):
 
 
 # TODO: test
-@Network.register(name='DecomposedValueNetwork')
+@Network.register()
 class DecomposedValueNetwork(ValueNetwork):
     """A ValueNetwork that predicts values (v) decomposed into bases (b) and exponents (e), such that: v = b * 10^e.
-        - See: https://ieeexplore.ieee.org/abstract/document/9506673/, chapter
+        - See: https://ieeexplore.ieee.org/abstract/document/9506673/ (section 2.3)
     """
 
     def __init__(self, agent: Agent, exponent_scale=6.0, target=False, log_prefix='value', normalize_loss=True,
                  **kwargs):
-        self._base_model_initialized = True  # weird hack
+        self.init_hack()
         self.exp_scale = tf.constant(exponent_scale, dtype=tf.float32)
         self.normalize_loss = bool(normalize_loss)
 
@@ -103,8 +90,8 @@ class DecomposedValueNetwork(ValueNetwork):
 
         return concatenate([base, exp], axis=1)
 
-    def structure(self, inputs: Dict[str, Input], name='DecomposedValueNetwork', **kwargs) -> tuple:
-        return super().structure(inputs, name=name, **kwargs)
+    # def structure(self, inputs: Dict[str, Input], name='DecomposedValueNetwork', **kwargs) -> tuple:
+    #     return super().structure(inputs, name=name, **kwargs)
 
     @tf.function
     def objective(self, batch, reduction=tf.reduce_mean) -> tuple:

@@ -14,24 +14,32 @@ from rl.networks.policies import PolicyNetwork
 from typing import Tuple, Dict
 
 
+@Network.register(name='A2C-ActorNetwork')
 class ActorNetwork(PolicyNetwork):
 
-    def structure(self, inputs, name='A2C-ActorNetwork', **kwargs) -> tuple:
-        return super().structure(inputs, name=name, **kwargs)
+    # def structure(self, inputs, name='A2C-ActorNetwork', **kwargs) -> tuple:
+        # return super().structure(inputs, name=name, **kwargs)
 
     def mean(self, distribution: utils.DistributionOrDict) -> utils.TensorOrDict:
-        """Returns the mean of the given `distribution`"""
+        """Returns the average mean of the given `distribution`"""
         if not isinstance(distribution, dict):
-            return distribution.mean()
+            return tf.reduce_mean(distribution.mean())
 
-        return {k: dist.mean() for k, dist in distribution.items()}
+        return {k: tf.reduce_mean(dist.mean()) for k, dist in distribution.items()}
+
+    def mode(self, distribution: utils.DistributionOrDict) -> utils.TensorOrDict:
+        """Returns the average mode of the given `distribution`"""
+        if not isinstance(distribution, dict):
+            return tf.reduce_mean(distribution.mode())
+
+        return {k: tf.reduce_mean(dist.mode()) for k, dist in distribution.items()}
 
     def stddev(self, distribution: utils.DistributionOrDict) -> utils.TensorOrDict:
-        """Returns the standard deviation oof the given `distribution`"""
+        """Returns the average standard deviation of the given `distribution`"""
         if not isinstance(distribution, dict):
-            return distribution.stddev()
+            return tf.reduce_mean(distribution.stddev())
 
-        return {k: dist.stddev() for k, dist in distribution.items()}
+        return {k: tf.reduce_mean(dist.stddev()) for k, dist in distribution.items()}
 
 
 class ParallelGAEMemory(GAEMemory):
@@ -230,7 +238,7 @@ class A2C(ParallelAgent):
         self.critic_lr = DynamicParameter.create(value=critic_lr)
 
         # Networks
-        self.actor = Network.create(agent=self, **(actor or {}), base_class=PolicyNetwork)
+        self.actor = Network.create(agent=self, **(actor or {}), base_class=ActorNetwork)
         self.critic = Network.create(agent=self, **(critic or {}), base_class=ValueNetwork)
 
         if clip_norm is None:
@@ -241,7 +249,6 @@ class A2C(ParallelAgent):
 
     @property
     def transition_spec(self) -> TransitionSpec:
-        # action=(self.num_actions,)
         return TransitionSpec(state=self.state_spec, action=self.action_spec, next_state=False, terminal=False,
                               reward=(1,), other=dict(value=(1,)))
 
@@ -250,17 +257,17 @@ class A2C(ParallelAgent):
 
     @tf.function
     def act(self, states, **kwargs) -> Tuple[tf.Tensor, dict, dict]:
-        actions, mean, std = self.actor(states, training=False)
+        actions, mean, std, mode = self.actor(states, training=False)
         values = self.critic(states, training=False)
 
         other = dict(value=values)
-        debug = dict(distribution_mean=mean, distribution_std=std)
+        debug = dict(distribution_mean=mean, distribution_std=std, distribution_mode=mode)
 
         return actions, other, debug
 
     @tf.function
     def act_evaluation(self, state, **kwargs):
-        actions, _, _ = self.actor(state, training=False, deterministic=True, **kwargs)
+        actions, _, _, _ = self.actor(state, training=False, deterministic=True, **kwargs)
         return actions
 
     def learn(self, *args, **kwargs):

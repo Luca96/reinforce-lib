@@ -2,8 +2,6 @@
     - Continuous control with deep reinforcement learning (arXiv:1509.02971)
 """
 
-import os
-import gym
 import tensorflow as tf
 
 from tensorflow.keras.layers import Layer, Dense, Concatenate, Input
@@ -17,6 +15,7 @@ from rl.memories import TransitionSpec, ReplayMemory, PrioritizedMemory
 from rl.networks import backbones, Network, DeterministicPolicyNetwork
 
 
+@Network.register(name='DDPG-ActorNetwork')
 class ActorNetwork(DeterministicPolicyNetwork):
 
     @tf.function
@@ -30,12 +29,13 @@ class ActorNetwork(DeterministicPolicyNetwork):
         return loss, dict(loss=loss, actions=actions, q_values=q_values)
 
 
+@Network.register(name='DDPG-CriticNetwork')
 class CriticNetwork(Network):
 
     def call(self, *inputs, training=None, **kwargs):
         return super().call(inputs, training=training, **kwargs)
 
-    def structure(self, inputs: Dict[str, Input], name='DDPG-CriticNetwork', **kwargs) -> tuple:
+    def structure(self, inputs: Dict[str, Input], **kwargs) -> tuple:
         state_in = inputs['state']
         action_in = inputs['action']
 
@@ -46,7 +46,7 @@ class CriticNetwork(Network):
         x = backbones.dense(x, **kwargs)
 
         out = self.output_layer(x, **self.output_kwargs)
-        return (state_in, action_in), out, name
+        return (state_in, action_in), out
 
     def output_layer(self, layer: Layer, **kwargs) -> Layer:
         return Dense(units=self.agent.num_actions, name='q-values', **kwargs)(layer)
@@ -119,9 +119,6 @@ class DDPG(Agent):
             self.beta = DynamicParameter.create(value=beta)
 
         # Networks
-        # self.weights_path = dict(actor=os.path.join(self.base_path, 'actor'),
-        #                          critic=os.path.join(self.base_path, 'critic'))
-
         self.actor = Network.create(agent=self, target=True, log_prefix='actor', **(actor or {}),
                                     base_class=ActorNetwork)
 
@@ -144,21 +141,6 @@ class DDPG(Agent):
 
     def define_action_converter(self, kwargs: dict) -> TanhConverter:
         return TanhConverter(space=self.env.action_space, **(kwargs or {}))
-
-    # def _init_action_space(self):
-    #     action_space = self.env.action_space
-    #
-    #     assert isinstance(action_space, gym.spaces.Box)
-    #     assert action_space.is_bounded()
-    #
-    #     self.action_low = tf.constant(action_space.low, dtype=tf.float32)
-    #     self.action_high = tf.constant(action_space.high, dtype=tf.float32)
-    #     self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
-    #
-    #     self.num_actions = action_space.shape[0]
-    #
-    #     # `a` \in (-1, 1), so add 1 and divide by 2 (to rescale in 0-1)
-    #     self.convert_action = lambda a: tf.squeeze((a + 1.0) / 2.0 * self.action_range + self.action_low).numpy()
 
     def act(self, state, deterministic=False, **kwargs) -> Tuple[tf.Tensor, dict, dict]:
         greedy_action = self.actor(state, **kwargs)

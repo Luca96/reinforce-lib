@@ -9,10 +9,10 @@ from rl.agents import Agent
 from rl.networks import Network
 from rl.layers.distributions import DistributionLayer
 
-from typing import Dict, Union
+# from typing import Dict, Union
 
 
-@Network.register(name='PolicyNetwork')
+@Network.register()
 class PolicyNetwork(Network):
 
     def __init__(self, agent: Agent, log_prefix='policy', **kwargs):
@@ -24,21 +24,18 @@ class PolicyNetwork(Network):
         distribution: utils.DistributionOrDict = super().call(inputs, **kwargs)
 
         if isinstance(actions, dict) or tf.is_tensor(actions):
-            # log_prob = distribution.log_prob(actions)
-            log_prob = self.log_prob(distribution, actions)
-            # entropy = distribution.entropy()
-            entropy = self.entropy(distribution)
+            # log_prob = self.log_prob(distribution, actions)
+            # entropy = self.entropy(distribution)
+            #
+            # if entropy is None:
+            #     # estimate entropy
+            #     # TODO: or `entropy = -tf.reduce_mean(log_prob, axis=-1, keepdims=True)`?
+            #     entropy = -tf.reduce_mean(log_prob)
+            #
+            # return log_prob, entropy
+            return self.log_prob_and_entropy(distribution, actions)
 
-            if entropy is None:
-                # estimate entropy
-                # TODO: or `entropy = -tf.reduce_mean(log_prob, axis=-1, keepdims=True)`?
-                entropy = -tf.reduce_mean(log_prob)
-
-            return log_prob, entropy
-
-        # TODO: also return distribution "mode"
-        # return tf.identity(distribution), distribution.mean(), distribution.stddev()
-        return self.identity(distribution), self.mean(distribution), self.stddev(distribution)
+        return self.identity(distribution), self.mean(distribution), self.stddev(distribution), self.mode(distribution)
 
     def output_layer(self, layer, **kwargs) -> utils.LayerOrDict:
         distribution = DistributionLayer.get(action_space=self.agent.env.action_space, **kwargs)
@@ -98,22 +95,30 @@ class PolicyNetwork(Network):
         # https://en.wikipedia.org/wiki/Joint_entropy#Less_than_or_equal_to_the_sum_of_individual_entropies
         return tf.reduce_sum(entropies, axis=-1, keepdims=True)
 
-    # def log_prob_and_entropy(self, distribution: utils.DistributionOrDict, actions: utils.TensorOrDict) -> tuple:
-    #     if not isinstance(distribution, dict):
-    #         return distribution.log_prob(actions), distribution.entropy()
-    #
-    #     log_probs = {k: dist.log_prob(actions[k]) for k, dist in distribution.items()}
-    #     entropies = {k: dist.entropy() for k, dist in distribution.items()}
-    #
-    #     # if there are any None entropies, estimate them from log-prob
-    #     for k, entropy in entropies.items():
-    #         if entropy is None:
-    #             entropies[k] = tf.reduce_mean
-    #
-    #     entropies = tf.concat(entropies, axis=-1)
-    #
-    #     # https://en.wikipedia.org/wiki/Joint_entropy#Less_than_or_equal_to_the_sum_of_individual_entropies
-    #     return tf.reduce_sum(entropies, axis=-1, keepdims=True)
+    def log_prob_and_entropy(self, distribution: utils.DistributionOrDict, actions: utils.TensorOrDict) -> tuple:
+        if not isinstance(distribution, dict):
+            log_prob = distribution.log_prob(actions)
+            entropy = distribution.entropy()
+
+            if entropy is None:
+                entropy = -tf.reduce_mean(log_prob, axis=-1, keepdims=True)
+
+            return log_prob, entropy
+
+        log_probs = {k: dist.log_prob(actions[k]) for k, dist in distribution.items()}
+        entropies = {k: dist.entropy() for k, dist in distribution.items()}
+
+        # if there are any None entropies, estimate them from log-prob
+        for k, entropy in entropies.items():
+            if entropy is None:
+                entropies[k] = -tf.reduce_mean(log_probs[k], axis=-1, keepdims=True)
+
+        entropies = tf.concat(list(entropies.values()), axis=-1)
+        log_probs = tf.concat(list(log_probs.values()), axis=-1)
+
+        log_prob = tf.reduce_sum(log_probs, axis=-1, keepdims=True)
+        entropy = tf.reduce_sum(entropies, axis=-1, keepdims=True)
+        return log_prob, entropy
 
     def mean(self, distribution: utils.DistributionOrDict) -> utils.TensorOrDict:
         """Returns the mean of the given `distribution`"""
@@ -122,15 +127,22 @@ class PolicyNetwork(Network):
 
         return {k: dist.mean() for k, dist in distribution.items()}
 
+    def mode(self, distribution: utils.DistributionOrDict) -> utils.TensorOrDict:
+        """Returns the mode of the given `distribution`"""
+        if not isinstance(distribution, dict):
+            return distribution.mode()
+
+        return {k: dist.mode() for k, dist in distribution.items()}
+
     def stddev(self, distribution: utils.DistributionOrDict) -> utils.TensorOrDict:
-        """Returns the standard deviation oof the given `distribution`"""
+        """Returns the standard deviation of the given `distribution`"""
         if not isinstance(distribution, dict):
             return distribution.stddev()
 
         return {k: dist.stddev() for k, dist in distribution.items()}
 
 
-@Network.register(name='DeterministicPolicyNetwork')
+@Network.register()
 class DeterministicPolicyNetwork(Network):
 
     def __init__(self, agent: Agent, *args, log_prefix='deterministic_policy', **kwargs):
@@ -139,8 +151,8 @@ class DeterministicPolicyNetwork(Network):
 
         super().__init__(agent, *args, log_prefix=log_prefix, **kwargs)
 
-    def structure(self, inputs: Dict[str, Input], name='DeterministicPolicyNetwork', **kwargs) -> tuple:
-        return super().structure(inputs, name=name, **kwargs)
+    # def structure(self, inputs: Dict[str, Input], name='DeterministicPolicyNetwork', **kwargs) -> tuple:
+    #     return super().structure(inputs, name=name, **kwargs)
 
     def output_layer(self, layer: Layer, **kwargs) -> Layer:
         num_actions = self.num_actions

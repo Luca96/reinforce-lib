@@ -95,29 +95,6 @@ class ScheduleWrapper(LearningRateSchedule, DynamicParameter):
         return config
 
 
-# class LearnableParameter(DynamicParameter):
-#     def __init__(self, initial_value: float, name=None):
-#         self._value = tf.Variable(initial_value=initial_value, trainable=True, name=name,
-#                                   dtype=tf.float32)
-#         super().__init__()
-#         self.value = initial_value
-#
-#     @property
-#     def value(self):
-#         return self._value.value()
-#
-#     @value.setter
-#     def value(self, v):
-#         self._value.assign(value=v, read_value=False)
-#
-#     @property
-#     def variable(self) -> list:
-#         return [self._value]
-#
-#     def __call__(self, *args, **kwargs):
-#         return self.value
-
-
 class ConstantParameter(DynamicParameter):
     """A constant learning rate schedule that wraps a constant float learning rate value"""
     def __init__(self, value: float):

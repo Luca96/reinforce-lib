@@ -9,52 +9,37 @@ from rl import utils
 from rl.parameters import DynamicParameter
 
 from rl.agents import A2C
-from rl.memories import TransitionSpec  # , GAEMemory
+from rl.memories import TransitionSpec
 from rl.networks import Network, ValueNetwork
-# from rl.networks.policies import PolicyNetwork
 from rl.agents.a2c import ActorNetwork
+from rl.agents.actions import DictConverter
 
-from typing import Dict, Tuple, Union, Callable, List
+from typing import Dict, Tuple
 
 
+@Network.register()
 class ClippedPolicyNetwork(ActorNetwork):
     """Policy network with PPO clipped objective"""
-
-    # @tf.function
-    # def call(self, inputs, actions=None, **kwargs):
-    #     distribution = Network.call(self, inputs, **kwargs)
-    #
-    #     if isinstance(actions, dict) or tf.is_tensor(actions):
-    #         log_prob = distribution.log_prob(actions)
-    #         entropy = distribution.entropy()
-    #
-    #         if entropy is None:
-    #             # estimate entropy
-    #             entropy = -tf.reduce_mean(log_prob)
-    #
-    #         return log_prob, entropy
-    #
-    #     new_actions = tf.identity(distribution)
-    #     return new_actions, distribution.log_prob(new_actions), distribution.mean(), distribution.stddev()
 
     @tf.function
     def call(self, inputs, actions=None, **kwargs):
         distribution: utils.DistributionOrDict = Network.call(self, inputs, **kwargs)
 
         if isinstance(actions, dict) or tf.is_tensor(actions):
-            log_prob = self.log_prob(distribution, actions)
-            entropy = self.entropy(distribution)
-
-            if entropy is None:
-                # estimate entropy
-                entropy = -tf.reduce_mean(log_prob)
-
-            return log_prob, entropy
+            # log_prob = self.log_prob(distribution, actions)
+            # entropy = self.entropy(distribution)
+            #
+            # if entropy is None:
+            #     # estimate entropy
+            #     entropy = -tf.reduce_mean(log_prob)
+            #
+            # return log_prob, entropy
+            return self.log_prob_and_entropy(distribution, actions)
 
         new_actions = self.identity(distribution)
         log_probs = self.log_prob(distribution, new_actions)
 
-        return new_actions, log_probs, self.mean(distribution), self.stddev(distribution)
+        return new_actions, log_probs, self.mean(distribution), self.stddev(distribution), self.mode(distribution)
 
     @tf.function
     def objective(self, batch, reduction=tf.reduce_mean) -> tuple:
@@ -107,11 +92,12 @@ class ClippedPolicyNetwork(ActorNetwork):
         return tf.stop_gradient(kld)
 
 
+@Network.register()
 class ClippedValueNetwork(ValueNetwork):
     """Value network with clipped MSE objective"""
 
-    def structure(self, inputs, name='ClippedValueNetwork', **kwargs) -> tuple:
-        return super().structure(inputs, name=name, **kwargs)
+    # def structure(self, inputs, name='ClippedValueNetwork', **kwargs) -> tuple:
+    #     return super().structure(inputs, name=name, **kwargs)
 
     @tf.function
     def objective(self, batch, reduction=tf.reduce_mean) -> tuple:
@@ -171,8 +157,10 @@ class PPO(A2C):
 
     @property
     def transition_spec(self) -> TransitionSpec:
-        # action=(self.num_actions,)
-        num_actions = 1 if isinstance(self.action_spec, dict) else self.action_converter.num_actions
+        if isinstance(self.action_converter.converter, DictConverter):
+            num_actions = 1
+        else:
+            num_actions = self.action_converter.num_actions
 
         return TransitionSpec(state=self.state_spec, action=self.action_spec, next_state=False, terminal=False,
                               reward=(1,), other=dict(log_prob=(num_actions,), value=(1,)))
@@ -185,16 +173,16 @@ class PPO(A2C):
     @tf.function
     def act(self, states, **kwargs) -> Tuple[tf.Tensor, dict, dict]:
         values = self.value(states, training=False)
-        actions, log_prob, mean, std = self.policy(states, training=False)
+        actions, log_prob, mean, std, mode = self.policy(states, training=False)
 
         other = dict(log_prob=log_prob, value=values)
-        debug = dict(distribution_mean=mean, distribution_std=std)
+        debug = dict(distribution_mean=mean, distribution_std=std, distribution_mode=mode)
 
         return actions, other, debug
 
     @tf.function
     def act_evaluation(self, state, **kwargs):
-        actions, _, _, _ = self.policy(state, training=False, deterministic=True, **kwargs)
+        actions = self.policy(state, training=False, deterministic=True, **kwargs)[0]
         return actions
 
     def update(self):

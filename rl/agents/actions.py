@@ -74,7 +74,6 @@ class ContinuousConverter(ActionConverter):
         self.shape = space.shape
 
     def convert(self, action):
-        # return tf.squeeze(action).numpy()
         return np.reshape(action, newshape=self.shape)
 
 
@@ -92,7 +91,6 @@ class BetaConverter(ContinuousConverter):
     def convert(self, action):
         # action is in [0, 1]
         action = action * self.action_range + self.action_low
-        # return tf.squeeze(action).numpy()
         return np.reshape(action, newshape=self.shape)
 
 
@@ -102,7 +100,6 @@ class TanhConverter(BetaConverter):
     def convert(self, action):
         # action is in [-1, 1]
         action = (action + 1.0) / 2.0 * self.action_range + self.action_low
-        # return tf.squeeze(action).numpy()
         return np.reshape(action, newshape=self.shape)
 
 
@@ -111,7 +108,6 @@ class DictConverter(ActionConverter):
 
     def __init__(self, converters: Dict[str, ActionConverter]):
         self.converters = converters
-        # self.num_actions = {k: converter.num_actions for k, converter in self.items()}
 
     def __getitem__(self, key):
         return self.converters[key]
@@ -127,24 +123,24 @@ class DictConverter(ActionConverter):
 class ParallelConverterWrapper(ActionConverter):
     """Takes an ActionConverter and applies it on a list of actions, coming from parallel envs"""
 
-    def __init__(self, converter: ActionConverter):
-        if isinstance(converter, DictConverter):
-            # wrap each `converter` in the DictConverter, since action is Dict[str, list]
-            # converter.converters = {k: ParallelConverterWrapper(c) for k, c in converter.items()}
-            self._wraps_dict = True
-        else:
-            self._wraps_dict = False
+    def __init__(self, converter: Union[ActionConverter, DictConverter]):
+        # if isinstance(converter, DictConverter):
+        #     self._wraps_dict = True
+        # else:
+        #     self._wraps_dict = False
 
+        self.wraps_dict = isinstance(converter, DictConverter)
         self.converter = converter
 
     def __getitem__(self, key):
-        if self._wraps_dict:
-            # double wrapping is involved:
-            # 1. `converter` is DictConverter which has `converters`, so: `self.converter.converters`
-            # 2. but each `converter` in converters is also wrapped, so: `..[key].converter`
-            return self.converter.converters[key]  # .converter
+        if self.wraps_dict:
+            # `converter` is DictConverter which has `converters`, so: `self.converter.converters`
+            return self.converter.converters[key]
 
         return self.converter[key]
+
+    def __getattr__(self, name):
+        return getattr(self.converter, name)
 
     def convert(self, action: Union[list, Dict[str, list]]) -> List[Union[dict, np.ndarray]]:
         if isinstance(action, dict):
@@ -152,6 +148,7 @@ class ParallelConverterWrapper(ActionConverter):
 
         return [self.converter(a) for a in action]
 
+    # TODO: to support arbitrary nested action-spaces, this have to reconstruct the nested structure from a flat struct
     def _convert_dict(self, x: dict) -> List[Dict[str, np.ndarray]]:
         keys = list(x.keys())
         size = len(x[keys[0]])

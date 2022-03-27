@@ -817,8 +817,7 @@ def data_to_batches(tensors: Union[list, dict, tuple], batch_size: int, shuffle_
         dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE,
                               deterministic=True)
 
-    # TODO: add `num_parallel_calls=AUTOTUNE` when updating tf
-    dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
+    dataset = dataset.batch(batch_size, drop_remainder=drop_remainder, num_parallel_calls=tf.data.AUTOTUNE)
 
     if shuffle_batches:
         dataset = dataset.shuffle(buffer_size=batch_size, seed=seed, reshuffle_each_iteration=True)

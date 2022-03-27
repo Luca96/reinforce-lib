@@ -29,19 +29,19 @@ class TwinCriticNetwork(CriticNetwork):
 
         return q1
 
-    def structure(self, inputs: Dict[str, Input], name='TD3-TwinCriticNetwork', **kwargs) -> tuple:
+    def structure(self, inputs: Dict[str, Input], **kwargs) -> tuple:
         self.output_kwargs['name'] = 'q1-values'
-        _, output1, name1 = super().structure(inputs, name=name + '-Q1', **kwargs)
+        _, output1 = super().structure(inputs, **kwargs)
 
         self.output_kwargs['name'] = 'q2-values'
-        inputs, output2, name2 = super().structure(inputs, name=name + '-Q2', **kwargs)
+        inputs, output2 = super().structure(inputs, **kwargs)
 
         # create two networks
-        self.q1 = tf.keras.Model(inputs, outputs=output1, name=name1)
-        self.q2 = tf.keras.Model(inputs, outputs=output2, name=name2)
+        self.q1 = tf.keras.Model(inputs, outputs=output1, name=super().default_name + '-Q1')
+        self.q2 = tf.keras.Model(inputs, outputs=output2, name=super().default_name + '-Q2')
 
         # return joint model
-        return inputs, (self.q1.output, self.q2.output), name
+        return inputs, (self.q1.output, self.q2.output)
 
     def output_layer(self, layer: Layer, **kwargs) -> Layer:
         return Dense(units=self.agent.num_actions, **self.output_kwargs)(layer)

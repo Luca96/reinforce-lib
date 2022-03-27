@@ -56,8 +56,8 @@ class SquashedGaussianPolicy(Network):
 
         return tf.nn.tanh(action), mean, std  # also return `mean` and `std` for debugging
 
-    def structure(self, inputs: Dict[str, tf.keras.Input], name='SquashedGaussianPolicy', **kwargs) -> tuple:
-        return super().structure(inputs, name=name, **kwargs)
+    # def structure(self, inputs: Dict[str, tf.keras.Input], name='SquashedGaussianPolicy', **kwargs) -> tuple:
+    #     return super().structure(inputs, name=name, **kwargs)
 
     def output_layer(self, layer: Layer, **kwargs) -> Tuple[Layer, Layer]:
         mean = Linear(units=self.agent.num_actions, name='mean', **self.output_kwargs)(layer)
@@ -73,8 +73,6 @@ class SquashedGaussianPolicy(Network):
         alpha = tf.exp(self.agent.log_alpha)
 
         q_values1, q_values2 = self.agent.critic((states, actions), training=False)
-        # q_values1 = self.agent.q1(states, actions, training=False)
-        # q_values2 = self.agent.q2(states, actions, training=False)
         min_q_values = tf.minimum(q_values1, q_values2)
 
         loss = reduction(alpha * log_prob - min_q_values)
@@ -90,8 +88,8 @@ class SoftTwinCriticNetwork(TwinCriticNetwork):
     def call(self, *inputs, training=None, **kwargs):
         return CriticNetwork.call(self, inputs, training=training, **kwargs)
 
-    def structure(self, inputs: Dict[str, Input], name='SAC-TwinCriticNetwork', **kwargs) -> tuple:
-        return super().structure(inputs, name=name, **kwargs)
+    # def structure(self, inputs: Dict[str, Input], name='SAC-TwinCriticNetwork', **kwargs) -> tuple:
+    #     return super().structure(inputs, name=name, **kwargs)
 
     @tf.function
     def train_on_batch(self, batch: dict):
@@ -192,9 +190,6 @@ class SAC(Agent):
             self.beta = DynamicParameter.create(value=beta)
 
         # Networks
-        # self.weights_path = dict(actor=os.path.join(self.base_path, 'actor'),
-        #                          critic=os.path.join(self.base_path, 'critic'))
-
         self.actor = Network.create(agent=self, **(actor or {}), target=False, base_class=SquashedGaussianPolicy)
         self.critic = Network.create(agent=self, **(critic or {}), target=True, base_class=SoftTwinCriticNetwork)
 
@@ -214,21 +209,6 @@ class SAC(Agent):
 
     def define_action_converter(self, kwargs: dict) -> TanhConverter:
         return TanhConverter(space=self.env.action_space, **(kwargs or {}))
-
-    # def _init_action_space(self):
-    #     action_space = self.env.action_space
-    #
-    #     assert isinstance(action_space, gym.spaces.Box)
-    #     assert action_space.is_bounded()
-    #
-    #     self.action_low = tf.constant(action_space.low, dtype=tf.float32)
-    #     self.action_high = tf.constant(action_space.high, dtype=tf.float32)
-    #     self.action_range = tf.constant(action_space.high - action_space.low, dtype=tf.float32)
-    #
-    #     self.num_actions = action_space.shape[0]
-    #
-    #     # `a` \in (-1, 1), so add 1 and divide by 2 (to rescale in 0-1)
-    #     self.convert_action = lambda a: tf.squeeze((a + 1.0) / 2.0 * self.action_range + self.action_low).numpy()
 
     @tf.function
     def act(self, state, deterministic=False, **kwargs) -> Tuple[tf.Tensor, dict, dict]:

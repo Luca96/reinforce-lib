@@ -9,7 +9,7 @@ from tensorflow_probability import layers as tfl
 from tensorflow_probability import distributions as tfd
 from tensorflow.keras.layers import Layer, Dense, Reshape
 
-from typing import Dict, Callable, Union, List
+from typing import Dict, Callable, Union, List, Tuple
 
 from rl import utils
 from rl.layers import MyLayer, Linear
@@ -22,6 +22,7 @@ class DistributionLayer(MyLayer):
     def __init__(self, **kwargs):
         super().__init__(extra_call_kwargs=['deterministic'], **kwargs)
 
+    # TODO: @tf.function?
     def call(self, inputs, deterministic=False, **kwargs) -> tfl.DistributionLambda:
         params = self.forward_params(inputs)
         distribution = tfl.DistributionLambda(make_distribution_fn=self.make_distribution_fn,
@@ -49,8 +50,6 @@ class DistributionLayer(MyLayer):
 
         if isinstance(action_space, gym.spaces.Box):
             if action_space.is_bounded():
-                # return TanhGaussian(shape=action_space.shape, **kwargs)
-                # return SquashedGaussian(shape=action_space.shape, **kwargs)
                 return Beta(shape=action_space.shape, **kwargs)
 
             return Gaussian(shape=action_space.shape, **kwargs)
@@ -103,7 +102,7 @@ class Categorical(DistributionLayer):
             return utils.TF_ZERO
 
         def _stddev(self, **kwargs):
-            # since its not defined for Categorical, we return a dummy value of zero
+            # since it's not defined for Categorical, we return a dummy value of zero
             return utils.TF_ZERO
 
     def __init__(self, num_actions: int, num_classes: int, **kwargs):
@@ -120,6 +119,7 @@ class Categorical(DistributionLayer):
 
     @tf.function
     def forward_params(self, inputs) -> List[tf.Tensor]:
+        # TODO: support for "temperature" parameter (just divide logits by it)
         logits = self.logits(inputs)
         return self.reshape(logits)
 
@@ -144,7 +144,7 @@ class Gaussian(DistributionLayer):
         self.reshape = Reshape(target_shape=self.shape)
 
     @tf.function
-    def forward_params(self, inputs) -> List[tf.Tensor]:
+    def forward_params(self, inputs) -> Tuple[tf.Tensor, tf.Tensor]:
         mean = self.mean(inputs)
         std = tf.exp(self.log_std(inputs))
 
@@ -223,7 +223,7 @@ class SquashedGaussian(Gaussian):
 
 class Beta(DistributionLayer):
     """The entropy of Beta (with a, b > 1) is negative in general, and maximum at zero whe a = b = 1.
-       (where the Beta equals the uniform distribution). It's minimum is at -infinity.
+       (where the Beta equals the uniform distribution). Its minimum is at -infinity.
         - Source: https://en.wikipedia.org/wiki/Beta_distribution#Quantities_of_information_(entropy)
     """
 
@@ -239,7 +239,7 @@ class Beta(DistributionLayer):
         self.reshape = Reshape(target_shape=self.shape)
 
     @tf.function
-    def forward_params(self, inputs) -> List[tf.Tensor]:
+    def forward_params(self, inputs) -> Tuple[tf.Tensor, tf.Tensor]:
         alpha = self.alpha(inputs)
         beta = self.beta(inputs)
 
@@ -255,107 +255,3 @@ class Beta(DistributionLayer):
     @tf.function
     def _softplus_one(self, x):
         return tf.nn.softplus(x) + 1.0
-
-
-# class Compound(DistributionLayer):
-#
-#     class Wrapper(tfd.Distribution):
-#         def __init__(self, distributions: Dict[str, tfd.Distribution]):
-#             super().__init__(dtype=tf.float32, reparameterization_type=tfd.FULLY_REPARAMETERIZED,
-#                              validate_args=False, allow_nan_stats=True)
-#             self.distributions = distributions
-#
-#         def items(self):
-#             return self.distributions.items()
-#
-#         def values(self):
-#             return self.distributions.values()
-#
-#         def log_prob(self, x: dict) -> tf.Tensor:
-#             log_probs = [distribution.log_prob(x[k]) for k, distribution in self.items()]
-#             log_probs = tf.concat(log_probs, axis=-1)
-#
-#             # assume distributions to be independent
-#             return tf.reduce_sum(log_probs, axis=-1, keepdims=True)
-#
-#         def entropy(self) -> Union[None, tf.Tensor]:
-#             entropies = [distribution.entropy() for distribution in self.values()]
-#
-#             if any(x is None for x in entropies):
-#                 return None
-#
-#             entropies = tf.concat(entropies, axis=-1)
-#
-#             # https://en.wikipedia.org/wiki/Joint_entropy#Less_than_or_equal_to_the_sum_of_individual_entropies
-#             return tf.reduce_sum(entropies, axis=-1, keepdims=True)
-#
-#         def mean(self) -> Dict[str, tf.Tensor]:
-#             return {k: distribution.mean() for k, distribution in self.items()}
-#
-#         def stddev(self) -> Dict[str, tf.Tensor]:
-#             return {k: distribution.stddev() for k, distribution in self.items()}
-#
-#     def __init__(self, distributions: Dict[str, DistributionLayer], **kwargs):
-#         super().__init__(**kwargs)
-#         self.distributions = distributions
-#
-#     def call(self, inputs, deterministic=False, **kwargs):
-#         distributions = {k: layer(inputs, deterministic, **kwargs) for k, layer in self.distributions.items()}
-#         value = {k: tf.identity(v) for k, v in distributions.items()}
-#
-#         return self.Wrapper(distributions), value
-#
-#
-# class CompoundDistribution(DistributionLayer):
-#     """Distribution layer that can handle a Dict action space."""
-#
-#     class DictDistribution(tfd.Distribution):
-#
-#         def __init__(self, distributions: Dict[str, tfd.Distribution], **kwargs):
-#             super().__init__(dtype=tf.float32, reparameterization_type=tfd.FULLY_REPARAMETERIZED,
-#                              validate_args=False, allow_nan_stats=True)
-#
-#             self.distributions = distributions
-#
-#         def _event_shape_tensor(self) -> Dict[str, tf.TensorShape]:
-#             return {k: dist._event_shape_tensor for k, dist in self.distributions.items()}
-#             # return [dist._event_shape_tensor for dist in self.distributions.values()]
-#
-#         def _batch_shape_tensor(self):
-#             return {k: dist.batch_shape_tensor for k, dist in self.distributions.items()}
-#
-#         def _sample_n(self, n: int, **kwargs) -> dict:
-#             # return {k: dist._sample_n(n, **kwargs) for k, dist in self.distributions.items()}
-#             return {k: dist.sample(n, **kwargs) for k, dist in self.distributions.items()}
-#
-#         def _log_prob(self, action: dict):
-#             log_probs = [dist.log_prob(action[k]) for k, dist in self.distributions.items()]
-#             log_probs = tf.concat(log_probs, axis=-1)
-#             return tf.reduce_sum(log_probs, axis=-1, keepdims=True)
-#
-#         def _entropy(self):
-#             entropies = [dist.entropy() for dist in self.distributions.values()]
-#             entropies = tf.concat(entropies, axis=-1)
-#             return tf.reduce_sum(entropies, axis=-1, keepdims=True)
-#
-#         def _mean(self):
-#             return {k: dist.mean() for k, dist in self.distributions.values()}
-#
-#     def __init__(self, distributions: Dict[str, DistributionLayer], **kwargs):
-#         super().__init__(**kwargs)
-#         self.distributions = distributions
-#
-#     # def call(self, inputs, deterministic=False, **kwargs) -> Dict[str, tfl.DistributionLambda]:
-#     #     return {k: dist(inputs, deterministic=deterministic, **kwargs) for k, dist in self.distributions.items()}
-#
-#     def forward_params(self, inputs) -> Dict[str, tf.Tensor]:
-#         return {k: dist.forward_params(inputs) for k, dist in self.distributions.items()}
-#
-#     def make_distribution_fn(self, params: dict) -> DictDistribution:
-#         distributions = {}
-#
-#         for k, distribution in self.distributions.items():
-#             distributions[k] = distribution.make_distribution_fn(params=params[k])
-#
-#         return self.DictDistribution(distributions)
-#         # return tfd.independent_joint_distribution_from_structure(self.distributions)

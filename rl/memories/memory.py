@@ -7,7 +7,7 @@ from rl.memories import TransitionSpec
 from typing import Union, Tuple
 
 
-# TODO: generalize all memory buffers to multiple environments as PPO `GlobalMemory`
+# TODO: generalize all memory buffers to multiple environments as `ParallelGAEMemory`
 # TODO: parallel memory interface or just an `AbstractMemory` class
 # TODO: implement everything with `numpy`
 # TODO: implement serialization/deserialization

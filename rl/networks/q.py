@@ -48,9 +48,13 @@ class QNetwork(Network):
         super().__init__(agent, target=target, dueling=dueling, operator=operator, log_prefix=log_prefix, **kwargs)
 
         # cumulative gamma
-        # self.gamma_n = tf.pow(x=self.agent.gamma, y=self.agent.horizon)
         self.gamma_n = tf.pow(x=self.agent.gamma, y=getattr(self.agent, 'horizon', 1))
 
+    @property
+    def default_name(self) -> str:
+        return 'Deep-Q-Network'
+
+    # TODO: @tf.function?
     def call(self, inputs, actions=None, training=None, **kwargs):
         q_values = super().call(inputs, training=training, **kwargs)
 
@@ -70,9 +74,9 @@ class QNetwork(Network):
         q_values = self(inputs, training=False, **kwargs)
         return tf.argmax(q_values, axis=-1)
 
-    def structure(self, inputs: Dict[str, Input], name='Deep-Q-Network', **kwargs) -> tuple:
+    def structure(self, inputs: Dict[str, Input], **kwargs) -> tuple:
         utils.remove_keys(kwargs, keys=['dueling', 'operator', 'prioritized'])
-        return super().structure(inputs, name=name, **kwargs)
+        return super().structure(inputs, **kwargs)
 
     def output_layer(self, layer: Layer, **kwargs) -> Layer:
         assert self.num_actions == 1
@@ -133,6 +137,10 @@ class QNetwork(Network):
 
 @Network.register()
 class DoubleQNetwork(QNetwork):
+
+    @property
+    def default_name(self) -> str:
+        return self.__class__.__name__
 
     @tf.function
     def targets(self, batch: dict):
@@ -266,7 +274,7 @@ class DoubleQNetwork(QNetwork):
 #         pass
 
 
-@Network.register()
+# @Network.register()
 class RainbowQNetwork(QNetwork):
     # https://github.com/google/dopamine/blob/master/dopamine/agents/rainbow/rainbow_agent.py
 
@@ -397,7 +405,7 @@ class RainbowQNetwork(QNetwork):
         return tf.reshape(projection, shape=(batch_size, num_dims))
 
 
-@Network.register()
+# @Network.register()
 class ImplicitQuantileNetwork(QNetwork):
     # https://github.com/google/dopamine/blob/b312d26305222d676f84d8949e2f07763b63ea65/dopamine/discrete_domains/atari_lib.py#L249
 
