@@ -22,7 +22,6 @@ class DistributionLayer(MyLayer):
     def __init__(self, **kwargs):
         super().__init__(extra_call_kwargs=['deterministic'], **kwargs)
 
-    # TODO: @tf.function?
     def call(self, inputs, deterministic=False, **kwargs) -> tfl.DistributionLambda:
         params = self.forward_params(inputs)
         distribution = tfl.DistributionLambda(make_distribution_fn=self.make_distribution_fn,
@@ -161,64 +160,62 @@ class Gaussian(DistributionLayer):
         return tf.minimum(tf.maximum(x, self.std_range[0]), self.std_range[1])
 
 
-# TODO: check
-# https://github.com/DLR-RM/stable-baselines3/blob/master/stable_baselines3/common/distributions.py#L195
-class TanhGaussian(Gaussian):
-    """Squashed Gaussian distribution which uses tanh to constrain samples to be in [-1, 1]"""
-
-    class WrappedDistribution(tfd.TransformedDistribution):
-        CLIP_MIN = -1.0 + 1e-5  # utils.TF_EPS
-        CLIP_MAX = +1.0 - 1e-5  # utils.TF_EPS
-
-        def log_prob(self, x, **kwargs):
-            # clip `x` to avoid inf
-            clipped_x = tf.clip_by_value(x, self.CLIP_MIN, self.CLIP_MAX)
-            return super().log_prob(clipped_x)
-
-        def _entropy(self, **kwargs):
-            return None
-
-        def _mean(self, **kwargs):
-            return tf.nn.tanh(self.distribution._mean(**kwargs))
-
-        def _stddev(self, **kwargs):
-            return self.distribution._stddev(**kwargs)
-
-    def make_distribution_fn(self, params) -> tfd.TransformedDistribution:
-        normal = super().make_distribution_fn(params)
-
-        return TanhGaussian.WrappedDistribution(distribution=normal, bijector=tfp.bijectors.Tanh(),
-                                                name='TanhGaussian')
-
-
-# TODO: check
-class SquashedGaussian(Gaussian):
-    class TanhNormal(tfd.Normal):
-
-        def _sample_n(self, *args, **kwargs):
-            x = super()._sample_n(*args, **kwargs)
-            return tf.nn.tanh(x)
-
-        def _log_prob(self, x):
-            # th.log(1.0 - th.tanh(x) ** 2 + self.epsilon)
-            log_prob = super()._log_prob(self.tanh_inverse(x))
-            log_prob -= tf.reduce_sum(tf.math.log(1.0 - x**2 + 1e-6), axis=1, keepdims=True)
-            return log_prob
-
-        def _mode(self, **kwargs):
-            mode = super()._mode(**kwargs)
-            return tf.nn.tanh(mode)
-
-        def _entropy(self, **kwargs):
-            return None
-
-        def tanh_inverse(self, x):
-            # atanh
-            x = tf.clip_by_value(x, clip_value_min=-1.0 + 1e-6, clip_value_max=1.0 - 1e-6)
-            return 0.5 * (tf.math.log1p(x) - tf.math.log1p(-x))
-
-    def make_distribution_fn(self, params) -> tfd.Normal:
-        return SquashedGaussian.TanhNormal(loc=params[0], scale=params[1])
+# # https://github.com/DLR-RM/stable-baselines3/blob/master/stable_baselines3/common/distributions.py#L195
+# class TanhGaussian(Gaussian):
+#     """Squashed Gaussian distribution which uses tanh to constrain samples to be in [-1, 1]"""
+#
+#     class WrappedDistribution(tfd.TransformedDistribution):
+#         CLIP_MIN = -1.0 + 1e-5  # utils.TF_EPS
+#         CLIP_MAX = +1.0 - 1e-5  # utils.TF_EPS
+#
+#         def log_prob(self, x, **kwargs):
+#             # clip `x` to avoid inf
+#             clipped_x = tf.clip_by_value(x, self.CLIP_MIN, self.CLIP_MAX)
+#             return super().log_prob(clipped_x)
+#
+#         def _entropy(self, **kwargs):
+#             return None
+#
+#         def _mean(self, **kwargs):
+#             return tf.nn.tanh(self.distribution._mean(**kwargs))
+#
+#         def _stddev(self, **kwargs):
+#             return self.distribution._stddev(**kwargs)
+#
+#     def make_distribution_fn(self, params) -> tfd.TransformedDistribution:
+#         normal = super().make_distribution_fn(params)
+#
+#         return TanhGaussian.WrappedDistribution(distribution=normal, bijector=tfp.bijectors.Tanh(),
+#                                                 name='TanhGaussian')
+#
+#
+# class SquashedGaussian(Gaussian):
+#     class TanhNormal(tfd.Normal):
+#
+#         def _sample_n(self, *args, **kwargs):
+#             x = super()._sample_n(*args, **kwargs)
+#             return tf.nn.tanh(x)
+#
+#         def _log_prob(self, x):
+#             # th.log(1.0 - th.tanh(x) ** 2 + self.epsilon)
+#             log_prob = super()._log_prob(self.tanh_inverse(x))
+#             log_prob -= tf.reduce_sum(tf.math.log(1.0 - x**2 + 1e-6), axis=1, keepdims=True)
+#             return log_prob
+#
+#         def _mode(self, **kwargs):
+#             mode = super()._mode(**kwargs)
+#             return tf.nn.tanh(mode)
+#
+#         def _entropy(self, **kwargs):
+#             return None
+#
+#         def tanh_inverse(self, x):
+#             # atanh
+#             x = tf.clip_by_value(x, clip_value_min=-1.0 + 1e-6, clip_value_max=1.0 - 1e-6)
+#             return 0.5 * (tf.math.log1p(x) - tf.math.log1p(-x))
+#
+#     def make_distribution_fn(self, params) -> tfd.Normal:
+#         return SquashedGaussian.TanhNormal(loc=params[0], scale=params[1])
 
 
 class Beta(DistributionLayer):

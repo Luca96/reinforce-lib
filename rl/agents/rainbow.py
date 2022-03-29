@@ -1,22 +1,21 @@
 """Rainbow Agent (= C51 + PER + Dueling architecture + Double DQN + Noisy Networks + N-step returns)"""
 
-import gym
-import numpy as np
 import tensorflow as tf
 
-from typing import Union, List, Dict, Tuple
-
 from rl import utils
+from rl.agents import DQN
+from rl.networks.q import RainbowQNetwork
 
-from rl.v2.agents import DQN
-from rl.v2.networks.q import RainbowQNetwork
+from typing import Union
 
 
 class Rainbow(DQN):
-    # https://github.com/google/dopamine/blob/master/dopamine/agents/rainbow/rainbow_agent.py
+    """Rainbow: Combining Improvements in Deep Reinforcement Learning (arXiv:1710.02298)
+        - Based on: https://github.com/google/dopamine/blob/master/dopamine/agents/rainbow/rainbow_agent.py
+    """
 
     def __init__(self, *args, name='rainbow-agent', lr: utils.DynamicType = 3e-4, optimizer='adam', memory_size=1024,
-                 policy='greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = None, load=False,
+                 policy='greedy', epsilon: utils.DynamicType = 0.2, clip_norm: utils.DynamicType = None,
                  update_target_network: Union[bool, int] = False, polyak: utils.DynamicType = 0.995, num_atoms=51,
                  network: dict = None, dueling=True, v_min=-10.0, v_max=10.0, horizon=3, noisy=True, **kwargs):
         assert num_atoms >= 2
@@ -36,18 +35,5 @@ class Rainbow(DQN):
             network['class'] = RainbowQNetwork
 
         super().__init__(*args, name=name, lr=lr, optimizer=optimizer, memory_size=memory_size, policy=policy,
-                         epsilon=epsilon, clip_norm=clip_norm, load=load, update_target_network=update_target_network,
+                         epsilon=epsilon, clip_norm=clip_norm, update_target_network=update_target_network,
                          polyak=polyak, double=False, dueling=dueling, network=network, horizon=horizon, **kwargs)
-
-
-if __name__ == '__main__':
-    from rl.presets import DQNPresets
-
-    presets = DQNPresets.CART_POLE.copy()
-    presets.pop('double')
-
-    agent = Rainbow.from_preset(presets, name='rainbow-cart', use_summary=True)
-    agent.summary()
-
-    agent.learn(episodes=500, timesteps=200, render=False, exploration_steps=500,
-                evaluation=dict(episodes=50, freq=100))

@@ -3,7 +3,6 @@
     - Soft Actor-Critic Algorithms and Applications (arXiv:1812.05905)
 """
 
-# import gym
 import numpy as np
 import tensorflow as tf
 
@@ -56,9 +55,6 @@ class SquashedGaussianPolicy(Network):
 
         return tf.nn.tanh(action), mean, std  # also return `mean` and `std` for debugging
 
-    # def structure(self, inputs: Dict[str, tf.keras.Input], name='SquashedGaussianPolicy', **kwargs) -> tuple:
-    #     return super().structure(inputs, name=name, **kwargs)
-
     def output_layer(self, layer: Layer, **kwargs) -> Tuple[Layer, Layer]:
         mean = Linear(units=self.agent.num_actions, name='mean', **self.output_kwargs)(layer)
         log_std = Dense(units=self.agent.num_actions, activation=self._clip_activation, name='log-std',
@@ -87,9 +83,6 @@ class SoftTwinCriticNetwork(TwinCriticNetwork):
 
     def call(self, *inputs, training=None, **kwargs):
         return CriticNetwork.call(self, inputs, training=training, **kwargs)
-
-    # def structure(self, inputs: Dict[str, Input], name='SAC-TwinCriticNetwork', **kwargs) -> tuple:
-    #     return super().structure(inputs, name=name, **kwargs)
 
     @tf.function
     def train_on_batch(self, batch: dict):

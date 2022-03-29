@@ -17,9 +17,6 @@ from typing import Tuple, Dict
 @Network.register(name='A2C-ActorNetwork')
 class ActorNetwork(PolicyNetwork):
 
-    # def structure(self, inputs, name='A2C-ActorNetwork', **kwargs) -> tuple:
-        # return super().structure(inputs, name=name, **kwargs)
-
     def mean(self, distribution: utils.DistributionOrDict) -> utils.TensorOrDict:
         """Returns the average mean of the given `distribution`"""
         if not isinstance(distribution, dict):

@@ -22,7 +22,7 @@ from rl.agents.actions import DiscreteConverter
 class DQN(Agent):
     # TODO: non-terminating summary issue
     def __init__(self, *args, name='dqn-cart_v1', lr: utils.DynamicType = 3e-4, optimizer: Union[dict, str] = 'adam',
-                 policy='e-greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = None,
+                 policy='e-greedy', epsilon: utils.DynamicType = 0.2, clip_norm: utils.DynamicType = None,
                  update_target_network: Union[bool, int] = False, polyak: utils.DynamicType = 0.995, double=True,
                  network: dict = None, dueling=True, horizon=1, prioritized=False, alpha: utils.DynamicType = 0.6,
                  beta: utils.DynamicType = 0.1, memory_size=1024, **kwargs):

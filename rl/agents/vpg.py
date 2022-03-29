@@ -1,6 +1,5 @@
 """Vanilla Policy Gradient (VPG) Algorithm"""
 
-import os
 import numpy as np
 import tensorflow as tf
 
@@ -49,9 +48,6 @@ class DiscountedMemory(EpisodicMemory):
 
 
 class DiscountedPolicyNetwork(PolicyNetwork):
-
-    # def structure(self, inputs, name='DiscountedPolicyNetwork', **kwargs) -> tuple:
-    #     return super().structure(inputs, name=name, **kwargs)
 
     @tf.function
     def objective(self, batch, reduction=tf.reduce_mean) -> tuple:

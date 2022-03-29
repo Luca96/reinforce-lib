@@ -156,140 +156,24 @@ class DoubleQNetwork(QNetwork):
         return tf.stop_gradient(targets)
 
 
-# @Network.register()
-# class CategoricalQNetwork(QNetwork):
-#
-#     def __init__(self, agent: Agent, target=True, log_prefix='cqn', **kwargs):
-#         utils.remove_keys(kwargs, keys=['dueling', 'operator', 'prioritized'])
-#         self._base_model_initialized = True
-#
-#         self.num_classes = agent.num_classes
-#         self.num_atoms = agent.num_atoms
-#         self.support = agent.support
-#         self.v_min = agent.v_min
-#         self.v_max = agent.v_max
-#
-#         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
-#
-#     @tf.function
-#     def call(self, inputs, actions=None, argmax=False, training=None):
-#         support = self.support  # z_i ("atoms")
-#         support_prob = super().call(inputs, training=training)  # p_i
-#
-#         if tf.is_tensor(actions):
-#             # select support probabilities according to *given* actions
-#             # return utils.index_tensor(support_prob, indices=actions)
-#             return self.index(support_prob, actions)
-#
-#         q_values = tf.reduce_sum(support * support_prob, axis=1)
-#
-#         if argmax:
-#             a_star = tf.argmax(q_values, axis=-1)
-#
-#             # select support probabilities according to *best* actions
-#             # sp = utils.index_tensor(support_prob, indices=a_star)
-#             return self.index(support_prob, a_star)
-#             # return tf.expand_dims(prob, axis=-1)
-#
-#         return q_values
-#
-#     @staticmethod
-#     @tf.function
-#     def index(prob, actions):
-#         batch_size, num_atoms = prob.shape[:2]
-#
-#         # prepare indices along..
-#         idx_a = tf.repeat(actions, repeats=[num_atoms] * batch_size)  # action-dim
-#         idx_z = tf.tile(tf.range(0, limit=num_atoms), multiples=[batch_size])  # atoms-dim
-#         idx_b = tf.repeat(tf.range(0, limit=batch_size), repeats=[num_atoms] * batch_size)  # batch-dim
-#
-#         # concat and reshape to get final indices
-#         indices = tf.stack([idx_b, idx_z, tf.cast(idx_a, dtype=tf.int32)], axis=1)
-#         indices = tf.reshape(indices, shape=(batch_size * num_atoms, 3))
-#
-#         # finally retrieve stuff at indices
-#         tensor = tf.gather_nd(prob, indices)
-#         return tf.reshape(tensor, shape=(batch_size, num_atoms))
-#
-#     @tf.function
-#     def act(self, inputs):
-#         q_values = self(inputs, training=False)
-#         return tf.argmax(q_values, axis=-1)
-#
-#     def structure(self, inputs: Dict[str, Input], name='Categorical-Q-Network', **kwargs) -> tuple:
-#         return super().structure(inputs, name=name, **kwargs)
-#
-#     def output_layer(self, layer: Layer) -> Layer:
-#         assert self.agent.num_actions == 1
-#
-#         out = Dense(units=self.num_atoms * self.num_classes, name='z-logits', **self.output_args)(layer)
-#         out = Reshape((self.num_atoms, self.num_classes))(out)
-#         return tf.nn.softmax(out, axis=1)  # per-action softmax
-#
-#     @tf.function
-#     def objective(self, batch: dict, reduction=tf.reduce_mean) -> tuple:
-#         prob = self(batch['state'], actions=batch['action'], training=True)
-#         prob_next = self.target(batch['next_state'], argmax=True, training=False)
-#
-#         # compute projection on support
-#         proj_z = tf.matmul(batch['reward'], tf.transpose(self.agent.gamma * self.support))
-#         proj_z = tf.clip_by_value(proj_z, self.v_min, self.v_max)
-#
-#         b = (proj_z - self.v_min) / self.agent.delta
-#
-#         low = tf.math.floor(b)  # "low" and "upp" are indices
-#         upp = tf.math.ceil(b)
-#
-#         # distribute probability of the projected support
-#         m = tf.zeros(shape=(prob_next.shape[0], self.num_atoms))
-#
-#         prob_low = prob_next * (upp - b)
-#         prob_upp = prob_next * (b - low)
-#
-#         # def scatter_add(args: tuple):
-#         #     tensor, indices, updates = args
-#         #     return tf.tensor_scatter_nd_add(tensor, tf.expand_dims(indices, axis=-1), updates)
-#
-#         m_low = tf.map_fn(fn=self._scatter_add, elems=(m, low, prob_low), fn_output_signature=tf.float32)
-#         m_upp = tf.map_fn(fn=self._scatter_add, elems=(m, upp, prob_upp), fn_output_signature=tf.float32)
-#
-#         # cross-entropy loss
-#         loss = tf.stop_gradient(m_low + m_upp) * tf.math.log(prob)
-#         # loss = (m_low + m_upp) * tf.math.log(prob)
-#
-#         loss = tf.reduce_sum(loss, axis=1)  # sum over atoms (z_i)
-#         loss = reduction(-loss)  # mean over batch of trajectories
-#
-#         return loss, {}  # dict(loss=loss, prob=prob, prob_target=prob_next, projected_support=proj_z)
-#
-#     @staticmethod
-#     @tf.function
-#     def _scatter_add(args: tuple):
-#         tensor, indices, updates = args
-#         indices = tf.cast(indices, dtype=tf.int32)
-#
-#         return tf.tensor_scatter_nd_add(tensor, tf.expand_dims(indices, axis=-1), updates)
-#
-#     def targets(self, batch: dict):
-#         pass
-
-
-# @Network.register()
+@Network.register()
 class RainbowQNetwork(QNetwork):
-    # https://github.com/google/dopamine/blob/master/dopamine/agents/rainbow/rainbow_agent.py
+    # Based on: https://github.com/google/dopamine/blob/master/dopamine/agents/rainbow/rainbow_agent.py
 
     def __init__(self, agent: Agent, target=True, log_prefix='cqn', **kwargs):
-        # utils.remove_keys(kwargs, keys=['dueling', 'operator', 'prioritized'])
         utils.remove_keys(kwargs, keys=['prioritized'])
-        self._base_model_initialized = True
+        self.init_hack()
 
-        self.num_classes = agent.num_classes
         self.num_atoms = agent.num_atoms
         self.support = agent.support
         self.v_min = agent.v_min
         self.v_max = agent.v_max
 
         super().__init__(agent, target=target, log_prefix=log_prefix, **kwargs)
+
+    @property
+    def default_name(self) -> str:
+        return 'Rainbow-Q-Network'
 
     @tf.function
     def call(self, inputs, training=None, **kwargs):
@@ -305,28 +189,26 @@ class RainbowQNetwork(QNetwork):
         q_values, _, _ = self(inputs, training=False)
         return q_values
 
-    # def output_layer(self, layer: Layer) -> Layer:
-    #     assert self.agent.num_actions == 1
-    #
-    #     logits = Dense(units=self.num_atoms * self.num_classes, name='z-logits', **self.output_args)(layer)
-    #     logits = Reshape((self.num_classes, self.num_atoms))(logits)
-    #     return logits
+    @tf.function
+    def act(self, inputs, **kwargs):
+        q_values = self.q_values(inputs, **kwargs)
+        return tf.argmax(q_values, axis=-1)
 
-    def output_layer(self, layer: Layer) -> Layer:
-        assert self.agent.num_actions == 1
+    def output_layer(self, layer: Layer, **kwargs) -> Layer:
+        assert self.num_actions == 1
 
         if self.use_dueling:
-            return self.dueling_architecture(layer)
+            return self.dueling_architecture(layer, **kwargs)
 
-        logits = Dense(units=self.num_atoms * self.num_classes, name='z-logits', **self.output_args)(layer)
+        logits = Dense(units=self.num_atoms * self.num_classes, name='z-logits', **kwargs)(layer)
         logits = Reshape((self.num_classes, self.num_atoms))(logits)
         return logits
 
-    def dueling_architecture(self, layer: Layer) -> Layer:
+    def dueling_architecture(self, layer: Layer, **kwargs) -> Layer:
         # two streams (branches)
-        value = Dense(units=self.num_atoms, name='value', **self.output_args)(layer)
+        value = Dense(units=self.num_atoms, name='value', **kwargs)(layer)
 
-        adv = Dense(units=self.num_atoms * self.agent.num_classes, name='advantage', **self.output_args)(layer)
+        adv = Dense(units=self.num_atoms * self.num_classes, name='advantage', **kwargs)(layer)
         adv = Reshape((self.num_classes, self.num_atoms))(adv)
 
         # reduce on action-dimension (axis 1)
@@ -350,7 +232,7 @@ class RainbowQNetwork(QNetwork):
         loss = tf.nn.softmax_cross_entropy_with_logits(labels=target_distribution, logits=action_logits)
 
         if self.has_prioritized_mem:
-            self.agent.memory.td_error.assign(loss)
+            self.agent.memory.td_error.assign(tf.stop_gradient(loss))
 
         loss = reduction(loss)
 
@@ -405,7 +287,7 @@ class RainbowQNetwork(QNetwork):
         return tf.reshape(projection, shape=(batch_size, num_dims))
 
 
-# @Network.register()
+@Network.register()
 class ImplicitQuantileNetwork(QNetwork):
     # https://github.com/google/dopamine/blob/b312d26305222d676f84d8949e2f07763b63ea65/dopamine/discrete_domains/atari_lib.py#L249
 
@@ -436,39 +318,43 @@ class ImplicitQuantileNetwork(QNetwork):
         self.num_classes = self.agent.num_classes
 
     @tf.function
-    def call(self, states, num_quantiles: int, training=None, risk=False, **kwargs):
-        quantiles = self._sample_quantiles(shape=(states.shape[0], num_quantiles))
+    def call(self, inputs: tuple, training=None, risk=False, **kwargs):
+        states, quantiles = inputs
 
         if risk:
             inputs = (states, self.beta_fn(quantiles))
         else:
             inputs = (states, quantiles)
 
-        quantile_values = super().call(inputs, actions=None, training=training)
-
-        return quantile_values, quantiles
+        return super().call(inputs, actions=None, training=training)
 
     @tf.function
-    def q_values(self, inputs, **kwargs):
-        quantile_values, _ = self(inputs, num_quantiles=self.policy_samples, risk=True, **kwargs)
+    def q_values(self, states, **kwargs):
+        quantiles = self._sample_quantiles(states)
+        quantile_values = self((states, quantiles), risk=True, **kwargs)
+
         return tf.reduce_mean(quantile_values, axis=0, keepdims=True)
 
     @tf.function
     def act(self, state):
-        quantile_values, _ = self(state, num_quantiles=self.policy_samples, risk=True)
+        quantiles = self._sample_quantiles(state)
+        quantile_values = self((state, quantiles), risk=True)
         q_values = tf.reduce_mean(quantile_values, axis=0)
 
         return tf.argmax(q_values, axis=0)
 
-    # @tf.function
+    @tf.function
     def act_target(self, next_states):
-        quantile_values, _ = self.target(next_states, num_quantiles=self.quantile_samples, risk=True)
+        quantiles = self._sample_quantiles(next_states, num=self.quantile_samples)
+        quantile_values = self.target((next_states, quantiles),  risk=True)
 
         # action selection
+        inputs = (next_states, self._sample_quantiles(next_states))
+
         if self.double_dqn:
-            z_values_actions, _ = self(next_states, num_quantiles=self.policy_samples)
+            z_values_actions = self(inputs)
         else:
-            z_values_actions, _ = self.target(next_states, num_quantiles=self.policy_samples)
+            z_values_actions = self.target(inputs)
 
         z_values_actions = tf.reshape(z_values_actions,
                                       shape=(self.policy_samples, self.batch_size, self.num_classes))
@@ -485,23 +371,23 @@ class ImplicitQuantileNetwork(QNetwork):
         states = inputs['state']
         quantiles = inputs['quantile']
 
-        if len(states.shape) <= 2:
-            x = backbones.dense(layer=states, **kwargs)
-        else:
-            x = backbones.convolutional(layer=states, **kwargs)
+        preproc_in = self.apply_preprocessing(inputs, preprocess=kwargs.pop('preprocess', None))
 
-        # x = backbones.dense(layer=states, **kwargs)
+        if len(states.shape) <= 2:
+            x = backbones.dense(layer=preproc_in['state'], **kwargs)
+        else:
+            x = backbones.convolutional(layer=preproc_in['state'], **kwargs)
+
         x = Dense(units=self.embedding_size)(x)
 
-        emb = self.embed_fn(quantiles)
+        emb = self.embed_fn(preproc_in['quantile'])
         x = self.merge_fn(x, emb)
         x = Dense(units=kwargs.get('units', 64))(x)
 
         quantile_values = self.output_layer(layer=x)
 
-        return [states, quantiles], quantile_values, name
+        return [states, quantiles], quantile_values
 
-    # @tf.function
     def embed_fn(self, quantiles: Layer) -> Layer:
         embedding = tf.tile(quantiles, multiples=(1, 1, self.embedding_size))
 
@@ -513,7 +399,6 @@ class ImplicitQuantileNetwork(QNetwork):
 
         return embedding
 
-    # @tf.function
     def merge_fn(self, x: Layer, y: Layer) -> Layer:
         x = tf.expand_dims(x, axis=1)
         x = Multiply(name='merge')([x, y])
@@ -521,9 +406,10 @@ class ImplicitQuantileNetwork(QNetwork):
         # shape: (batch_size * |num_quantiles|,  embedding_size)
         return tf.reshape(x, shape=(-1, x.shape[-1]))
 
-    # @tf.function
+    @tf.function
     def objective(self, batch: dict, reduction=tf.reduce_mean) -> tuple:
-        quantile_values, quantiles = self(batch['state'], num_quantiles=self.quantile_samples)
+        quantiles = self._sample_quantiles(batch['state'], num=self.quantile_samples)
+        quantile_values = self((batch['state'], quantiles))
         target_quantile_values = self.targets(batch)
 
         # indices to index the quantiles
@@ -563,7 +449,7 @@ class ImplicitQuantileNetwork(QNetwork):
 
         return loss, debug
 
-    # @tf.function
+    @tf.function
     def targets(self, batch: dict) -> tf.Tensor:
         quantile_values, a_argmax = self.act_target(batch['next_state'])
 
@@ -591,7 +477,8 @@ class ImplicitQuantileNetwork(QNetwork):
         return target_values
 
     @tf.function
-    def _sample_quantiles(self, shape: tuple) -> tf.Tensor:
+    def _sample_quantiles(self, states: tf.Tensor, num: int = None) -> tf.Tensor:
+        shape = (states.shape[0], num or self.policy_samples)
         return tf.random.uniform(shape=shape + (1,), minval=0, maxval=1, dtype=tf.float32, seed=self.agent.seed)
 
     def get_inputs(self) -> Dict[str, Input]:

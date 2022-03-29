@@ -31,7 +31,6 @@ class Network(tf.keras.Model):
 
         # Model:
         name = kwargs.pop('name', self.default_name)
-        # inputs, outputs, name = self.structure(inputs=self.get_inputs(), **kwargs)
         inputs, outputs = self.structure(inputs=self.get_inputs(), **kwargs)
 
         super().__init__(inputs=inputs, outputs=outputs, name=name)
@@ -145,20 +144,25 @@ class Network(tf.keras.Model):
         # TODO: check `run_eagerly` and `jit_compile`
         super().compile(optimizer=self.optimizer, loss=self.objective, run_eagerly=True)
 
-    # TODO: default architecture when state is dict
-    # def structure(self, inputs: Dict[str, tf.keras.Input], name='Network', **kwargs) -> tuple:
     def structure(self, inputs: Dict[str, tf.keras.Input], **kwargs) -> tuple:
-        """Specifies the network's structure (i.e. layers)"""
+        """Specifies the network's architecture"""
         x = self.apply_preprocessing(inputs, preprocess=kwargs.pop('preprocess', None))
-        x = x['state']
+        # x = x['state']
 
-        if len(x.shape) <= 2:
-            x = backbones.dense(layer=x, **kwargs)
+        if 'state' in x:
+            # one input
+            x = backbones.default_architecture(x['state'], **kwargs)
         else:
-            x = backbones.convolutional(layer=x, **kwargs)
+            # TODO: default architecture when state is dict
+            # dictionary inputs
+            x = backbones.default_multi_architecture(x, **kwargs)
+
+        # if len(x.shape) <= 2:
+        #     x = backbones.dense(layer=x, **kwargs)
+        # else:
+        #     x = backbones.convolutional(layer=x, **kwargs)
 
         outputs = self.output_layer(x, **self.output_kwargs)
-        # return inputs, outputs, name
         return inputs, outputs
 
     def apply_preprocessing(self, inputs: dict, preprocess: Dict[str, list] = None) -> dict:

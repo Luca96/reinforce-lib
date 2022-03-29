@@ -19,8 +19,8 @@ from rl.agents.sac import SAC
 
 # Distributional RL agent:
 # TODO: QR-DQN + check implementations
-# from rl.agents.rainbow import Rainbow
-# from rl.agents.iqn import IQN
+from rl.agents.rainbow import Rainbow
+from rl.agents.iqn import IQN
 
 # Model-based agents:
 # TODO: MCTS, ...

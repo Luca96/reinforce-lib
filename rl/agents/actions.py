@@ -6,7 +6,6 @@ import tensorflow as tf
 from typing import Dict, List, Union
 
 
-# TODO: @tf.function on `convert()`?
 # TODO: pretty print (__str__)?
 class ActionConverter:
     """Translates the action(s) outputted by the agent for proper usage in the environment:
@@ -124,11 +123,6 @@ class ParallelConverterWrapper(ActionConverter):
     """Takes an ActionConverter and applies it on a list of actions, coming from parallel envs"""
 
     def __init__(self, converter: Union[ActionConverter, DictConverter]):
-        # if isinstance(converter, DictConverter):
-        #     self._wraps_dict = True
-        # else:
-        #     self._wraps_dict = False
-
         self.wraps_dict = isinstance(converter, DictConverter)
         self.converter = converter
 

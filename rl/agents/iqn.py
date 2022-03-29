@@ -2,13 +2,12 @@
 
 import tensorflow as tf
 
-from typing import Union
-
 from rl import utils
-
-from rl.v2.agents import DQN
-from rl.v2.networks.q import ImplicitQuantileNetwork
+from rl.agents import DQN
+from rl.networks.q import ImplicitQuantileNetwork
 from rl.parameters import DynamicParameter
+
+from typing import Union
 
 
 class DistortionMeasures:
@@ -72,7 +71,7 @@ class IQN(DQN):
     # https://github.com/google/dopamine/blob/master/dopamine/agents/implicit_quantile/implicit_quantile_agent.py
 
     def __init__(self, *args, name='iqn-agent', lr: utils.DynamicType = 3e-4, optimizer='adam', memory_size=1024,
-                 policy='e-greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = 1.0, load=False,
+                 policy='e-greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = 1.0,
                  update_target_network: Union[bool, int] = False, polyak: utils.DynamicType = 0.995, prioritized=True,
                  huber: utils.DynamicType = 1.0, network: dict = None, policy_samples=32, quantile_samples=8, **kwargs):
         assert policy_samples >= 1
@@ -83,23 +82,8 @@ class IQN(DQN):
         self.kappa = DynamicParameter.create(value=huber)  # Huber loss cutoff (k)
 
         network = network or {}
-
-        if 'class' not in network:
-            network['class'] = ImplicitQuantileNetwork
+        network.setdefault('cls', ImplicitQuantileNetwork)
 
         super().__init__(*args, name=name, lr=lr, optimizer=optimizer, memory_size=memory_size, policy=policy,
-                         epsilon=epsilon, clip_norm=clip_norm, load=load, update_target_network=update_target_network,
+                         epsilon=epsilon, clip_norm=clip_norm, update_target_network=update_target_network,
                          polyak=polyak, double=False, dueling=False, prioritized=prioritized, network=network, **kwargs)
-
-
-if __name__ == '__main__':
-    agent = IQN(env='CartPole-v0', batch_size=32, policy='boltzmann', memory_size=4096,
-                name='iqn-cart', clip_norm=5.0, lr=3e-4, quantile_samples=16,
-                network=dict(num_layers=2, units=64, normalization=None, activation='relu'),
-                reward_scale=1.0, prioritized=True, horizon=4,
-                use_summary=False, seed=42)
-    agent.summary()
-    # breakpoint()
-
-    agent.learn(episodes=500, timesteps=200, render=False, exploration_steps=1024*0,
-                evaluation=dict(episodes=50, freq=100))

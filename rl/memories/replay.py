@@ -34,7 +34,6 @@ class ReplayMemory(Memory):
 
     def _gather(self, value: np.ndarray, indices: np.ndarray) -> Union[np.ndarray, dict]:
         if not isinstance(value, dict):
-            # return tf.gather(value, indices)
             return value[indices]
 
         return {k: self._gather(value=v, indices=indices) for k, v in value.items()}
@@ -52,7 +51,7 @@ class NStepMemory(ReplayMemory):
         self.last_index = 0
 
     def end_trajectory(self):
-        index = self.index - 1
+        index = self.index  # - 1
 
         # compute n-step returns:
         if self.index > self.last_index:
@@ -61,6 +60,7 @@ class NStepMemory(ReplayMemory):
             rewards = np.concatenate([self.data['reward'][self.last_index:],
                                       self.data['reward'][:index]])
 
+        rewards = np.concatenate([rewards, np.zeros(shape=(1, 1))])
         returns = utils.rewards_to_go(rewards, discount=self.gamma)
 
         if self.index > self.last_index:

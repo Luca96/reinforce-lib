@@ -8,11 +8,72 @@ from tensorflow.keras import regularizers
 from rl import utils
 from rl.layers import NoisyDense, preprocessing
 
-from typing import Union, List, Tuple
+from typing import Union, List, Tuple, Dict
 
 
 KernelType = Union[int, Tuple[int, int], List[int], List[Tuple[int, int]]]
 StrideType = KernelType
+
+
+def default_architecture(x: Input, **kwargs) -> Layer:
+    if len(x.shape) <= 2:
+        # default arch is feed-forward
+        return dense(layer=x, **kwargs)
+
+    # default arch is convolutional
+    return convolutional(layer=x, **kwargs)
+
+
+# TODO: test
+def default_multi_architecture(x: Dict[str, Input], **kwargs) -> Layer:
+    """Default architecture for dictionary inputs"""
+    array_inputs = []
+    image_inputs = {}
+
+    for key, tensor in x.items():
+        if len(tensor.shape) <= 2:
+            array_inputs.append(tensor)
+        else:
+            image_inputs[key] = tensor
+
+    any_array = len(array_inputs) > 0
+    any_image = len(image_inputs) > 0
+
+    if not any_image:
+        assert any_array
+        # assume kwargs are only for `backbones.dense()`
+        dense_kwargs = kwargs
+
+    elif not any_array:
+        assert any_image
+        if any(k in kwargs for k in image_inputs.keys()):
+            # assume kwargs contains named-arguments for each input key
+            conv_kwargs = {k: kwargs.pop(k, {}) for k in image_inputs.keys()}
+        else:
+            # use the same kwargs for each CNN
+            conv_kwargs = {k: kwargs for k in image_inputs.keys()}
+    else:
+        # got arrays and image inputs, so assume kwargs have only two keys: "dense" and "conv";
+        dense_kwargs = kwargs.pop('dense', {})
+        conv_kwargs = kwargs.pop('conv', {})
+
+    # concat array (1-D) inputs, then default feed-forward arch
+    if any_array:
+        h_array = Concatenate()(array_inputs)
+        h_array = dense(layer=h_array, **dense_kwargs)
+
+    # CNN for each image input, then concat outputs
+    if any_image:
+        h_images = [convolutional(layer=input_, **conv_kwargs[k]) for k, input_ in image_inputs.items()]
+        h_images = Concatenate()(h_images)
+
+    if not any_image:
+        return h_array
+
+    if not any_array:
+        return h_array
+
+    return Concatenate()([h_array, h_images])
 
 
 # ---------------------------------------------------------------------------------------------------------------------
