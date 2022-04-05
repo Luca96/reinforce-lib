@@ -66,10 +66,13 @@ class Memory:
         assert 0 < amount <= self.size
         return self.full or self.index >= amount
 
+    # TODO: check usage of `is_full` and `current_size`
     def store(self, transition: dict):
         """Stores one transition"""
         if self.is_full():
-            self.index = 0
+            # self.index = 0
+            # buffer is full, so start from beginning
+            self.index = self.index % self.size
 
         for k, v in transition.items():
             if k not in self.specs:

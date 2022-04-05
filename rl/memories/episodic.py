@@ -1,6 +1,5 @@
 
 import numpy as np
-import tensorflow as tf
 
 from rl import utils
 from rl.memories import Memory
@@ -20,10 +19,6 @@ class EpisodicMemory(Memory):
 
         def _get(_data, _k, val):
             if not isinstance(val, dict):
-                # if pad:
-                #     _data[_k] = val
-                # else:
-                #     _data[_k] = val[:index]
                 _data[_k] = val[:index]
             else:
                 _data[_k] = dict()

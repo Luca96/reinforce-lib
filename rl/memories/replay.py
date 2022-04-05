@@ -51,25 +51,27 @@ class NStepMemory(ReplayMemory):
         self.last_index = 0
 
     def end_trajectory(self):
-        index = self.index  # - 1
-
-        # compute n-step returns:
+        # retrieve `n` rewards
         if self.index > self.last_index:
-            rewards = self.data['reward'][self.last_index:index]
+            rewards = self.data['reward'][self.last_index:self.index]
         else:
             rewards = np.concatenate([self.data['reward'][self.last_index:],
-                                      self.data['reward'][:index]])
+                                      self.data['reward'][:self.index]])
 
+        # compute `n`-step returns:
         rewards = np.concatenate([rewards, np.zeros(shape=(1, 1))])
-        returns = utils.rewards_to_go(rewards, discount=self.gamma)
+        returns = utils.rewards_to_go(rewards, discount=self.gamma)  # len(returns) = n
 
+        # lastly, store them
         if self.index > self.last_index:
-            self.data['return'][self.last_index:index] = returns
+            self.data['return'][self.last_index:self.index] = returns
         else:
-            self.data['return'][self.last_index:] = returns[:self.current_size - self.last_index]
-            self.data['return'][:index] = returns[index:]
+            index = self.current_size - self.last_index
 
-        self.last_index = index
+            self.data['return'][self.last_index:] = returns[:index]
+            self.data['return'][:self.index] = returns[index:]
+
+        self.last_index = (self.last_index + len(returns)) % self.size
 
 
 # TODO: use "sum-tree structure" when memory size is large (> 4/8/16k ?)

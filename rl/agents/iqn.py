@@ -68,7 +68,9 @@ class DistortionMeasures:
 # https://github.com/dannysdeng/dqn-pytorch
 # https://github.com/BY571/IQN-and-Extensions
 class IQN(DQN):
-    # https://github.com/google/dopamine/blob/master/dopamine/agents/implicit_quantile/implicit_quantile_agent.py
+    """Implicit Quantile Networks for Distributional Reinforcement Learning (arXiv:1806.06923)
+        - Based on: https://github.com/google/dopamine/blob/master/dopamine/agents/implicit_quantile/implicit_quantile_agent.py
+    """
 
     def __init__(self, *args, name='iqn-agent', lr: utils.DynamicType = 3e-4, optimizer='adam', memory_size=1024,
                  policy='e-greedy', epsilon: utils.DynamicType = 0.05, clip_norm: utils.DynamicType = 1.0,

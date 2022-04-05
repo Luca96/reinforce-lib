@@ -5,12 +5,12 @@ tensorflow-probability==0.16.0
 tensorflow-addons==0.16.1
 box2d
 gym==0.22.0
+gym[box2d]
 pygame
-# gym[box2d]
 # opencv-python
 # networkx
 matplotlib
-scikit-learn
+# scikit-learn
 pybullet
 cloudpickle
 

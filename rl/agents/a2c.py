@@ -71,21 +71,6 @@ class ParallelGAEMemory(GAEMemory):
     def full_enough(self, amount: int) -> bool:
         return self.current_size >= amount
 
-    # def store(self, transition: Dict[str, np.ndarray]):
-    #     assert not self.full
-    #     keys = transition.keys()
-    #
-    #     # unpack `transition` to get a list of per-actor tuples
-    #     for i, experience in enumerate(zip(*transition.values())):
-    #         # set the storing index for the i-th actor
-    #         self.index = self.offsets[i] + (self.horizon * i)
-    #
-    #         # store transition
-    #         super().store(transition={k: v for k, v in zip(keys, experience)})
-    #
-    #         # update index for i-th actor
-    #         self.offsets[i] = self.offsets[i] + 1
-
     def store(self, transition: Dict[str, np.ndarray]):
         assert not self.full
 
@@ -196,8 +181,9 @@ class ParallelGAEMemory(GAEMemory):
         ds = ds.shuffle(buffer_size=min(1024, batch_size), reshuffle_each_iteration=True, seed=seed)
 
         # if size is not a multiple of `batch_size`, just add some data at random
-        size = tensors[list(tensors.keys())[0]].shape[0]
-        remainder = size % batch_size
+        # size = tensors[list(tensors.keys())[0]].shape[0]
+        # remainder = size % batch_size
+        remainder = self.index % batch_size
 
         if remainder > 0:
             ds = ds.concatenate(ds.take(count=remainder))
@@ -292,7 +278,13 @@ class A2C(ParallelAgent):
 
             for i, info in transition['info'].items():
                 if '__terminal_state' in info:
-                    terminal_states[i] = info.pop('__terminal_state')
+                    state = info.pop('__terminal_state')
+
+                    if isinstance(terminal_states, dict):
+                        for k, v in state.items():
+                            terminal_states[k][i] = v
+                    else:
+                        terminal_states[i] = state
 
             transition['next_state'] = terminal_states
 

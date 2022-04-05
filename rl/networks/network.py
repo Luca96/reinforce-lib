@@ -147,20 +147,13 @@ class Network(tf.keras.Model):
     def structure(self, inputs: Dict[str, tf.keras.Input], **kwargs) -> tuple:
         """Specifies the network's architecture"""
         x = self.apply_preprocessing(inputs, preprocess=kwargs.pop('preprocess', None))
-        # x = x['state']
 
         if 'state' in x:
             # one input
             x = backbones.default_architecture(x['state'], **kwargs)
         else:
-            # TODO: default architecture when state is dict
             # dictionary inputs
             x = backbones.default_multi_architecture(x, **kwargs)
-
-        # if len(x.shape) <= 2:
-        #     x = backbones.dense(layer=x, **kwargs)
-        # else:
-        #     x = backbones.convolutional(layer=x, **kwargs)
 
         outputs = self.output_layer(x, **self.output_kwargs)
         return inputs, outputs
@@ -171,16 +164,6 @@ class Network(tf.keras.Model):
 
         assert isinstance(preprocess, dict)
         inputs = {k: v for k, v in inputs.items()}  # make a copy
-
-        # TODO: support for easy preprocessing when state/action is spaces.Dict
-        # "state" and "action" are special keys in case of gym.spaces.Dict;
-        # apply the same preprocessing to each "state_x" and "action_y" if so.
-
-        # input_keys = list(inputs.keys())
-        # preproc_keys = list(preprocess.keys())
-        #
-        # if any('state_' in k for k in input_keys):
-        #     pass
 
         for key, layers in preprocess.items():
             if key not in inputs:

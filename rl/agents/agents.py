@@ -565,7 +565,8 @@ class Agent:
 
     def preprocess(self, state, evaluation=False):
         if isinstance(state, dict):
-            return {f'state_{k}': utils.to_tensor(v, expand_axis=0) for k, v in state.items()}
+            # return {f'state_{k}': utils.to_tensor(v, expand_axis=0) for k, v in state.items()}
+            return {k: utils.to_tensor(v, expand_axis=0) for k, v in state.items()}
 
         return utils.to_tensor(state, expand_axis=0)
 
@@ -1022,10 +1023,13 @@ class ParallelAgent(Agent):
         return episodic_rewards
 
     def preprocess(self, states: list, evaluation=False) -> list:
-        if isinstance(states[0], dict):
-            return [{f'state_{k}': v for k, v in s.items()} for s in states]
+        # if isinstance(states[0], dict):
+        #     return [{f'state_{k}': v for k, v in s.items()} for s in states]
+        #
+        # elif evaluation:
+        #     return tf.reshape(states[0], shape=(1,) + states[0].shape)
 
-        elif evaluation:
+        if evaluation and not isinstance(states[0], dict):
             return tf.reshape(states[0], shape=(1,) + states[0].shape)
 
         return states
