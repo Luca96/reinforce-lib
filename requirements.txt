@@ -6,6 +6,7 @@ tensorflow-addons==0.16.1
 box2d
 gym==0.22.0
 gym[box2d]
+# ale-py + gym[accept-rom-license]
 pygame
 # opencv-python
 # networkx

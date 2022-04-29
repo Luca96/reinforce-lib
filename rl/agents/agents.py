@@ -11,7 +11,7 @@ from rl import utils
 from rl.parameters import DynamicParameter
 from rl.environments.gym.parallel import AbstractParallelEnv, SequentialEnv
 from rl.memories import Memory, TransitionSpec
-from rl.agents.actions import ActionConverter, ParallelConverterWrapper
+from rl.agents.actions import ActionConverter, ParallelConverterWrapper, IdentityConverter
 
 from typing import List, Dict, Union, Tuple, Type, Optional
 
@@ -473,7 +473,7 @@ class Agent:
 
                 self.log(eval_rewards=eval_rewards)
                 print(f'[Evaluation] average return: {round(mean_rewards, 2)}, '
-                      f'std: {np.round(np.std(eval_rewards), 2)}')
+                      f'std: {round(np.std(eval_rewards).item(), 2)}')
 
                 if should_save:
                     if np.floor(mean_rewards) >= best_return:
@@ -489,6 +489,7 @@ class Agent:
         self.is_learning = False
         self.on_close(should_close)
 
+    # TODO: consent stochastic (not only deterministic) evaluation
     def evaluate(self, episodes: int, timesteps: int, render: Union[bool, int] = True,
                  should_close=False) -> np.ndarray:
         self.is_evaluating = True
@@ -653,7 +654,10 @@ class Agent:
 
         # then update the dynamic parameters according to the config file
         for name, param in self.dynamic_parameters.items():
-            param.load(config=self.config[name])
+            if name not in self.config:
+                print(f'[warning] parameter "{name}" not in config.json, using value: {round(param.value, 3)}')
+            else:
+                param.load(config=self.config[name])
 
         print('dynamic parameters loaded.')
 
@@ -1138,6 +1142,8 @@ class ParallelAgent(Agent):
             self.log(action_env=np.mean(action), **kwargs)
 
 
+# TODO: basic imitation learning agent
+# TODO: move IL & random agents to "baselines"?
 class RandomAgent(Agent):
     """Baseline agent that outputs random actions regardless the input state"""
 
@@ -1146,13 +1152,10 @@ class RandomAgent(Agent):
         kwargs['use_summary'] = False
 
         super().__init__(*args, name=name, **kwargs)
+        self.action_space = self.env.action_space
 
-    def _init_action_space(self):
-        action_space = self.env.action_space
-        self.action_space: gym.Space = action_space
-
-        assert isinstance(action_space, gym.Space)
-        self.convert_action = lambda a: a
+    def define_action_converter(self, kwargs: dict) -> IdentityConverter:
+        return IdentityConverter(space=self.env.action_space, **(kwargs or {}))
 
     def sample(self, *args, **kwargs):
         return self.action_space.sample()

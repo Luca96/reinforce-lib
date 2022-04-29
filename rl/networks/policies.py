@@ -9,8 +9,6 @@ from rl.agents import Agent
 from rl.networks import Network
 from rl.layers.distributions import DistributionLayer
 
-# from typing import Dict, Union
-
 
 @Network.register()
 class PolicyNetwork(Network):
@@ -24,15 +22,6 @@ class PolicyNetwork(Network):
         distribution: utils.DistributionOrDict = super().call(inputs, **kwargs)
 
         if isinstance(actions, dict) or tf.is_tensor(actions):
-            # log_prob = self.log_prob(distribution, actions)
-            # entropy = self.entropy(distribution)
-            #
-            # if entropy is None:
-            #     # estimate entropy
-            #     # TODO: or `entropy = -tf.reduce_mean(log_prob, axis=-1, keepdims=True)`?
-            #     entropy = -tf.reduce_mean(log_prob)
-            #
-            # return log_prob, entropy
             return self.log_prob_and_entropy(distribution, actions)
 
         return self.identity(distribution), self.mean(distribution), self.stddev(distribution), self.mode(distribution)
@@ -150,9 +139,6 @@ class DeterministicPolicyNetwork(Network):
         self.num_actions = agent.action_converter.num_actions
 
         super().__init__(agent, *args, log_prefix=log_prefix, **kwargs)
-
-    # def structure(self, inputs: Dict[str, Input], name='DeterministicPolicyNetwork', **kwargs) -> tuple:
-    #     return super().structure(inputs, name=name, **kwargs)
 
     def output_layer(self, layer: Layer, **kwargs) -> Layer:
         num_actions = self.num_actions

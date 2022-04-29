@@ -48,6 +48,19 @@ class ActionConverter:
         raise ValueError(f'Not supported action space: "{type(action_space)}".')
 
 
+class IdentityConverter(ActionConverter):
+    """A dummy action converter that just returns the given action as it is."""
+
+    def __init__(self, space: gym.spaces.Space, **kwargs):
+        assert not isinstance(space, (gym.spaces.Dict, gym.spaces.Tuple))
+
+        self.dtype = space.dtype
+        self.shape = space.shape
+
+    def convert(self, action):
+        return np.array(action, dtype=self.dtype).reshape(self.shape)
+
+
 class DiscreteConverter(ActionConverter):
     """Converts actions from discrete action-space"""
 

@@ -44,7 +44,8 @@ class TwinCriticNetwork(CriticNetwork):
         return inputs, (self.q1.output, self.q2.output)
 
     def output_layer(self, layer: Layer, **kwargs) -> Layer:
-        return Dense(units=self.agent.num_actions, **self.output_kwargs)(layer)
+        # return Dense(units=self.agent.num_actions, **self.output_kwargs)(layer)
+        return Dense(units=self.agent.num_actions, **kwargs)(layer)
 
     @tf.function
     def objective(self, batch: dict, reduction=tf.reduce_mean) -> tuple:

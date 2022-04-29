@@ -93,11 +93,12 @@ class CriticNetwork(Network):
 
 
 # TODO: support for discrete actions?
+# TODO: support for n-step returns, via `horizon`?
 class DDPG(Agent):
 
     def __init__(self, *args, name='ddpg', actor_lr: utils.DynamicType = 1e-4, critic_lr: utils.DynamicType = 1e-3,
-                 optimizer='adam', actor: dict = None, critic: dict = None, clip_norm=(None, None), polyak=0.95,
-                 memory_size=1024, noise: utils.DynamicType = 0, prioritized=False,
+                 optimizer='adam', actor: dict = None, critic: dict = None, clip_norm=(None, None), prioritized=False,
+                 memory_size=1024, noise: utils.DynamicType = 0, polyak: utils.DynamicType = 0.95,
                  alpha: utils.DynamicType = 0.6, beta: utils.DynamicType = 0.1, **kwargs):
         assert memory_size >= 1
         assert 0.0 < polyak <= 1.0
@@ -109,7 +110,7 @@ class DDPG(Agent):
         self.memory_size = int(memory_size)
         self.critic_lr = DynamicParameter.create(value=critic_lr)
         self.actor_lr = DynamicParameter.create(value=actor_lr)
-        self.polyak = float(polyak)
+        self.polyak = DynamicParameter.create(value=polyak)
         self.noise = DynamicParameter.create(value=noise)
         self.prioritized = bool(prioritized)
 
@@ -143,7 +144,7 @@ class DDPG(Agent):
         return TanhConverter(space=self.env.action_space, **(kwargs or {}))
 
     def act(self, state, deterministic=False, **kwargs) -> Tuple[tf.Tensor, dict, dict]:
-        greedy_action = self.actor(state, **kwargs)
+        greedy_action = self.actor(state, **kwargs)  # deterministic action
         debug = {}
 
         if (not deterministic) and (self.noise.value > 0.0):
@@ -174,6 +175,9 @@ class DDPG(Agent):
             super().learn(*args, **kwargs)
 
     def update(self):
+        if not self.memory.full_enough(amount=self.batch_size):
+            return self.memory.update_warning(self.batch_size)
+
         batch = self.memory.get_batch(batch_size=self.batch_size)
 
         self.critic.train_step(batch)
@@ -182,8 +186,8 @@ class DDPG(Agent):
         self.update_target_networks()
 
     def update_target_networks(self):
-        self.critic.update_target_network(polyak=self.polyak)
-        self.actor.update_target_network(polyak=self.polyak)
+        self.critic.update_target_network(polyak=self.polyak())
+        self.actor.update_target_network(polyak=self.polyak.value)
 
         self.log(target_actor_distance=self.actor.debug_target_network(),
                  target_critic_distance=self.critic.debug_target_network())

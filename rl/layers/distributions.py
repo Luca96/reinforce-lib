@@ -145,6 +145,7 @@ class Gaussian(DistributionLayer):
     @tf.function
     def forward_params(self, inputs) -> Tuple[tf.Tensor, tf.Tensor]:
         mean = self.mean(inputs)
+        # TODO: consider softplus, or elu + 1
         std = tf.exp(self.log_std(inputs))
 
         return self.reshape(mean), self.reshape(std)

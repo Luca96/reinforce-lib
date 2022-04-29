@@ -14,7 +14,7 @@ from rl.agents.dqn import DQN
 # Policy Opt. + Q-learning agents:
 from rl.agents.ddpg import DDPG
 from rl.agents.td3 import TD3
-from rl.agents.sac import SAC
+from rl.agents.sac import SAC, SACDiscrete
 
 # Distributional RL agent:
 # TODO: QR-DQN + check implementations

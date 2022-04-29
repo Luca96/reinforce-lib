@@ -31,7 +31,7 @@ def get(kwargs: Union[MyPreprocessingLayer, dict, str]) -> MyPreprocessingLayer:
         raise ValueError('Specify a name for preprocess layer.')
 
     name = name.lower()
-    assert name in ['clip', 'min-max', 'minmax', 'standard']
+    assert name in ['clip', 'min-max', 'minmax', 'standard', 'divide']
 
     if name == 'clip':
         return Clip(**kwargs)
@@ -41,6 +41,9 @@ def get(kwargs: Union[MyPreprocessingLayer, dict, str]) -> MyPreprocessingLayer:
 
     if name == 'standard':
         return StandardScaler(**kwargs)
+
+    if name == 'divide':
+        return Divide(**kwargs)
 
 
 class Clip(MyPreprocessingLayer):
@@ -120,3 +123,15 @@ class StandardScaler(MyPreprocessingLayer):
         self.var.assign(value=alpha * self.var + beta * var + gamma * (self.mean - mean) ** 2)
         self.std.assign(value=tf.sqrt(self.var) + self.eps)
         self.count.assign_add(num)
+
+
+class Divide(MyPreprocessingLayer):
+    """Divides the input by a given constant"""
+
+    def __init__(self, value: float, **kwargs):
+        super().__init__(**kwargs)
+
+        self.value = tf.constant(1.0 / value, dtype=tf.float32)
+
+    def call(self, x, **kwargs):
+        return x * self.value

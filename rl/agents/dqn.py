@@ -160,7 +160,7 @@ class DQN(Agent):
             action = tf.argmax(q_values, axis=-1)
         else:
             # random action (note: with prob e / |A| it can be still greedy)
-            action = self.rng.choice(len(self.num_classes))
+            action = self.rng.choice(self.num_classes)
 
         return action, {}, {}
 

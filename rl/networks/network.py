@@ -141,7 +141,6 @@ class Network(tf.keras.Model):
             self.clip_method = clip.lower()
             self.clip_norm = DynamicParameter.create(value=clip_norm)
 
-        # TODO: check `run_eagerly` and `jit_compile`
         super().compile(optimizer=self.optimizer, loss=self.objective, run_eagerly=True)
 
     def structure(self, inputs: Dict[str, tf.keras.Input], **kwargs) -> tuple:
@@ -231,8 +230,9 @@ class Network(tf.keras.Model):
             # TODO: also consider "regularization losses" in the loss fn
 
         trainable_vars = self.trainable_variables
-
         gradients = tape.gradient(loss, trainable_vars)
+
+        debug['weights_norm'] = utils.tf_global_norm(trainable_vars, from_norms=False)
         debug['gradient_norm'] = utils.tf_norm(gradients)
         debug['gradient_global_norm'] = utils.tf_global_norm(debug['gradient_norm'])
         debug['gradient_mean'] = tf.reduce_mean([tf.reduce_mean(g) for g in gradients])

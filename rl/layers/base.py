@@ -46,14 +46,21 @@ class ScaledInitializer(tfk.initializers.Initializer):
         return self.scaling * self.weight_init(shape=shape)
 
 
-class Sampling(tfk.layers.Layer):
+class Sampling(MyLayer):
     """Given mean and log-variance that parametrize a Gaussian, the layer samples from it by using the
        reparametrization trick.
         - https://keras.io/examples/generative/vae/
     """
 
-    def call(self, inputs, **kwargs):
+    def __init__(self, **kwargs):
+        super().__init__(extra_call_kwargs=['deterministic'], **kwargs)
+
+    @tf.function
+    def call(self, inputs, deterministic=True, **kwargs):
         mean, log_var = inputs
+
+        if deterministic:
+            return mean
 
         # sample from a Standard Normal
         epsilon = tf.random.normal(shape=tf.shape(mean))

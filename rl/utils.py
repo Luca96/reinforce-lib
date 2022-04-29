@@ -185,7 +185,7 @@ def set_random_seed(seed=None):
 
 
 def get_random_generator(seed=None) -> np.random.Generator:
-    """Returns a numpy's random generator instance"""
+    """Returns a numpy random generator instance"""
     if seed is not None:
         seed = int(seed)
         assert 0 <= seed < 2 ** 32
@@ -879,6 +879,11 @@ def mish(x):
         - https://www.tensorflow.org/addons/api_docs/python/tfa/activations/mish
     """
     return tf.multiply(x, tf.nn.tanh(tf.nn.softplus(x)))
+
+
+def nn_elu(x):
+    """Non-negative ELU activation"""
+    return tf.nn.elu(x) + 1.0
 
 
 @tf.function
