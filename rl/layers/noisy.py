@@ -99,6 +99,7 @@ class NoisyDense(Layer):
 
         self.built = True
 
+    # TODO: make deterministic if required?
     def call(self, inputs, **kwargs):
         # sample random variables from unit Gaussian
         noise_w, noise_b = self.sample_noise()

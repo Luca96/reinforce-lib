@@ -26,14 +26,6 @@ class ClippedPolicyNetwork(ActorNetwork):
         distribution: utils.DistributionOrDict = Network.call(self, inputs, **kwargs)
 
         if isinstance(actions, dict) or tf.is_tensor(actions):
-            # log_prob = self.log_prob(distribution, actions)
-            # entropy = self.entropy(distribution)
-            #
-            # if entropy is None:
-            #     # estimate entropy
-            #     entropy = -tf.reduce_mean(log_prob)
-            #
-            # return log_prob, entropy
             return self.log_prob_and_entropy(distribution, actions)
 
         new_actions = self.identity(distribution)
@@ -95,9 +87,6 @@ class ClippedPolicyNetwork(ActorNetwork):
 @Network.register()
 class ClippedValueNetwork(ValueNetwork):
     """Value network with clipped MSE objective"""
-
-    # def structure(self, inputs, name='ClippedValueNetwork', **kwargs) -> tuple:
-    #     return super().structure(inputs, name=name, **kwargs)
 
     @tf.function
     def objective(self, batch, reduction=tf.reduce_mean) -> tuple:

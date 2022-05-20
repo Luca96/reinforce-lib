@@ -64,11 +64,9 @@ class SequentialEnv(AbstractParallelEnv):
 
         if callable(env):
             self.make_env = lambda: env(**kwargs)
-            # self.envs = [env(**kwargs) for _ in range(self.num_environments)]
 
         elif isinstance(env, str):
             self.make_env = lambda: gym.make(id=env, **kwargs)
-            # self.envs = [gym.make(id=env, **kwargs) for _ in range(self.num_environments)]
         else:
             raise ValueError(f'Argument `env` must be "str" or "callable" not "{type(env)}".')
 
@@ -132,7 +130,6 @@ def work(make_env: CloudPickleWrapper, rank: int, num_envs: int, seed: int, remo
     """Process's work function. Based on:
         - https://github.com/openai/baselines/blob/master/baselines/common/vec_env/subproc_vec_env.py#L7-L36
     """
-
     def step(environment, action, index: int):
         state, reward, done, info = environment.step(action)
 
@@ -199,10 +196,6 @@ class MultiProcessEnv(AbstractParallelEnv):
             assert processes >= 1
 
         super().__init__(num, processes=int(processes))
-        # self.num_workers = int(processes)
-        #
-        # assert num >= self.num_workers
-        # self.num_environments = num
 
         # init processes and pipes
         self.pipes = [context.Pipe() for _ in range(self.num_workers)]
@@ -216,6 +209,9 @@ class MultiProcessEnv(AbstractParallelEnv):
                                      args=(env_fn, rank, amount, seed, worker_pipe, parent_pipe))
             self.workers.append(worker)
             rank += amount
+
+        # with context.Pool(processes=self.num_workers,) as pool:
+        #     pass
 
         # start processes
         for w in self.workers:
@@ -292,3 +288,28 @@ class MultiProcessEnv(AbstractParallelEnv):
 
     def get_evaluation_env(self) -> gym.Env:
         return self.make_env()
+
+
+if __name__ == '__main__':
+    from memory_profiler import profile
+
+    @profile
+    def sequential_env(num: int, env_name='CartPole-v1'):
+        env = SequentialEnv(env=env_name, num=num, seed=42)
+        env.reset()
+
+        for _ in range(100):
+            env.step([env.action_space.sample() for _ in range(16)])
+
+        env.close()
+
+    @profile
+    def multiproc_env(num: int, proc: int, env_name='CartPole-v1'):
+        env = MultiProcessEnv(env=env_name, num=num, seed=42, processes=proc)
+        env.reset()
+        for _ in range(100):
+            env.step([env.action_space.sample() for _ in range(num)])
+        env.close()
+
+    # sequential_env(num=16)
+    multiproc_env(num=16, proc=8)

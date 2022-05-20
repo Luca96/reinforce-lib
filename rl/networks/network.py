@@ -22,6 +22,7 @@ class Network(tf.keras.Model):
         self.agent = agent
         self.prefix = str(log_prefix)
         self.output_kwargs = kwargs.pop('output', {})
+        self._recurrent_layers: List[tf.keras.layers.RNN] = None
 
         # Optimization:
         self.optimizer = None
@@ -122,6 +123,19 @@ class Network(tf.keras.Model):
             print(f'\t{name:{spaces}} :: {class_}')
 
         print(']')
+
+    @property
+    def recurrent_layers(self):
+        if self._recurrent_layers is None:
+            layers = []
+
+            for layer in self.layers:
+                if isinstance(layer, tf.keras.layers.RNN):
+                    layers.append(layer)
+
+            self._recurrent_layers = layers
+
+        return self._recurrent_layers
 
     def compile(self, optimizer: Union[str, dict], clip_norm: utils.DynamicType = None, clip='global', **kwargs):
         assert isinstance(clip, str) and clip.lower() in ['local', 'global']
@@ -266,6 +280,10 @@ class Network(tf.keras.Model):
             inputs[name] = tf.keras.layers.Input(shape=shape, dtype=tf.float32, name=name)
 
         return inputs
+
+    def reset_state(self):
+        for rnn in self.recurrent_layers:
+            rnn.reset_state()
 
     def init_hack(self):
         """Weird hack to solve the annoying error when subclassing tf.keras.Model"""

@@ -3,6 +3,7 @@ import gym
 import numpy as np
 import tensorflow as tf
 
+from gym import spaces
 from typing import Dict, List, Union
 
 
@@ -22,10 +23,16 @@ class ActionConverter:
     @staticmethod
     def get(action_space: gym.Space, **kwargs) -> 'ActionConverter':
         """Returns an `ActionConverter` instance from given `action_space`"""
-        if isinstance(action_space, gym.spaces.Discrete):
+        if isinstance(action_space, spaces.Discrete):
             return DiscreteConverter(action_space, **kwargs)
 
-        if isinstance(action_space, gym.spaces.Box):
+        if isinstance(action_space, spaces.MultiBinary):
+            return BinaryConverter(action_space, **kwargs)
+
+        if isinstance(action_space, spaces.MultiDiscrete):
+            return MultiDiscreteConverter(action_space, **kwargs)
+
+        if isinstance(action_space, spaces.Box):
             if not action_space.is_bounded():
                 return ContinuousConverter(action_space, **kwargs)
 
@@ -34,25 +41,24 @@ class ActionConverter:
 
             return BetaConverter(action_space, **kwargs)
 
-        if isinstance(action_space, gym.spaces.Dict):
+        if isinstance(action_space, spaces.Dict):
             # only one nesting level is supported
             converters = {}
 
             for key, space in action_space.spaces.items():
-                assert isinstance(space, (gym.spaces.Discrete, gym.spaces.Box))
+                # assert isinstance(space, (spaces.Discrete, spaces.Box, spaces.MultiBinary))
                 converters[key] = ActionConverter.get(space, **kwargs.get(key, {}))
 
             return DictConverter(converters)
 
-        # TODO: support for MultiBinary and MultiDiscrete action spaces
         raise ValueError(f'Not supported action space: "{type(action_space)}".')
 
 
 class IdentityConverter(ActionConverter):
     """A dummy action converter that just returns the given action as it is."""
 
-    def __init__(self, space: gym.spaces.Space, **kwargs):
-        assert not isinstance(space, (gym.spaces.Dict, gym.spaces.Tuple))
+    def __init__(self, space: gym.Space, **kwargs):
+        assert not isinstance(space, (spaces.Dict, spaces.Tuple))
 
         self.dtype = space.dtype
         self.shape = space.shape
@@ -61,11 +67,25 @@ class IdentityConverter(ActionConverter):
         return np.array(action, dtype=self.dtype).reshape(self.shape)
 
 
+class BinaryConverter(ActionConverter):
+    """Converts actions from multi-binary space"""
+
+    def __init__(self, space: spaces.MultiBinary, **kwargs):
+        assert isinstance(space, spaces.MultiBinary)
+
+        self.num_actions = space.n
+        self.num_classes = 2
+
+    def convert(self, action):
+        action = tf.cast(tf.squeeze(action), dtype=tf.int32)
+        return action.numpy()
+
+
 class DiscreteConverter(ActionConverter):
     """Converts actions from discrete action-space"""
 
-    def __init__(self, space: gym.spaces.Discrete, **kwargs):
-        isinstance(space, gym.spaces.Discrete)
+    def __init__(self, space: spaces.Discrete, **kwargs):
+        assert isinstance(space, spaces.Discrete)
 
         self.start = space.start  # used to shift actions
         self.num_actions = 1
@@ -73,6 +93,20 @@ class DiscreteConverter(ActionConverter):
 
     def convert(self, action):
         action = tf.cast(tf.squeeze(action + self.start), dtype=tf.int32)
+        return action.numpy()
+
+
+class MultiDiscreteConverter(ActionConverter):
+    """Converts actions from a multi-discrete space"""
+
+    def __init__(self, space: spaces.MultiDiscrete, **kwargs):
+        assert isinstance(space, spaces.MultiDiscrete)
+
+        self.num_actions = space.shape[0]
+        self.num_classes = np.max(space.nvec)
+
+    def convert(self, action):
+        action = tf.cast(tf.reshape(action, shape=(self.num_actions,)), dtype=tf.int32)
         return action.numpy()
 
 

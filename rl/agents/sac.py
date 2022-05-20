@@ -421,10 +421,3 @@ class SACDiscrete(SAC):
 
         # debug
         self.log(alpha_loss=alpha_loss, alpha_target=target_alpha, alpha_gradient=grads)
-
-
-if __name__ == '__main__':
-    agent = SACDiscrete(env='CartPole-v1', batch_size=16, use_summary=False)
-    # agent.summary()
-    agent.learn(episodes=100, timesteps=100, render=False, save=False,
-                evaluation=dict(freq=10, episodes=10))

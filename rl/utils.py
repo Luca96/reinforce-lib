@@ -550,7 +550,6 @@ def print_info(gym_env):
     print('Metadata:', gym_env.metadata)
 
 
-# TODO: support for MultiBinary
 def space_to_flat_spec(space: gym.Space, name: str, depth=0, max_depth=np.inf) -> Dict[str, tuple]:
     """From a gym.Space object returns a flat dictionary str -> tuple.
        Naming convention:
@@ -571,6 +570,9 @@ def space_to_flat_spec(space: gym.Space, name: str, depth=0, max_depth=np.inf) -
 
     elif isinstance(space, spaces.MultiDiscrete):
         spec[name] = space.nvec.shape
+
+    elif isinstance(space, spaces.MultiBinary):
+        spec[name] = (space.n,)
 
     elif isinstance(space, spaces.Box):
         spec[name] = space.shape
@@ -595,6 +597,7 @@ def space_to_flat_spec(space: gym.Space, name: str, depth=0, max_depth=np.inf) -
     return spec
 
 
+# TODO: support for MultiBinary
 def space_to_spec(space: gym.Space) -> Union[tuple, Dict[str, Union[tuple, dict]]]:
     """From a gym.Space object returns its shape-specification, i.e.
          - tuple: if space is Box or Discrete

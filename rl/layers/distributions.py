@@ -40,12 +40,15 @@ class DistributionLayer(MyLayer):
             return Categorical(num_actions=1, num_classes=num_classes, **kwargs)
 
         if isinstance(action_space, gym.spaces.MultiBinary):
+            # TODO: independent?
             return Bernoulli(num_actions=action_space.n, **kwargs)
 
         if isinstance(action_space, gym.spaces.MultiDiscrete):
             # TODO: multinomial or sample/independent categorical?
-            # TODO: see https://www.tensorflow.org/probability/api_docs/python/tfp/layers/CategoricalMixtureOfOneHotCategorical
-            raise NotImplementedError
+            num_actions = action_space.shape[0]
+            num_classes = np.max(action_space.nvec)
+
+            return Categorical(num_actions=num_actions, num_classes=num_classes)
 
         if isinstance(action_space, gym.spaces.Box):
             if action_space.is_bounded():
