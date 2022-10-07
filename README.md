@@ -133,6 +133,8 @@ If you use this library for your own projects and research, please cite it.
   title={Reinforce-lib: A Reinforcement Learning Library for Scientific Research},
   author={Anzalone, L and Bonacorsi, D},
   booktitle={International Symposium on Grids \& Clouds 2022},
+  doi = "10.22323/1.415.0018",
+  journal = "PoS",
   pages={18},
   year={2022}
 }
