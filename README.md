@@ -11,6 +11,8 @@ Reinforce-lib is a Deep Reinforcement Learning library built on top of [TensorFl
 [tensorflow-probability](https://www.tensorflow.org/probability), [NumPy](https://numpy.org/), and 
 [Gym](https://github.com/openai/gym). It's modular and designed to be simple to use, understand, and extend.
 
+An introduction of both reinforcement learning and the library, is available at our [paper](https://pos.sissa.it/415/018/pdf).
+
 Installation:
 ```bash
 # clone the repository first
@@ -126,4 +128,12 @@ tensorboard --logdir <your-path>/logs/<agent-name>
 
 ## How to Cite
 If you use this library for your own projects and research, please cite it.
-A proper citation will be provided soon. For now just mention the repository.
+```bibtex
+@inproceedings{anzalone2022reinforce,
+  title={Reinforce-lib: A Reinforcement Learning Library for Scientific Research},
+  author={Anzalone, L and Bonacorsi, D},
+  booktitle={International Symposium on Grids \& Clouds 2022},
+  pages={18},
+  year={2022}
+}
+```
